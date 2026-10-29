@@ -3,7 +3,7 @@
 ## 1. Каркас приложения
 
 - [x] 1.1 Создать cargo-проект (bin `minisnap`), добавить зависимости `objc2`/`objc2-app-kit`/`objc2-foundation`/`objc2-screen-capture-kit`/`global-hotkey`/`serde`/`toml`/`dirs`, проверить `cargo build`
-- [ ] 1.2 Настроить App-жизнь: `NSApplication` с accessory-политикой, Info.plist c `LSUIElement=true` и скрипт сборки `.app`-бандла; проверить запуск из бандла: нет иконки в Dock, нет окон
+- [x] 1.2 Настроить App-жизнь: `NSApplication` с accessory-политикой, Info.plist c `LSUIElement=true` и скрипт сборки `.app`-бандла; проверить запуск из бандла: нет иконки в Dock, нет окон
 - [ ] 1.3 Tray и меню: `NSStatusItem` с монохромной заглушкой иконки, меню «Capture Frozen Area» / «Preferences» / «Quit» с разделителем; проверить клик по всем пунктам (capture/prefs пока пустые действия, quit завершает процесс)
 
 ## 2. Конфиг и глобальные хоткеи

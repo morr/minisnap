@@ -1,1 +1,5 @@
-fn main() { println!("minisnap"); }
+mod app;
+
+fn main() {
+    app::run();
+}
