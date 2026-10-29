@@ -1,0 +1,81 @@
+[package]
+name = "minisnap"
+version = "0.1.0"
+edition = "2021"
+description = "macOS menu-bar screenshot utility: frozen-area capture"
+license = "MIT"
+
+[[bin]]
+name = "minisnap"
+path = "src/main.rs"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSDictionary",
+    "NSNotification",
+    "NSTimer",
+    "NSRunLoop",
+    "NSURL",
+    "NSData",
+    "NSSet",
+
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSWindowTabGroup",
+    "NSView",
+    "NSEvent",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSMenu",
+    "NSMenuItem",
+    "NSAlert",
+    "NSPasteboard",
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSWorkspace",
+    "NSTextField",
+    "NSText",
+    "NSButton",
+    "NSStackView",
+    "NSColor",
+    "NSLayoutAnchor",
+    "NSLayoutConstraint",
+] }
+objc2-quartz-core = { version = "0.3", features = [
+    "CALayer",
+    "CAShapeLayer",
+    "CATextLayer",
+    "CAAnimation",
+    "CAMediaTiming",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGImage",
+    "CGColor",
+    "CGColorSpace",
+    "CGDirectDisplay",
+    "CGWindow",
+    "CGGeometry",
+    "CGContext",
+    "CGBitmapContext",
+] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCScreenshotManager",
+    "SCShareableContent",
+] }
+objc2-core-foundation = "0.3"
+block2 = "0.6"
+global-hotkey = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+
+[profile.release]
+lto = true
+codegen-units = 1
