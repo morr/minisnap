@@ -1,15 +1,18 @@
 //! Application bootstrap: process life, activation policy, run loop,
 //! tray icon and the main menu.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::ptr::NonNull;
 use std::sync::mpsc;
 
-use objc2::rc::Retained;
+use block2::RcBlock;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSFontWeightSemibold,
-    NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask,
+    NSEventType, NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem,
+    NSStatusBar, NSStatusItem,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_foundation::{
@@ -21,7 +24,7 @@ use crate::config::Config;
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
 use crate::overlay::{Overlay, OverlayOutcome};
 use crate::prefs;
-use global_hotkey::hotkey::HotKey;
+use global_hotkey::hotkey::{HotKey, Modifiers};
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
 /// brand icon appears.
@@ -64,6 +67,12 @@ struct AppIvars {
     // Created lazily on the first Preferences click; kept afterwards so
     // reopening focuses the existing window.
     prefs: RefCell<Option<prefs::PrefsWindow>>,
+    // The hotkey row currently recording a new combination, if any.
+    recording: Cell<Option<isize>>,
+    // Permanent local key-event monitor that serves the recorder while
+    // `recording` is set; installed once at startup.
+    #[allow(dead_code)]
+    monitor: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -113,8 +122,11 @@ define_class!(
 
         #[unsafe(method(prefsRowClicked:))]
         fn prefs_row_clicked(&self, sender: Option<&AnyObject>) {
-            let _ = sender;
-            eprintln!("prefs row clicked: recording not implemented yet");
+            let Some(sender) = sender else { return };
+            // SAFETY: the sender is the clicked NSButton; `tag` is the
+            // NSView accessor we stamped on the button when building.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            self.start_recording(tag);
         }
 
         #[unsafe(method(quit:))]
@@ -244,6 +256,8 @@ impl AppController {
             jobs_rx: RefCell::new(jobs_rx),
             overlay: RefCell::new(overlay),
             prefs: RefCell::new(None),
+            recording: Cell::new(None),
+            monitor: RefCell::new(None),
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -274,6 +288,24 @@ impl AppController {
                 Some(&NSApplicationDidChangeScreenParametersNotification),
                 None,
             );
+        }
+
+        // The key-event monitor serves the hotkey recorder; it passes every
+        // event through unless a prefs row is recording.
+        let weak = Weak::new(&*this);
+        let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let Some(controller) = weak.load() else {
+                return event.as_ptr();
+            };
+            controller.recorded_key_event(event)
+        });
+        match unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
+        } {
+            Some(monitor) => {
+                this.ivars().monitor.borrow_mut().replace(monitor);
+            }
+            None => eprintln!("prefs: cannot install the key event monitor"),
         }
 
         this.schedule_tick(mtm);
@@ -343,6 +375,103 @@ impl AppController {
         unsafe {
             NSRunLoop::currentRunLoop().addTimer_forMode(&timer, &NSDefaultRunLoopMode);
         }
+    }
+
+    /// Begin recording a new combination for the row with the given tag.
+    fn start_recording(&self, row: isize) {
+        if row != prefs::ROW_CAPTURE && row != prefs::ROW_OPEN_LATEST {
+            return;
+        }
+        if self.ivars().recording.get().is_some() {
+            return;
+        }
+        self.ivars().recording.set(Some(row));
+        self.update_prefs_row_titles();
+    }
+
+    /// Local key-event monitor callback. While a row records, the first
+    /// keydown fixes the new combination (the event is swallowed); a bare
+    /// Esc cancels. Everything passes through untouched when not recording.
+    fn recorded_key_event(&self, event: NonNull<NSEvent>) -> *mut NSEvent {
+        let Some(row) = self.ivars().recording.get() else {
+            return event.as_ptr();
+        };
+        let pointer = event.as_ptr();
+        let event = unsafe { event.as_ref() };
+        if event.r#type() != NSEventType::KeyDown {
+            return pointer;
+        }
+        let modifiers = hotkeys::modifiers_from_flags(event.modifierFlags());
+        let keycode = event.keyCode();
+        if keycode == 0x35 && modifiers == Modifiers::empty() {
+            // Bare Esc: cancel the recording, keep the previous combination.
+            eprintln!("prefs: recording cancelled");
+            self.finish_recording(None);
+            return std::ptr::null_mut();
+        }
+        let Some(key) = hotkeys::scancode_to_key(keycode) else {
+            eprintln!("prefs: unknown key code {keycode:#04x}, still recording");
+            return std::ptr::null_mut();
+        };
+        let hotkey =
+            HotKey::new(if modifiers.is_empty() { None } else { Some(modifiers) }, key);
+        self.finish_recording(Some((row, hotkey)));
+        std::ptr::null_mut()
+    }
+
+    /// Apply (or cancel) a recorded combination: persist the config,
+    /// re-register the global hotkeys and refresh menu + row titles.
+    fn finish_recording(&self, recorded: Option<(isize, HotKey)>) {
+        self.ivars().recording.set(None);
+        if let Some((row, hotkey)) = recorded {
+            let mut config = self.ivars().config.borrow_mut();
+            match row {
+                prefs::ROW_CAPTURE => config.capture_hotkey = hotkey,
+                prefs::ROW_OPEN_LATEST => config.open_hotkey = hotkey,
+                _ => {}
+            }
+            if let Some(path) = Config::standard_path() {
+                if let Err(e) = config.save_to(&path) {
+                    eprintln!("prefs: cannot save config: {e}");
+                }
+            }
+            self.ivars()
+                .hotkeys
+                .borrow_mut()
+                .apply(config.capture_hotkey, config.open_hotkey);
+            Self::apply_menu_hotkey(&self.ivars().capture_item, &config.capture_hotkey);
+            Self::apply_menu_hotkey(&self.ivars().open_latest_item, &config.open_hotkey);
+            eprintln!(
+                "prefs: hotkeys applied: capture={} open={}",
+                config.capture_hotkey, config.open_hotkey
+            );
+        }
+        self.update_prefs_row_titles();
+    }
+
+    /// Refresh the two row buttons from the config; the row being recorded
+    /// shows the prompt instead of its combination.
+    fn update_prefs_row_titles(&self) {
+        let prefs_guard = self.ivars().prefs.borrow();
+        let Some(prefs_window) = prefs_guard.as_ref() else {
+            return;
+        };
+        let config = self.ivars().config.borrow();
+        let recording = self.ivars().recording.get();
+        let capture_title = match recording {
+            Some(row) if row == prefs::ROW_CAPTURE => "Press keys…".to_string(),
+            _ => hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
+        };
+        let open_title = match recording {
+            Some(row) if row == prefs::ROW_OPEN_LATEST => "Press keys…".to_string(),
+            _ => hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
+        };
+        prefs_window
+            .capture_button
+            .setTitle(&NSString::from_str(&capture_title));
+        prefs_window
+            .open_button
+            .setTitle(&NSString::from_str(&open_title));
     }
 
     /// Open the newest saved shot; shared by the tray menu and the open

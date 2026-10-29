@@ -236,6 +236,144 @@ pub fn key_symbol(key: Code) -> String {
     }
 }
 
+/// Map AppKit event modifier flags to `global_hotkey` modifiers (used by
+/// the preferences recorder).
+pub fn modifiers_from_flags(flags: NSEventModifierFlags) -> Modifiers {
+    let mut mods = Modifiers::empty();
+    if flags.contains(NSEventModifierFlags::Control) {
+        mods.insert(Modifiers::CONTROL);
+    }
+    if flags.contains(NSEventModifierFlags::Option) {
+        mods.insert(Modifiers::ALT);
+    }
+    if flags.contains(NSEventModifierFlags::Shift) {
+        mods.insert(Modifiers::SHIFT);
+    }
+    if flags.contains(NSEventModifierFlags::Command) {
+        mods.insert(Modifiers::META);
+    }
+    mods
+}
+
+/// Reverse of the Carbon keycodes `global-hotkey` registers with:
+/// `NSEvent.keyCode` → `Code`, for the preferences recorder.
+pub fn scancode_to_key(scan: u16) -> Option<Code> {
+    Some(match scan {
+        0x00 => Code::KeyA,
+        0x01 => Code::KeyS,
+        0x02 => Code::KeyD,
+        0x03 => Code::KeyF,
+        0x04 => Code::KeyH,
+        0x05 => Code::KeyG,
+        0x06 => Code::KeyZ,
+        0x07 => Code::KeyX,
+        0x08 => Code::KeyC,
+        0x09 => Code::KeyV,
+        0x0a => Code::IntlBackslash,
+        0x0b => Code::KeyB,
+        0x0c => Code::KeyQ,
+        0x0d => Code::KeyW,
+        0x0e => Code::KeyE,
+        0x0f => Code::KeyR,
+        0x10 => Code::KeyY,
+        0x11 => Code::KeyT,
+        0x12 => Code::Digit1,
+        0x13 => Code::Digit2,
+        0x14 => Code::Digit3,
+        0x15 => Code::Digit4,
+        0x16 => Code::Digit6,
+        0x17 => Code::Digit5,
+        0x18 => Code::Equal,
+        0x19 => Code::Digit9,
+        0x1a => Code::Digit7,
+        0x1b => Code::Minus,
+        0x1c => Code::Digit8,
+        0x1d => Code::Digit0,
+        0x1e => Code::BracketRight,
+        0x1f => Code::KeyO,
+        0x20 => Code::KeyU,
+        0x21 => Code::BracketLeft,
+        0x22 => Code::KeyI,
+        0x23 => Code::KeyP,
+        0x24 => Code::Enter,
+        0x25 => Code::KeyL,
+        0x26 => Code::KeyJ,
+        0x27 => Code::Quote,
+        0x28 => Code::KeyK,
+        0x29 => Code::Semicolon,
+        0x2a => Code::Backslash,
+        0x2b => Code::Comma,
+        0x2c => Code::Slash,
+        0x2d => Code::KeyN,
+        0x2e => Code::KeyM,
+        0x2f => Code::Period,
+        0x30 => Code::Tab,
+        0x31 => Code::Space,
+        0x32 => Code::Backquote,
+        0x33 => Code::Backspace,
+        0x35 => Code::Escape,
+        0x39 => Code::CapsLock,
+        0x40 => Code::F17,
+        0x41 => Code::NumpadDecimal,
+        0x43 => Code::NumpadMultiply,
+        0x45 => Code::NumpadAdd,
+        0x46 => Code::PrintScreen,
+        0x47 => Code::NumLock,
+        0x48 => Code::AudioVolumeUp,
+        0x49 => Code::AudioVolumeDown,
+        0x4a => Code::AudioVolumeMute,
+        0x4b => Code::NumpadDivide,
+        0x4c => Code::NumpadEnter,
+        0x4e => Code::NumpadSubtract,
+        0x4f => Code::F18,
+        0x50 => Code::F19,
+        0x51 => Code::NumpadEqual,
+        0x52 => Code::Numpad0,
+        0x53 => Code::Numpad1,
+        0x54 => Code::Numpad2,
+        0x55 => Code::Numpad3,
+        0x56 => Code::Numpad4,
+        0x57 => Code::Numpad5,
+        0x58 => Code::Numpad6,
+        0x59 => Code::Numpad7,
+        0x5a => Code::F20,
+        0x5b => Code::Numpad8,
+        0x5c => Code::Numpad9,
+        0x5d => Code::IntlYen,
+        0x5e => Code::IntlRo,
+        0x5f => Code::NumpadComma,
+        0x60 => Code::F5,
+        0x61 => Code::F6,
+        0x62 => Code::F7,
+        0x63 => Code::F3,
+        0x64 => Code::F8,
+        0x65 => Code::F9,
+        0x66 => Code::Lang2,
+        0x67 => Code::F11,
+        0x68 => Code::Lang1,
+        0x69 => Code::F13,
+        0x6a => Code::F16,
+        0x6b => Code::F14,
+        0x6d => Code::F10,
+        0x6f => Code::F12,
+        0x71 => Code::F15,
+        0x72 => Code::Help,
+        0x73 => Code::Home,
+        0x74 => Code::PageUp,
+        0x75 => Code::Delete,
+        0x76 => Code::F4,
+        0x77 => Code::End,
+        0x78 => Code::F2,
+        0x79 => Code::PageDown,
+        0x7a => Code::F1,
+        0x7b => Code::ArrowLeft,
+        0x7c => Code::ArrowRight,
+        0x7d => Code::ArrowDown,
+        0x7e => Code::ArrowUp,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +405,33 @@ mod tests {
     fn system_modifier_order_is_control_option_shift_command() {
         let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::META;
         assert_eq!(combo(all, Code::Digit5), "⌃⌥⇧⌘5");
+    }
+
+    #[test]
+    fn event_flags_decode_into_modifiers() {
+        assert_eq!(
+            modifiers_from_flags(NSEventModifierFlags::Option | NSEventModifierFlags::Command),
+            Modifiers::ALT | Modifiers::META
+        );
+        assert_eq!(
+            modifiers_from_flags(NSEventModifierFlags(0)),
+            Modifiers::empty()
+        );
+        // CapsLock and Function bits are ignored.
+        let extra = NSEventModifierFlags(1 << 16) | NSEventModifierFlags(1 << 23);
+        assert_eq!(modifiers_from_flags(extra), Modifiers::empty());
+    }
+
+    #[test]
+    fn scancodes_decode_for_recorder() {
+        assert_eq!(scancode_to_key(0x17), Some(Code::Digit5));
+        assert_eq!(scancode_to_key(0x1d), Some(Code::Digit0));
+        assert_eq!(scancode_to_key(0x00), Some(Code::KeyA));
+        assert_eq!(scancode_to_key(0x35), Some(Code::Escape));
+        assert_eq!(scancode_to_key(0x7a), Some(Code::F1));
+        assert_eq!(scancode_to_key(0x7b), Some(Code::ArrowLeft));
+        assert_eq!(scancode_to_key(0x31), Some(Code::Space));
+        assert_eq!(scancode_to_key(0x36), None, "unknown keycode");
     }
 
     #[test]
