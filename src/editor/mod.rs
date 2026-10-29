@@ -8,52 +8,10 @@
 
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGColorSpace, CGImage, CGImageAlphaInfo, CGContext};
-use objc2_core_graphics::CGBitmapContextCreateImage;
+use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use serde::{Deserialize, Serialize};
 
-// The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
-// only wraps the block-based adaptive variant).
-extern "C-unwind" {
-    fn CGBitmapContextCreate(
-        data: *mut std::ffi::c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: &CGColorSpace,
-        bitmap_info: u32,
-    ) -> *mut CGContext;
-}
-
-/// Draw `image` into a fresh bitmap context of the given pixel size and
-/// return the resulting image. A plain draw-then-snapshot keeps the source
-/// orientation (image → context → image round trip does not flip).
-pub(crate) fn redraw_at_size(image: &CGImage, width: usize, height: usize) -> Option<CFRetained<CGImage>> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let space = CGColorSpace::new_device_rgb()?;
-    // SAFETY: the context owns its buffer for the lifetime of this function;
-    // the snapshot below copies it.
-    let ctx_ptr = unsafe {
-        CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            width,
-            height,
-            8,
-            width * 4,
-            &space,
-            CGImageAlphaInfo::PremultipliedLast.0,
-        )
-    };
-    // SAFETY: ctx_ptr comes from a Create-rule constructor; on success we
-    // take ownership of the +1 reference.
-    let ctx = unsafe { std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))? };
-    let full = CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64));
-    CGContext::draw_image(Some(&ctx), full, Some(image));
-    CGBitmapContextCreateImage(Some(&ctx))
-}
+pub mod render;
 
 /// RGBA color with components in 0..1 (straight alpha; strokes are opaque).
 pub type Rgba = [f64; 4];
@@ -303,6 +261,19 @@ fn image_size(image: &CGImage) -> (f64, f64) {
         CGImage::width(Some(image)) as f64,
         CGImage::height(Some(image)) as f64,
     )
+}
+
+/// Draw `image` into a fresh bitmap context of the given pixel size and
+/// return the resulting image. A plain draw-then-snapshot keeps the source
+/// orientation (image → context → image round trip does not flip).
+fn redraw_at_size(image: &CGImage, width: usize, height: usize) -> Option<CFRetained<CGImage>> {
+    let ctx = render::bitmap_context(width, height)?;
+    CGContext::draw_image(
+        Some(&ctx),
+        CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64)),
+        Some(image),
+    );
+    CGBitmapContextCreateImage(Some(&ctx))
 }
 
 /// Shift every coordinate of an element by a delta.
@@ -730,7 +701,7 @@ mod tests {
     }
 
     /// The image's raw RGBA bytes, top row first (the CGImage's own data).
-    fn pixel_bytes(image: &CGImage) -> Vec<u8> {
+    pub(crate) fn pixel_bytes(image: &CGImage) -> Vec<u8> {
         let provider = CGImage::data_provider(Some(image)).expect("data provider");
         let data: CFRetained<CFData> = CGDataProvider::data(Some(&provider)).expect("data");
         data.to_vec()
