@@ -8,7 +8,7 @@ use objc2_core_text::{kCTFontAttributeName, CTFont, CTLine};
 use super::{Point, Rgba};
 
 /// The font for text and callout annotations (covers Cyrillic).
-const FONT_NAME: &str = "Helvetica-Bold";
+pub(crate) const FONT_NAME: &str = "Helvetica-Bold";
 
 /// White halo stroke width as a fraction of the font size.
 const HALO_FRACTION: f64 = 0.125;

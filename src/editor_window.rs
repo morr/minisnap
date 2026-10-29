@@ -7,19 +7,22 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
     define_class, extern_methods, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSEvent, NSGraphicsContext,
-    NSImage, NSImageSymbolConfiguration, NSPopover, NSScreen, NSStackView,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
+    NSEvent, NSFocusRingType, NSFont, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
+    NSPopover, NSScreen, NSStackView, NSTextField, NSTextFieldDelegate,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGImage, CGContext};
-use objc2_foundation::{NSString, NSRectEdge};
+use objc2_foundation::{NSString, NSNotification, NSRectEdge};
 
+use crate::editor::hit_test::{Hit, top_hit};
+use crate::editor::text;
 use crate::editor::{render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba};
 
 /// The dark backdrop the frame sits on.
@@ -40,6 +43,24 @@ const DEFAULT_STROKE_WIDTH: f64 = 4.0;
 /// A drag shorter than this (in image pixels) is a plain click, not a
 /// drawn element.
 const MIN_DRAG_PX: f64 = 4.0;
+
+/// Font size of new text and callout elements, in image pixels.
+const DEFAULT_TEXT_SIZE_PX: f64 = 32.0;
+
+/// Offset of a new callout's text block from its tip, in image pixels.
+const CALLOUT_TEXT_OFFSET_PX: f64 = 16.0;
+
+/// Width of the field editor for new (empty) text, in view points.
+const TEXT_EDITOR_WIDTH_PT: f64 = 200.0;
+
+/// What the open field editor is editing.
+#[derive(Clone, Copy)]
+enum TextTarget {
+    /// A brand-new text or callout element.
+    New { origin: Point, callout: bool },
+    /// An existing text/callout element being re-edited.
+    Existing { id: u64 },
+}
 
 /// Color presets offered by the popover; magenta is the default.
 const COLOR_PRESETS: [Rgba; 8] = [
@@ -124,6 +145,10 @@ struct EditorIvars {
     /// The element being drawn by the current drag, if any; committed on
     /// mouse-up.
     draft: RefCell<Option<ElementKind>>,
+    /// The open field editor (text/callout input), if any.
+    text_editor: RefCell<Option<Retained<NSTextField>>>,
+    /// What the open field editor will commit.
+    text_target: Cell<Option<TextTarget>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -153,6 +178,8 @@ define_class!(
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
                 draft: RefCell::new(None),
+                text_editor: RefCell::new(None),
+                text_target: Cell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -234,6 +261,17 @@ define_class!(
             // NSControl accessor.
             let value: f64 = unsafe { msg_send![sender, doubleValue] };
             self.ivars().stroke_width.set(value);
+        }
+    }
+
+    // SAFETY: only the optional end-editing callback is implemented; the
+    // canvas view outlives the field editor it parents.
+    unsafe impl NSControlTextEditingDelegate for EditorView {}
+
+    unsafe impl NSTextFieldDelegate for EditorView {
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn __control_text_did_end_editing(&self, _notification: &NSNotification) {
+            self.commit_text_editor();
         }
     }
 );
@@ -322,7 +360,9 @@ impl EditorView {
         let (sx, sy) = (bw / iw as f64, bh / ih as f64);
 
         // The composite content: base frame + elements, drawn in image
-        // pixel units (`draw_elements` applies its own Y flip).
+        // pixel units (`draw_elements` applies its own Y flip). The
+        // element being edited in place is hidden so it doesn't double
+        // under the transparent field editor.
         CGContext::save_g_state(Some(&cg));
         CGContext::scale_ctm(Some(&cg), sx, sy);
         CGContext::draw_image(
@@ -330,7 +370,22 @@ impl EditorView {
             CGRect::new(CGPoint::ZERO, CGSize::new(iw as f64, ih as f64)),
             Some(base),
         );
-        render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
+        let editing = match ivars.text_target.get() {
+            Some(TextTarget::Existing { id }) => Some(id),
+            _ => None,
+        };
+        if let Some(id) = editing {
+            let visible: Vec<Element> = shot
+                .doc
+                .elements()
+                .iter()
+                .filter(|el| el.id != id)
+                .cloned()
+                .collect();
+            render::draw_elements(&cg, base, ih as f64, &visible);
+        } else {
+            render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
+        }
         CGContext::restore_g_state(Some(&cg));
 
         // Live preview of the element being dragged; view-only, it never
@@ -438,9 +493,34 @@ impl EditorView {
             Tool::Blur => ElementKind::Blur {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
             },
-            // Text/callout and crop/resize have their own click protocols
-            // (later tasks); nothing to draw with them yet.
-            Tool::Text | Tool::Callout | Tool::Crop | Tool::Resize => return,
+            // Text and callout take the click, not a drag: finish any
+            // in-flight edit, then open (or re-open) the field editor.
+            Tool::Text | Tool::Callout => {
+                self.commit_text_editor();
+                let callout = ivars.tool.get() == Tool::Callout;
+                // A click on an existing text/callout re-edits it in place.
+                let existing = ivars
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|shot| top_hit(shot.doc.elements(), point))
+                    .and_then(|hit| match hit {
+                        Hit::Body(id) => Some(id),
+                        Hit::End(..) => None,
+                    })
+                    .filter(|id| {
+                        ivars.shot.borrow().as_ref().and_then(|shot| shot.doc.element(*id)).is_some_and(
+                            |el| matches!(el.kind, ElementKind::Text { .. } | ElementKind::Callout { .. }),
+                        )
+                    });
+                match existing {
+                    Some(id) => self.begin_text_edit(TextTarget::Existing { id }),
+                    None => self.begin_text_edit(TextTarget::New { origin: point, callout }),
+                }
+                return;
+            }
+            // Crop/resize have their own click protocol (later task).
+            Tool::Crop | Tool::Resize => return,
         };
         // A drawing interaction starts from a clean selection; if this
         // drag ends up a plain click, that is the "click on empty space
@@ -496,10 +576,8 @@ impl EditorView {
             ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
                 *rect = Rect::new(rect.x, rect.y, point.x - rect.x, point.y - rect.y);
             }
-            ElementKind::Pen { points, .. } => {
-                if points.last() != Some(&point) {
-                    points.push(point);
-                }
+            ElementKind::Pen { points, .. } if points.last() != Some(&point) => {
+                points.push(point);
             }
             _ => {}
         }
@@ -529,6 +607,197 @@ impl EditorView {
     /// Schedule a full redraw of the canvas.
     fn redraw(&self) {
         self.setNeedsDisplayInRect(self.bounds());
+    }
+
+    /// Scale factors from image pixels to view points.
+    fn view_scale(&self) -> (f64, f64) {
+        let bounds = self.bounds();
+        let (iw, ih) = self.image_size();
+        if iw == 0 || ih == 0 {
+            return (1.0, 1.0);
+        }
+        (bounds.size.width / iw as f64, bounds.size.height / ih as f64)
+    }
+
+    /// View-space rect for the field editor over a text block whose
+    /// top-left sits at `origin` (image pixels), holding `text` (may be
+    /// empty) at `size` image pixels.
+    fn text_editor_frame(&self, origin: Point, text: &str, size: f64) -> CGRect {
+        let bounds = self.bounds();
+        let (sx, sy) = self.view_scale();
+        let font_pt = (size * sy).max(9.0);
+        let width = if text.is_empty() {
+            TEXT_EDITOR_WIDTH_PT
+        } else {
+            let width_px = text::measure(text, size).map(|m| m.width).unwrap_or(0.0);
+            (width_px * sx).max(TEXT_EDITOR_WIDTH_PT) + 12.0
+        };
+        let height = font_pt * 1.6 + 6.0;
+        let x = origin.x * sx - 3.0;
+        let y_top = bounds.size.height - origin.y * sy;
+        CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
+    }
+
+    /// Open the field editor for `target`: a transparent single-line text
+    /// field over the text block. The commit happens in
+    /// `controlTextDidEndEditing` — on Enter, on a click elsewhere, or on
+    /// Esc (which reverts first, so it reads as cancel).
+    fn begin_text_edit(&self, target: TextTarget) {
+        let ivars = self.ivars();
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let (initial, frame, color, size_px) = match target {
+            TextTarget::New { origin, callout } => {
+                let size = DEFAULT_TEXT_SIZE_PX;
+                let anchor = if callout {
+                    Point::new(
+                        origin.x + CALLOUT_TEXT_OFFSET_PX,
+                        (origin.y - size * 1.5).max(0.0),
+                    )
+                } else {
+                    origin
+                };
+                (
+                    String::new(),
+                    self.text_editor_frame(anchor, "", size),
+                    ivars.color.get(),
+                    size,
+                )
+            }
+            TextTarget::Existing { id } => {
+                let shot_guard = ivars.shot.borrow();
+                let Some(shot) = shot_guard.as_ref() else {
+                    return;
+                };
+                let Some(el) = shot.doc.element(id) else {
+                    return;
+                };
+                match &el.kind {
+                    ElementKind::Text { origin, text, color, size }
+                    | ElementKind::Callout { anchor: origin, text, color, size, tip: _ } => (
+                        text.clone(),
+                        self.text_editor_frame(*origin, text, *size),
+                        *color,
+                        *size,
+                    ),
+                    _ => return,
+                }
+            }
+        };
+        let font_pt = (size_px * self.view_scale().1).max(9.0);
+        let font = NSFont::fontWithName_size(&NSString::from_str(text::FONT_NAME), font_pt);
+        let [r, g, b, a] = color;
+        let ns_color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
+        // SAFETY: class convenience constructor, plain setters afterwards.
+        let field = NSTextField::textFieldWithString(&NSString::from_str(&initial), mtm);
+        field.setBordered(false);
+        field.setDrawsBackground(false);
+        field.setFocusRingType(NSFocusRingType::None);
+        field.setFrame(frame);
+        if let Some(font) = font.as_ref() {
+            field.setFont(Some(font));
+        }
+        field.setTextColor(Some(&ns_color));
+        // SAFETY: the delegate is this canvas view, alive for the process.
+        unsafe { field.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        self.addSubview(&field);
+        *ivars.text_editor.borrow_mut() = Some(field.clone());
+        ivars.text_target.set(Some(target));
+        if self.window().is_some_and(|window| window.makeFirstResponder(Some(&field))) {
+            if let Some(editor) = field.currentEditor() {
+                // SAFETY: plain selection message with no sender.
+                unsafe { editor.selectAll(None) };
+            }
+        }
+        self.redraw();
+    }
+
+    /// Finish the open field editor: commit its text as a command — add a
+    /// new element, edit the existing one's text, or delete an emptied
+    /// element. Safe to call when no editor is open.
+    fn commit_text_editor(&self) {
+        let ivars = self.ivars();
+        let Some(field) = ivars.text_editor.borrow_mut().take() else {
+            return;
+        };
+        let target = ivars.text_target.take();
+        let text = field.stringValue().to_string();
+        // Removing the field ends editing, which re-enters this method;
+        // the taken slots above make that a no-op.
+        field.removeFromSuperview();
+
+        let Some(target) = target else {
+            self.redraw();
+            return;
+        };
+        let mut shot_slot = ivars.shot.borrow_mut();
+        let Some(shot) = shot_slot.as_mut() else {
+            self.redraw();
+            return;
+        };
+        match target {
+            TextTarget::New { origin, callout } => {
+                if text.trim().is_empty() {
+                    self.redraw();
+                    return;
+                }
+                let size = DEFAULT_TEXT_SIZE_PX;
+                let kind = if callout {
+                    ElementKind::Callout {
+                        tip: origin,
+                        anchor: callout_anchor(origin, &text, size),
+                        text,
+                        color: ivars.color.get(),
+                        size,
+                    }
+                } else {
+                    ElementKind::Text {
+                        origin,
+                        text,
+                        color: ivars.color.get(),
+                        size,
+                    }
+                };
+                let id = shot.doc.next_element_id();
+                if let Err(err) = shot.apply(Command::AddElement(Element { id, kind })) {
+                    eprintln!("editor: failed to add the text element: {err}");
+                } else {
+                    ivars.selection.set(Some(id));
+                }
+            }
+            TextTarget::Existing { id } => {
+                let old_text = shot.doc.element(id).and_then(|el| match &el.kind {
+                    ElementKind::Text { text, .. } | ElementKind::Callout { text, .. } => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                });
+                if text.trim().is_empty() {
+                    if let Err(err) = shot.apply(Command::DeleteElement(id)) {
+                        eprintln!("editor: failed to delete the emptied text: {err}");
+                    } else {
+                        ivars.selection.set(None);
+                    }
+                } else if old_text.as_deref() != Some(text.as_str()) {
+                    if let Err(err) = shot.apply(Command::EditText(id, text)) {
+                        eprintln!("editor: failed to update the text: {err}");
+                    }
+                }
+            }
+        }
+        drop(shot_slot);
+        self.redraw();
+    }
+
+    /// Drop the open field editor without committing (a new shot arrived).
+    fn discard_text_editor(&self) {
+        let ivars = self.ivars();
+        if let Some(field) = ivars.text_editor.borrow_mut().take() {
+            // Ends editing, which re-enters commit with both slots empty.
+            field.removeFromSuperview();
+        }
+        ivars.text_target.take();
     }
 
     /// Accent-tint the active tool's button, clear the others.
@@ -624,6 +893,17 @@ impl EditorView {
 /// Distance between two points.
 fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Top-left of a new callout's text block: above-right of the tip.
+fn callout_anchor(tip: Point, text: &str, size: f64) -> Point {
+    let height = text::measure(text, size)
+        .map(|m| m.height())
+        .unwrap_or(size * 1.25);
+    Point::new(
+        tip.x + CALLOUT_TEXT_OFFSET_PX,
+        (tip.y - height - 6.0).max(0.0),
+    )
 }
 
 /// The four corners of a rect (top-left, top-right, bottom-right,
@@ -762,6 +1042,8 @@ impl EditorWindow {
             )
         };
         let view = &self.view;
+        // A new shot arrives: drop any open text editor without committing.
+        view.discard_text_editor();
         *view.ivars().shot.borrow_mut() = Some(shot);
         view.ivars().selection.set(None);
         self.window.setTitle(&NSString::from_str(&title));
