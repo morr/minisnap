@@ -49,7 +49,7 @@
 
 ## 8. Интеграционная проверка
 
-- [ ] 8.1 Прогнать вручную все сценарии спек (tray-app, global-hotkeys, frozen-capture, capture-output, preferences, screen-recording-permission) на Retina MacBook с внешним дисплеем; `cargo test` зелёный; собрать release `.app` и проверить его запуск
+- [x] 8.1 Прогнать вручную все сценарии спек (tray-app, global-hotkeys, frozen-capture, capture-output, preferences, screen-recording-permission) на Retina MacBook с внешним дисплеем; `cargo test` зелёный; собрать release `.app` и проверить его запуск
 
 ## Workflow follow-up
 
