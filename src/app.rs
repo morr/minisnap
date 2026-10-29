@@ -17,7 +17,7 @@ use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 
 use crate::config::Config;
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
-use crate::overlay::Overlay;
+use crate::overlay::{Overlay, OverlayOutcome};
 use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
@@ -339,9 +339,17 @@ impl AppController {
             t0,
             screen_frame,
             scale,
-            Box::new(|outcome| {
-                // Output wiring comes in section 5.
-                eprintln!("overlay outcome: {outcome:?}");
+            Box::new(move |outcome| match outcome {
+                OverlayOutcome::Selected { pixel_rect, image } => {
+                    let Some(image) = crate::output::crop(&image, pixel_rect) else {
+                        eprintln!("output: empty selection rect {pixel_rect:?}");
+                        return;
+                    };
+                    if let Err(e) = crate::output::copy_to_pasteboard(&image) {
+                        eprintln!("output: pasteboard: {e}");
+                    }
+                }
+                OverlayOutcome::Cancelled => {}
             }),
         );
     }

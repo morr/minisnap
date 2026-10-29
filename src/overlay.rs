@@ -65,12 +65,23 @@ struct FrameSampler {
 }
 
 /// What the user did inside the overlay mode.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub enum OverlayOutcome {
-    /// A final selection, as a pixel rect of the T0 image.
-    #[allow(dead_code)] // produced once the selection state machine lands
-    Selected { pixel_rect: CGRect },
+    /// A final selection: the pixel rect of the T0 image plus the image
+    /// itself, for the crop in the output stage.
+    Selected {
+        pixel_rect: CGRect,
+        image: Retained<CGImage>,
+    },
     /// The mode was cancelled (Esc / other-display click / screen change).
+    Cancelled,
+}
+
+/// What finish() was asked to do; the frozen frame attaches to the public
+/// outcome inside.
+#[derive(Debug, Clone, Copy)]
+enum FinishRequest {
+    Selected { pixel_rect: CGRect },
     Cancelled,
 }
 
@@ -261,7 +272,7 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn __key_down(&self, event: &NSEvent) {
             if event.keyCode() == 53 {
-                self.finish(OverlayOutcome::Cancelled);
+                self.finish(FinishRequest::Cancelled);
             }
         }
 
@@ -291,7 +302,7 @@ define_class!(
             // longer matches the screens, so the mode is invalid.
             if self.ivars().active.get() {
                 eprintln!("overlay: display configuration changed, cancelling");
-                self.finish(OverlayOutcome::Cancelled);
+                self.finish(FinishRequest::Cancelled);
             }
         }
     }
@@ -414,7 +425,7 @@ impl OverlayView {
         // Cancel the whole mode when the veil is clicked.
         let target = view.retain();
         *veil_view.ivars().on_click.borrow_mut() =
-            Some(Box::new(move || target.finish(OverlayOutcome::Cancelled)));
+            Some(Box::new(move || target.finish(FinishRequest::Cancelled)));
         window.setContentView(Some(&veil_view));
         // Upcast to the base window class for the veil list.
         Retained::from(&window)
@@ -1123,7 +1134,7 @@ impl OverlayView {
                     )
                 }
             };
-            self.finish(OverlayOutcome::Selected { pixel_rect: rect });
+            self.finish(FinishRequest::Selected { pixel_rect: rect });
             return;
         }
 
@@ -1142,11 +1153,11 @@ impl OverlayView {
             screen_frame.size,
             scale,
         );
-        self.finish(OverlayOutcome::Selected { pixel_rect });
+        self.finish(FinishRequest::Selected { pixel_rect });
     }
 
     /// Complete the mode: hide everything and hand the outcome to the owner.
-    fn finish(&self, outcome: OverlayOutcome) {
+    fn finish(&self, request: FinishRequest) {
         let ivars = self.ivars();
         if !ivars.active.get() || ivars.finishing.get() {
             return;
@@ -1158,7 +1169,19 @@ impl OverlayView {
             veil.orderOut(None);
         }
         ivars.veils.borrow_mut().clear();
-        *ivars.image.borrow_mut() = None;
+        let image = ivars.image.borrow_mut().take();
+        // The selection carries the frame to the output stage; a missing
+        // image (should never happen) downgrades to a cancelled mode.
+        let outcome = match request {
+            FinishRequest::Selected { pixel_rect } => match image {
+                Some(image) => OverlayOutcome::Selected { pixel_rect, image },
+                None => {
+                    eprintln!("overlay: selection finished without a frame, dropping");
+                    OverlayOutcome::Cancelled
+                }
+            },
+            FinishRequest::Cancelled => OverlayOutcome::Cancelled,
+        };
         *ivars.sampler.borrow_mut() = None;
         ivars.loupe.setHidden(true);
         ivars.size_label.setHidden(true);
@@ -1249,7 +1272,7 @@ impl Overlay {
 
     /// Cancel the active mode without a result (e.g. display config change).
     pub fn cancel(&self) {
-        self.view.finish(OverlayOutcome::Cancelled);
+        self.view.finish(FinishRequest::Cancelled);
     }
 }
 
