@@ -27,5 +27,6 @@ One task = one commit. After finishing a task:
 2. `git add` the task's files together with `tasks.md` (the checkbox update
    belongs to the same commit) and commit immediately — no batching several
    tasks into one commit.
-3. Follow Conventional Commits in English: `feat(capture): ...`,
-   `fix(hotkeys): ...`; planning-only changes use `docs(openspec): ...`.
+3. Follow the project git skill (`.zcode/skills/git`) for message style:
+   plain prose, imperative mood, lowercase first word, no Conventional
+   Commits prefixes.
