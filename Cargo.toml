@@ -46,6 +46,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSButton",
     "NSStackView",
     "NSColor",
+    "NSFont",
     "NSLayoutAnchor",
     "NSLayoutConstraint",
 ] }
@@ -53,6 +54,7 @@ objc2-quartz-core = { version = "0.3", features = [
     "CALayer",
     "CAShapeLayer",
     "CATextLayer",
+    "CATransaction",
     "CAAnimation",
     "CAMediaTiming",
 ] }
@@ -65,6 +67,7 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGGeometry",
     "CGContext",
     "CGBitmapContext",
+    "CGPath",
 ] }
 objc2-screen-capture-kit = { version = "0.3", features = [
     "SCScreenshotManager",
