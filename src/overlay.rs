@@ -11,8 +11,11 @@ use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSFont, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
-use objc2_core_foundation::{CFType, CGPoint, CGRect};
-use objc2_core_graphics::{CGImage, CGMutablePath, CGPath};
+use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect};
+use objc2_core_graphics::{
+    CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath, CGPath,
+    CGContext,
+};
 use objc2_foundation::NSString;
 use objc2_quartz_core::{
     kCAAlignmentCenter, kCAFilterNearest, CALayer, CAShapeLayer, CATextLayer, CATransaction,
@@ -23,6 +26,37 @@ use crate::capture::T0Capture;
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
     fn CGShieldingWindowLevel() -> i64;
+}
+
+// The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
+// only wraps the block-based adaptive variant).
+extern "C-unwind" {
+    fn CGBitmapContextCreate(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: &CGColorSpace,
+        bitmap_info: u32,
+    ) -> *mut CGContext;
+}
+
+/// The frozen frame downsampled to logical pixels (one Retina pixel pair
+/// becomes one unit): the loupe magnifies UI pixels instead of physical
+/// ones, and the axis guides sample content brightness from `buf`.
+struct FrameSampler {
+    /// Kept alive alongside the image: the exported image references the
+    /// context's buffer.
+    #[allow(dead_code)]
+    ctx: CFRetained<CGContext>,
+    image: CFRetained<CGImage>,
+    /// Backing bytes of `ctx`; the context does not own them.
+    buf: Vec<u8>,
+    width: usize,
+    height: usize,
+    /// Physical pixels per logical pixel (backing scale).
+    factor: usize,
 }
 
 /// What the user did inside the overlay mode.
@@ -113,25 +147,30 @@ struct OverlayIvars {
     loupe_grid: Retained<CAShapeLayer>,
     /// Crosshair through the loupe's center (cursor-pixel) cell.
     loupe_cross: Retained<CAShapeLayer>,
-    /// Full-screen guide lines crossing at the cursor (idle only): a dark
-    /// hairline underneath, a white one on top — readable on any background.
-    axis_lines: Retained<CAShapeLayer>,
-    axis_under: Retained<CAShapeLayer>,
+    /// Full-screen guide lines through the cursor (idle only). Thin
+    /// hairlines whose color adapts to the content underneath.
+    axis_v: Retained<CAShapeLayer>,
+    axis_h: Retained<CAShapeLayer>,
     /// Cursor pixel coordinate at the top end of the vertical guide.
     x_label: Retained<CATextLayer>,
     /// Cursor pixel coordinate at the right end of the horizontal guide.
     y_label: Retained<CATextLayer>,
     /// Live "W × H px" of the selection while dragging.
     size_label: Retained<CATextLayer>,
+    /// The logical-pixel copy of the frozen frame, alive while the mode is
+    /// active (the context and its backing bytes must live together).
+    sampler: RefCell<Option<FrameSampler>>,
 }
 
 /// Dimming opacity over the frozen frame outside the selection.
 const DIM_ALPHA: f64 = 0.4;
 
-/// Loupe magnification: on-screen points per source pixel.
-const LOUPE_ZOOM_PT: f64 = 8.0;
-/// Loupe sample side, in source pixels (the loupe is square).
-const LOUPE_SAMPLE_PX: f64 = 16.0;
+/// Loupe magnification: on-screen points per logical (UI) pixel.
+const LOUPE_ZOOM_PT: f64 = 16.0;
+/// Loupe sample side, in logical pixels (the loupe is square).
+const LOUPE_SAMPLE_PX: f64 = 12.0;
+/// Brightness (0..255 per channel) above which content counts as light.
+const LIGHT_CONTENT_THRESHOLD: u32 = 128;
 /// Loupe side, in points.
 const LOUPE_SIZE_PT: f64 = LOUPE_SAMPLE_PX * LOUPE_ZOOM_PT;
 /// Gap between the cursor and the loupe corner.
@@ -174,11 +213,12 @@ define_class!(
                 loupe: CALayer::new(),
                 loupe_grid: CAShapeLayer::new(),
                 loupe_cross: CAShapeLayer::new(),
-                axis_lines: CAShapeLayer::new(),
-                axis_under: CAShapeLayer::new(),
+                axis_v: CAShapeLayer::new(),
+                axis_h: CAShapeLayer::new(),
                 x_label: CATextLayer::new(),
                 y_label: CATextLayer::new(),
                 size_label: CATextLayer::new(),
+                sampler: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -327,8 +367,9 @@ impl OverlayView {
             CGPoint::ZERO,
             objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
         ));
-        let cell_center = LOUPE_SAMPLE_PX / 2.0 * LOUPE_ZOOM_PT + LOUPE_ZOOM_PT / 2.0;
-        // The contents image is drawn top-down; layer coordinates grow up.
+        // Crosshair through the center cell = the logical pixel under the
+        // cursor (the contents image is drawn top-down; layer coords grow up).
+        let cell_center = (LOUPE_SAMPLE_PX / 2.0 + 0.5) * LOUPE_ZOOM_PT;
         let cross_y = LOUPE_SIZE_PT - cell_center;
         let cross_path = CGMutablePath::new();
         // SAFETY: plain C path builders with a null transform.
@@ -345,21 +386,14 @@ impl OverlayView {
         cross.setContentsScale(ivars.scale.get());
         loupe.addSublayer(cross);
 
-        let axis = &ivars.axis_lines;
-        let axis_color = NSColor::whiteColor().colorWithAlphaComponent(0.9);
-        axis.setStrokeColor(Some(&axis_color.CGColor()));
-        axis.setLineWidth(0.75);
-        axis.setContentsScale(ivars.scale.get());
-        axis.setHidden(true);
-        ivars.root_layer.addSublayer(axis);
-        // Dark hairline under the white one: visible on any background.
-        let under = &ivars.axis_under;
-        let under_color = NSColor::blackColor().colorWithAlphaComponent(0.6);
-        under.setStrokeColor(Some(&under_color.CGColor()));
-        under.setLineWidth(1.5);
-        under.setContentsScale(ivars.scale.get());
-        under.setHidden(true);
-        ivars.root_layer.addSublayer(under);
+        for axis in [&ivars.axis_v, &ivars.axis_h] {
+            let axis_color = NSColor::whiteColor().colorWithAlphaComponent(0.55);
+            axis.setStrokeColor(Some(&axis_color.CGColor()));
+            axis.setLineWidth(0.75);
+            axis.setContentsScale(ivars.scale.get());
+            axis.setHidden(true);
+            ivars.root_layer.addSublayer(axis);
+        }
         // The loupe rides above the axis lines, its grid and crosshair on top.
         ivars.root_layer.addSublayer(loupe);
 
@@ -393,6 +427,78 @@ impl OverlayView {
         unsafe { layer.setString(Some(as_any)) };
     }
 
+    /// Downsample the frozen frame to logical pixels (one backing-scale
+    /// pixel group per unit). Returns None when the bitmap context could not
+    /// be created; the HUD then works without the loupe.
+    fn make_sampler(w_px: usize, h_px: usize, scale: f64, image: &CGImage) -> Option<FrameSampler> {
+        let factor = (scale.round() as usize).max(1);
+        let lw = (w_px / factor).max(1);
+        let lh = (h_px / factor).max(1);
+        let space = CGColorSpace::new_device_rgb()?;
+        let mut buf = vec![0u8; lw * lh * 4];
+        // SAFETY: plain CGBitmapContextCreate; buf is stored in the sampler
+        // alongside the context whose buffer it backs.
+        let ctx_ptr = unsafe {
+            CGBitmapContextCreate(
+                buf.as_mut_ptr().cast(),
+                lw,
+                lh,
+                8,
+                lw * 4,
+                &space,
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        };
+        // SAFETY: ctx_ptr comes from a Create-rule constructor; on success we
+        // take ownership of the +1 reference.
+        let ctx = unsafe {
+            std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))?
+        };
+        CGContext::draw_image(
+            Some(&ctx),
+            CGRect::new(
+                CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(lw as f64, lh as f64),
+            ),
+            Some(image),
+        );
+        let down = CGBitmapContextCreateImage(Some(&ctx))?;
+        Some(FrameSampler {
+            ctx,
+            image: down,
+            buf,
+            width: lw,
+            height: lh,
+            factor,
+        })
+    }
+
+    /// Mean per-channel brightness (0..255) of the content along a
+    /// logical-pixel line through `at` (a column if `vertical`).
+    fn line_mean_brightness(sampler: &FrameSampler, vertical: bool, at: usize) -> u32 {
+        let (w, h) = (sampler.width, sampler.height);
+        let buf = &sampler.buf;
+        let mut total: u64 = 0;
+        let mut n: u64 = 0;
+        if vertical {
+            for by in (0..h).step_by(4) {
+                let i = (by * w + at) * 4;
+                total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
+                n += 1;
+            }
+        } else {
+            for bx in (0..w).step_by(4) {
+                let i = (at * w + bx) * 4;
+                total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return 0;
+        }
+        (total / (n * 3)) as u32
+    }
+
     /// Label width that fits an 11pt monospaced-digit text.
     fn label_width(text: &str) -> f64 {
         text.chars().count() as f64 * 7.2 + 14.0
@@ -415,35 +521,35 @@ impl OverlayView {
         let ivars = self.ivars();
         let screen = ivars.screen_frame.get().size;
         let scale = ivars.scale.get();
-        let (img_w, img_h) = ivars.image_size_px.get();
-        if img_w == 0 || img_h == 0 {
+        let sampler = ivars.sampler.borrow();
+        let Some(sampler) = sampler.as_ref() else {
             return;
-        }
-        let (img_w, img_h) = (img_w as f64, img_h as f64);
+        };
+        let factor = sampler.factor as f64;
+        let lw = sampler.width as f64;
+        let lh = sampler.height as f64;
         let dragging = selection_px.is_some();
 
-        // Sample of the T0 bitmap around the cursor in pixel space, kept
-        // fully inside the image; the cursor pixel stays the center cell.
+        // Logical-pixel sample around the cursor, kept fully inside the
+        // bitmap; the cursor pixel stays the center cell.
         let half = LOUPE_SAMPLE_PX / 2.0;
-        let px = (cursor.x * scale).round().clamp(half, img_w - half);
-        let py = ((screen.height - cursor.y) * scale).round().clamp(half, img_h - half);
+        let px = (cursor.x * scale / factor).round().clamp(half, lw - half);
+        let py = ((screen.height - cursor.y) * scale / factor)
+            .round()
+            .clamp(half, lh - half);
         let sample = CGRect::new(
             CGPoint::new(px - half, py - half),
             objc2_core_foundation::CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
         );
         let loupe = &ivars.loupe;
-        let image = ivars.image.borrow();
-        if let Some(image) = image.as_ref() {
-            if let Some(cropped) = CGImage::with_image_in_rect(Some(image), sample) {
-                // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
-                // expects it as AnyObject.
-                let as_any: &AnyObject =
-                    unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
-                // SAFETY: contents setter with a valid image object.
-                unsafe { loupe.setContents(Some(as_any)) };
-            }
+        if let Some(cropped) = CGImage::with_image_in_rect(Some(&sampler.image), sample) {
+            // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
+            // expects it as AnyObject.
+            let as_any: &AnyObject =
+                unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
+            // SAFETY: contents setter with a valid image object.
+            unsafe { loupe.setContents(Some(as_any)) };
         }
-        drop(image);
 
         // Place the loupe by the cursor, flipping at the screen edges.
         let lx = if cursor.x + LOUPE_GAP_PT + LOUPE_SIZE_PT <= screen.width {
@@ -482,30 +588,52 @@ impl OverlayView {
         }
 
         // Idle: full-screen guides through the cursor with coordinate labels.
-        // Drag: guides off — the rectangle is feedback enough.
+        // Drag: guides off — the rectangle is feedback enough. The line
+        // color adapts to the content underneath, so the old thin hairlines
+        // stay readable on light and dark backgrounds alike.
         if dragging {
-            ivars.axis_under.setHidden(true);
-            ivars.axis_lines.setHidden(true);
+            ivars.axis_v.setHidden(true);
+            ivars.axis_h.setHidden(true);
             ivars.x_label.setHidden(true);
             ivars.y_label.setHidden(true);
         } else {
-            let path = CGMutablePath::new();
+            // Old thin hairlines; each line's color adapts to the mean
+            // brightness of the content underneath it.
+            let stroke = |light: bool| {
+                if light {
+                    NSColor::blackColor().colorWithAlphaComponent(0.55).CGColor()
+                } else {
+                    NSColor::whiteColor().colorWithAlphaComponent(0.55).CGColor()
+                }
+            };
+            let v_light =
+                Self::line_mean_brightness(sampler, true, (px.round() as usize).min(sampler.width - 1))
+                    > LIGHT_CONTENT_THRESHOLD;
+            let h_light =
+                Self::line_mean_brightness(sampler, false, (py.round() as usize).min(sampler.height - 1))
+                    > LIGHT_CONTENT_THRESHOLD;
+            ivars.axis_v.setStrokeColor(Some(&stroke(v_light)));
+            ivars.axis_h.setStrokeColor(Some(&stroke(h_light)));
+
+            let v_path = CGMutablePath::new();
+            let h_path = CGMutablePath::new();
             // SAFETY: plain C path builders with a null transform.
             unsafe {
-                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), cursor.x, 0.0);
-                CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), cursor.x, screen.height);
-                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 0.0, cursor.y);
-                CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), screen.width, cursor.y);
+                CGMutablePath::move_to_point(Some(&v_path), std::ptr::null(), cursor.x, 0.0);
+                CGMutablePath::add_line_to_point(Some(&v_path), std::ptr::null(), cursor.x, screen.height);
+                CGMutablePath::move_to_point(Some(&h_path), std::ptr::null(), 0.0, cursor.y);
+                CGMutablePath::add_line_to_point(Some(&h_path), std::ptr::null(), screen.width, cursor.y);
             }
-            let path_ref: &CGPath = &path;
-            ivars.axis_under.setPath(Some(path_ref));
-            ivars.axis_under.setHidden(false);
-            ivars.axis_lines.setPath(Some(path_ref));
-            ivars.axis_lines.setHidden(false);
+            let v_ref: &CGPath = &v_path;
+            let h_ref: &CGPath = &h_path;
+            ivars.axis_v.setPath(Some(v_ref));
+            ivars.axis_h.setPath(Some(h_ref));
+            ivars.axis_v.setHidden(false);
+            ivars.axis_h.setHidden(false);
 
-            // The label coordinates are the real cursor pixel (not the
-            // sample-clamped ones).
-            let x_text = format!("{}", (cursor.x * scale).round() as i64);
+            // Labels speak logical pixels, like the loupe (the real cursor
+            // position, not the sample-clamped one).
+            let x_text = format!("{}", (cursor.x * scale / factor).round() as i64);
             Self::set_label_text(&ivars.x_label, &x_text);
             let xw = Self::label_width(&x_text);
             let xx = if cursor.x + 6.0 + xw <= screen.width {
@@ -519,7 +647,7 @@ impl OverlayView {
             ));
             ivars.x_label.setHidden(false);
 
-            let y_text = format!("{}", ((screen.height - cursor.y) * scale).round() as i64);
+            let y_text = format!("{}", ((screen.height - cursor.y) * scale / factor).round() as i64);
             Self::set_label_text(&ivars.y_label, &y_text);
             let yw = Self::label_width(&y_text);
             let yy = if cursor.y + 6.0 + HUD_LABEL_H_PT <= screen.height {
@@ -608,6 +736,13 @@ impl OverlayView {
             unsafe { frame_layer.setContents(Some(as_any)) };
         }
 
+        // Downsample the frame to logical pixels for the loupe and for the
+        // axis-guide brightness sampling.
+        let source = ivars.image.borrow();
+        *ivars.sampler.borrow_mut() = source
+            .as_ref()
+            .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
+
         // Veils for other displays (created by the caller per show()).
         let mut old_veils = ivars.veils.borrow_mut();
         for veil in old_veils.drain(..) {
@@ -679,7 +814,12 @@ impl OverlayView {
             ivars.screen_frame.get().size,
             ivars.scale.get(),
         );
-        self.update_hud(point, Some((pixel_rect.size.width, pixel_rect.size.height)));
+        // The HUD speaks logical pixels, like the loupe.
+        let factor = ivars.scale.get().round().max(1.0);
+        self.update_hud(
+            point,
+            Some((pixel_rect.size.width / factor, pixel_rect.size.height / factor)),
+        );
     }
 
     fn handle_mouse_up(&self, event: &NSEvent) {
@@ -738,10 +878,11 @@ impl OverlayView {
         }
         ivars.veils.borrow_mut().clear();
         *ivars.image.borrow_mut() = None;
+        *ivars.sampler.borrow_mut() = None;
         ivars.loupe.setHidden(true);
         ivars.size_label.setHidden(true);
-        ivars.axis_under.setHidden(true);
-        ivars.axis_lines.setHidden(true);
+        ivars.axis_v.setHidden(true);
+        ivars.axis_h.setHidden(true);
         ivars.x_label.setHidden(true);
         ivars.y_label.setHidden(true);
         if let Some(window) = ivars.window.borrow().as_ref() {
@@ -809,5 +950,64 @@ impl Overlay {
     /// Cancel the active mode without a result (e.g. display config change).
     pub fn cancel(&self) {
         self.view.finish(OverlayOutcome::Cancelled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small synthetic frame via the same CG bitmap pipeline.
+    fn synthetic_frame(w: usize, h: usize) -> CFRetained<CGImage> {
+        let mut buf = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                // Left half black, right half white.
+                let v = if x < w / 2 { 0 } else { 255 };
+                buf[i] = v;
+                buf[i + 1] = v;
+                buf[i + 2] = v;
+                buf[i + 3] = 255;
+            }
+        }
+        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
+        // SAFETY: buf outlives the context within this function.
+        let ctx_ptr = unsafe {
+            CGBitmapContextCreate(
+                buf.as_mut_ptr().cast(),
+                w,
+                h,
+                8,
+                w * 4,
+                &space,
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        };
+        let ctx = unsafe {
+            std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))
+        }
+        .expect("bitmap context");
+        CGBitmapContextCreateImage(Some(&ctx)).expect("image from context")
+    }
+
+    #[test]
+    fn sampler_downsamples_to_logical_pixels() {
+        let image = synthetic_frame(64, 64);
+        let sampler = OverlayView::make_sampler(64, 64, 2.0, &image).expect("sampler");
+        assert_eq!((sampler.width, sampler.height, sampler.factor), (32, 32, 2));
+        // Left half of the frame is black, right half white: a column in the
+        // dark half reads dark, one in the light half reads light.
+        let dark = OverlayView::line_mean_brightness(&sampler, true, 4);
+        let light = OverlayView::line_mean_brightness(&sampler, true, 28);
+        assert!(dark < LIGHT_CONTENT_THRESHOLD, "dark col: {dark}");
+        assert!(light > LIGHT_CONTENT_THRESHOLD, "light col: {light}");
+    }
+
+    #[test]
+    fn sampler_handles_scale_one() {
+        let image = synthetic_frame(64, 64);
+        let sampler = OverlayView::make_sampler(64, 64, 1.0, &image).expect("sampler");
+        assert_eq!((sampler.width, sampler.height, sampler.factor), (64, 64, 1));
     }
 }
