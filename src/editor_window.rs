@@ -305,6 +305,9 @@ define_class!(
                 8 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
                     self.copy_composite()
                 }
+                // ⌘Z undoes, ⌘⇧Z redoes, through the journal.
+                6 if event.modifierFlags().contains(NSEventModifierFlags::Command) => self
+                    .undo_redo(event.modifierFlags().contains(NSEventModifierFlags::Shift)),
                 // ←/→ leaf through the saved shots.
                 123 => self.page(-1),
                 124 => self.page(1),
@@ -431,10 +434,7 @@ impl EditorView {
             .as_ref()
             .map(|shot| {
                 let base = shot.doc.base();
-                (
-                    CGImage::width(Some(base)) as usize,
-                    CGImage::height(Some(base)) as usize,
-                )
+                (CGImage::width(Some(base)), CGImage::height(Some(base)))
             })
             .unwrap_or((0, 0))
     }
@@ -925,6 +925,51 @@ impl EditorView {
         drop(shot_guard);
         if let Err(err) = crate::output::copy_to_pasteboard(&image) {
             eprintln!("editor: failed to copy to the pasteboard: {err}");
+        }
+    }
+
+    /// Undo (⌘Z) or redo (⌘⇧Z) one journal command; a base-size change
+    /// (crop/resize) refits the window.
+    fn undo_redo(&self, redo: bool) {
+        let ivars = self.ivars();
+        // An in-flight text edit commits first, then participates in undo.
+        self.commit_text_editor();
+        let size_before = self.image_size();
+        let result = ivars.shot.borrow_mut().as_mut().map(|shot| {
+            if redo {
+                shot.redo()
+            } else {
+                shot.undo()
+            }
+        });
+        let changed = match result {
+            Some(Ok(changed)) => changed,
+            Some(Err(err)) => {
+                eprintln!("editor: undo/redo failed: {err}");
+                return;
+            }
+            None => return,
+        };
+        if !changed {
+            return;
+        }
+        // A selection may now point at an element that is gone (or come
+        // back after a redo of a delete — the id survives the replay).
+        let selection = ivars.selection.get();
+        let selection_alive = selection.is_some_and(|id| {
+            ivars
+                .shot
+                .borrow()
+                .as_ref()
+                .is_some_and(|shot| shot.doc.element(id).is_some())
+        });
+        if !selection_alive {
+            ivars.selection.set(None);
+        }
+        if self.image_size() != size_before {
+            self.refit_window();
+        } else {
+            self.redraw();
         }
     }
 
