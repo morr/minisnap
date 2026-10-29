@@ -4,12 +4,15 @@
 use std::sync::mpsc;
 
 use block2::RcBlock;
-use objc2::rc::{Retained};
-use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSEvent, NSScreen};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::NSError;
-use objc2_screen_capture_kit::{SCDisplay, SCShareableContent};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSArray, NSError};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+};
 
 /// Find the screen that contains the mouse cursor; fall back to the main
 /// screen, then to the first screen.
@@ -50,8 +53,12 @@ pub fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
 pub struct T0Window {
     /// Frame in ScreenCaptureKit global points (top-left origin, front-to-
     /// back list order as reported by ScreenCaptureKit).
+    // Consumed by the overlay's click-to-window hit-testing.
+    #[allow(dead_code)]
     pub frame: CGRect,
+    #[allow(dead_code)]
     pub window_id: u32,
+    #[allow(dead_code)]
     pub title: Option<String>,
 }
 
@@ -153,6 +160,115 @@ pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
         });
     }
     windows
+}
+
+/// Everything captured at the moment the mode starts (T0).
+pub struct T0Capture {
+    /// Full display frame in display pixels (top-left origin image space).
+    pub image: Retained<CGImage>,
+    /// Visible regular windows, front-to-back.
+    pub windows: Vec<T0Window>,
+    /// Captured display's frame in ScreenCaptureKit global points.
+    pub display_frame: CGRect,
+}
+
+/// One-shot screenshot of a whole display, blocking until the image arrives.
+/// Call from a background thread.
+pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, String> {
+    let empty = NSArray::new();
+    // SAFETY: plain init on a freshly allocated filter; empty window list.
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(
+            SCContentFilter::alloc(),
+            display,
+            &empty,
+        )
+    };
+    // SAFETY: plain constructor.
+    let config = unsafe { SCStreamConfiguration::new() };
+    // SAFETY: plain property access on a live SCDisplay object.
+    let (width, height) = unsafe { (display.width(), display.height()) };
+    // SAFETY: plain property setters on a freshly created configuration.
+    unsafe {
+        config.setWidth(width as usize);
+        config.setHeight(height as usize);
+        config.setShowsCursor(false);
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Retained<CGImage>, String>>();
+    let handler = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let result = if !error.is_null() {
+            Err(format!("screenshot: {}", error_text(error)))
+        } else if image.is_null() {
+            Err("screenshot: no image returned".to_string())
+        } else {
+            // SAFETY: SCScreenshotManager passes a +1 retained image.
+            Ok(unsafe { Retained::retain(image) }.expect("non-null screenshot image"))
+        };
+        let _ = tx.send(result);
+    });
+    // SAFETY: class method with an owned completion handler.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &config,
+            Some(&handler),
+        );
+    }
+    rx.recv().map_err(|_| "screenshot: handler dropped".to_string())?
+}
+
+/// Capture the whole T0 state for the display under `mouse_sckit`:
+/// shareable content (display + window list) and the display screenshot.
+/// Blocking; call from a background thread.
+pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
+    let content = shareable_content()?;
+    let display =
+        pick_display(&content, mouse_sckit).ok_or("capture: no display under cursor")?;
+    let image = capture_display_image(&display)?;
+    let windows = visible_windows(&content);
+    // SAFETY: plain property access on a live SCDisplay object.
+    let display_frame = unsafe { display.frame() };
+    Ok(T0Capture {
+        image,
+        windows,
+        display_frame,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_core_foundation::CGSize;
+    use objc2_foundation::{NSDictionary, NSString};
+
+    #[test]
+    #[ignore = "requires Screen Recording permission for the calling process"]
+    fn capture_saves_frame_to_tmp() {
+        let content = shareable_content().expect("shareable content");
+        let display = pick_display(&content, CGPoint::new(0.0, 0.0)).expect("a display");
+        let image = capture_display_image(&display).expect("screenshot");
+        let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+        let (dw, dh) = (unsafe { display.width() }, unsafe { display.height() });
+        eprintln!("frame {w}x{h} px vs display {dw}x{dh} px");
+        assert_eq!(w as isize, dw);
+        assert_eq!(h as isize, dh);
+
+        // Dump the frame as PNG so it can be eyeballed.
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+        let rep = NSBitmapImageRep::initWithCGImage(objc2_app_kit::NSBitmapImageRep::alloc(), &image);
+        // SAFETY: plain encoding call on a live bitmap representation.
+        let data = unsafe {
+            rep.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::<NSString, objc2::runtime::AnyObject>::new(),
+            )
+        }
+        .expect("png data");
+        let path = std::env::temp_dir().join("minisnap-capture-test.png");
+        std::fs::write(&path, data.to_vec()).expect("write file");
+        eprintln!("saved {}", path.display());
+    }
 }
 
 /// Coordinate conversions between the three spaces the capture pipeline

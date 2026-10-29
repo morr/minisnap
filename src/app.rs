@@ -2,6 +2,7 @@
 //! tray icon and the main menu.
 
 use std::cell::RefCell;
+use std::sync::mpsc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -27,6 +28,9 @@ const STATUS_ITEM_SQUARE_LENGTH: f64 = -2.0;
 /// How often the main-thread tick polls global-hotkey events, in seconds.
 const TICK_INTERVAL: f64 = 0.05;
 
+/// A closure to run on the main thread (results of background capture work).
+type MainJob = Box<dyn FnOnce() + Send>;
+
 struct AppIvars {
     // NSStatusBar keeps only a weak reference to its items; holding the
     // retained copy here keeps the tray icon alive for the process lifetime.
@@ -41,6 +45,8 @@ struct AppIvars {
     #[allow(dead_code)]
     config: RefCell<Config>,
     hotkeys: RefCell<HotkeyRegistry>,
+    jobs_tx: mpsc::Sender<MainJob>,
+    jobs_rx: RefCell<mpsc::Receiver<MainJob>>,
 }
 
 define_class!(
@@ -75,6 +81,13 @@ define_class!(
 
         #[unsafe(method(tick:))]
         fn tick(&self, _sender: Option<&AnyObject>) {
+            loop {
+                let next = self.ivars().jobs_rx.borrow_mut().try_recv().ok();
+                let Some(job) = next else {
+                    break;
+                };
+                job();
+            }
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
                     HotkeyAction::Capture => self.start_capture(),
@@ -154,12 +167,15 @@ impl AppController {
         menu.addItem(&quit_item);
 
         status_item.setMenu(Some(&menu));
+        let (jobs_tx, jobs_rx) = mpsc::channel::<MainJob>();
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             status_item: status_item.clone(),
             capture_item: capture_item.clone(),
             open_latest_item: open_latest_item.clone(),
             config: RefCell::new(config.clone()),
             hotkeys: RefCell::new(HotkeyRegistry::new()),
+            jobs_tx,
+            jobs_rx: RefCell::new(jobs_rx),
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -237,51 +253,28 @@ impl AppController {
             mouse_sckit.y
         );
 
+        let jobs_tx = self.ivars().jobs_tx.clone();
         std::thread::spawn(move || {
             objc2::rc::autoreleasepool(|_pool| {
-                let content = match crate::capture::shareable_content() {
-                    Ok(content) => content,
-                    Err(e) => {
-                        eprintln!("capture: {e}");
-                        return;
+                let result = crate::capture::capture_t0(mouse_sckit);
+                let _ = jobs_tx.send(Box::new(move || match result {
+                    Ok(t0) => {
+                        let w = objc2_core_graphics::CGImage::width(Some(&t0.image));
+                        let h = objc2_core_graphics::CGImage::height(Some(&t0.image));
+                        eprintln!(
+                            "capture: t0 ready: {}x{} px, {} windows, display frame=({:.0},{:.0} {}x{})",
+                            w,
+                            h,
+                            t0.windows.len(),
+                            t0.display_frame.origin.x,
+                            t0.display_frame.origin.y,
+                            t0.display_frame.size.width,
+                            t0.display_frame.size.height
+                        );
+                        // The overlay mode is wired up in section 4.
                     }
-                };
-                let Some(display) = crate::capture::pick_display(&content, mouse_sckit) else {
-                    eprintln!("capture: no matching display");
-                    return;
-                };
-                // SAFETY: plain property access on a live SCDisplay object.
-                let (dframe, did, dwidth, dheight) = unsafe {
-                    (
-                        display.frame(),
-                        display.displayID(),
-                        display.width(),
-                        display.height(),
-                    )
-                };
-                eprintln!(
-                    "capture: display {} frame=({:.0},{:.0} {}x{}) pixels={}x{}",
-                    did,
-                    dframe.origin.x,
-                    dframe.origin.y,
-                    dframe.size.width,
-                    dframe.size.height,
-                    dwidth,
-                    dheight
-                );
-                let windows = crate::capture::visible_windows(&content);
-                eprintln!("capture: {} t0 windows (front to back)", windows.len());
-                for w in windows.iter().take(12) {
-                    eprintln!(
-                        "  id={} frame=({:.0},{:.0} {}x{}) title={:?}",
-                        w.window_id,
-                        w.frame.origin.x,
-                        w.frame.origin.y,
-                        w.frame.size.width,
-                        w.frame.size.height,
-                        w.title
-                    );
-                }
+                    Err(e) => eprintln!("capture: {e}"),
+                }));
             });
         });
     }
