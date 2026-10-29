@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSEvent, NSScreen};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGImage};
+use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode, CGImage};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
@@ -195,7 +195,10 @@ pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, S
     // SAFETY: plain C queries on a live display id.
     let display_id = unsafe { display.displayID() };
     let mode = CGDisplayCopyDisplayMode(display_id).ok_or("screenshot: no display mode")?;
-    let pixels = (mode.pixel_width(), mode.pixel_height());
+    let pixels = (
+        CGDisplayMode::pixel_width(Some(&mode)),
+        CGDisplayMode::pixel_height(Some(&mode)),
+    );
     // SAFETY: plain property access on a live SCDisplay object.
     let frame_pt = unsafe { display.frame() };
     // SAFETY: plain property setters on a freshly created configuration.
