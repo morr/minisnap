@@ -8,8 +8,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSImage, NSMenu,
-    NSMenuItem, NSStatusBar, NSStatusItem,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSFontWeightSemibold,
+    NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_foundation::{NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
@@ -137,11 +137,20 @@ impl AppController {
         let status_item = NSStatusBar::systemStatusBar()
             .statusItemWithLength(STATUS_ITEM_SQUARE_LENGTH);
         let button = status_item.button(mtm).expect("status item button");
-        let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str(STATUS_ITEM_SYMBOL),
             Some(&NSString::from_str("minisnap")),
         )
         .expect("SF Symbol image");
+        // A bare symbol image renders blank on the new translucent menu bar;
+        // an explicit size/weight configuration is required for it to show.
+        let symbol_config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+            16.0,
+            unsafe { NSFontWeightSemibold },
+        );
+        let icon = symbol
+            .imageWithSymbolConfiguration(&symbol_config)
+            .expect("configured SF Symbol");
         icon.setTemplate(true);
         button.setImage(Some(&icon));
 
