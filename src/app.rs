@@ -7,9 +7,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSImage, NSMenu,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSImage, NSMenu,
     NSMenuItem, NSStatusBar, NSStatusItem,
 };
+use objc2_core_foundation::CGPoint;
 use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
 
 use crate::config::Config;
@@ -210,7 +211,7 @@ impl AppController {
     }
 
     /// Start the frozen-area capture: pick the display under the cursor and
-    /// log the choice (the overlay mode itself is wired up later).
+    /// log the T0 data (overlay and screenshot come next).
     fn start_capture(&self) {
         let mtm = MainThreadMarker::from(self);
         let Some(screen) = crate::capture::screen_under_cursor(mtm) else {
@@ -220,15 +221,69 @@ impl AppController {
         let frame = screen.frame();
         let scale = screen.backingScaleFactor();
         let primary_height = crate::capture::primary_screen_height(mtm);
+        let mouse = NSEvent::mouseLocation();
+        let mouse_sckit = crate::capture::geometry::point_to_sckit(
+            CGPoint::new(mouse.x, mouse.y),
+            primary_height,
+        );
         eprintln!(
-            "capture: screen under cursor frame=({:.0},{:.0} {}x{}) scale={} primary_height={:.0}",
+            "capture: screen under cursor frame=({:.0},{:.0} {}x{}) scale={} mouse_sckit=({:.0},{:.0})",
             frame.origin.x,
             frame.origin.y,
             frame.size.width,
             frame.size.height,
             scale,
-            primary_height
+            mouse_sckit.x,
+            mouse_sckit.y
         );
+
+        std::thread::spawn(move || {
+            objc2::rc::autoreleasepool(|_pool| {
+                let content = match crate::capture::shareable_content() {
+                    Ok(content) => content,
+                    Err(e) => {
+                        eprintln!("capture: {e}");
+                        return;
+                    }
+                };
+                let Some(display) = crate::capture::pick_display(&content, mouse_sckit) else {
+                    eprintln!("capture: no matching display");
+                    return;
+                };
+                // SAFETY: plain property access on a live SCDisplay object.
+                let (dframe, did, dwidth, dheight) = unsafe {
+                    (
+                        display.frame(),
+                        display.displayID(),
+                        display.width(),
+                        display.height(),
+                    )
+                };
+                eprintln!(
+                    "capture: display {} frame=({:.0},{:.0} {}x{}) pixels={}x{}",
+                    did,
+                    dframe.origin.x,
+                    dframe.origin.y,
+                    dframe.size.width,
+                    dframe.size.height,
+                    dwidth,
+                    dheight
+                );
+                let windows = crate::capture::visible_windows(&content);
+                eprintln!("capture: {} t0 windows (front to back)", windows.len());
+                for w in windows.iter().take(12) {
+                    eprintln!(
+                        "  id={} frame=({:.0},{:.0} {}x{}) title={:?}",
+                        w.window_id,
+                        w.frame.origin.x,
+                        w.frame.origin.y,
+                        w.frame.size.width,
+                        w.frame.size.height,
+                        w.title
+                    );
+                }
+            });
+        });
     }
 }
 

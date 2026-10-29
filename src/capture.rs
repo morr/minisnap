@@ -1,9 +1,15 @@
 //! Screen capture at moment T0: the display under the cursor, the frame
 //! image and the visible window list.
 
-use objc2::rc::Retained;
+use std::sync::mpsc;
+
+use block2::RcBlock;
+use objc2::rc::{Retained};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEvent, NSScreen};
+use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_foundation::NSError;
+use objc2_screen_capture_kit::{SCDisplay, SCShareableContent};
 
 /// Find the screen that contains the mouse cursor; fall back to the main
 /// screen, then to the first screen.
@@ -37,6 +43,116 @@ pub fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
         fallback = fallback.max(frame.size.height);
     }
     fallback
+}
+
+/// A visible regular window at the moment of capture (T0).
+#[derive(Debug, Clone)]
+pub struct T0Window {
+    /// Frame in ScreenCaptureKit global points (top-left origin, front-to-
+    /// back list order as reported by ScreenCaptureKit).
+    pub frame: CGRect,
+    pub window_id: u32,
+    pub title: Option<String>,
+}
+
+fn error_text(error: *mut NSError) -> String {
+    if error.is_null() {
+        return "unknown error".to_string();
+    }
+    // SAFETY: checked non-null above; the object is retained by the caller
+    // (ScreenCaptureKit) for the duration of the handler call.
+    let error = unsafe { &*error };
+    format!("{} (code {})", error.localizedDescription(), error.code())
+}
+
+/// Fetch the shareable content (displays + windows) once; blocking on the
+/// ScreenCaptureKit completion handler. Call from a background thread.
+pub fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
+    let (tx, rx) = mpsc::channel::<Result<Retained<SCShareableContent>, String>>();
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        let result = if !error.is_null() {
+            Err(format!("shareable content: {}", error_text(error)))
+        } else if content.is_null() {
+            Err("shareable content: nothing returned".to_string())
+        } else {
+            // SAFETY: ScreenCaptureKit passes a +1 retained, non-null object
+            // to the handler; take ownership of it.
+            let retained = unsafe { Retained::retain(content) }
+                .expect("handler received non-null shareable content");
+            Ok(retained)
+        };
+        let _ = tx.send(result);
+    });
+    // SAFETY: plain class method with an owned handler block.
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+            false,
+            true,
+            &handler,
+        );
+    }
+    rx.recv().map_err(|_| "shareable content: handler dropped".to_string())?
+}
+
+/// Display whose frame contains `mouse_sckit` (ScreenCaptureKit global
+/// points); fallback — the first display (the main one).
+pub fn pick_display(
+    content: &SCShareableContent,
+    mouse_sckit: CGPoint,
+) -> Option<Retained<SCDisplay>> {
+    let mut first: Option<Retained<SCDisplay>> = None;
+    for display in unsafe { content.displays() }.iter() {
+        // SAFETY: plain property access on a live SCDisplay object.
+        let frame = unsafe { display.frame() };
+        let inside = mouse_sckit.x >= frame.origin.x
+            && mouse_sckit.x < frame.origin.x + frame.size.width
+            && mouse_sckit.y >= frame.origin.y
+            && mouse_sckit.y < frame.origin.y + frame.size.height;
+        if inside {
+            return Some(display);
+        }
+        if first.is_none() {
+            first = Some(display);
+        }
+    }
+    first
+}
+
+/// Regular visible windows of other apps, front-to-back: layer 0 only, our
+/// own process excluded. Used for click-to-window hit-testing at T0.
+pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
+    let own_pid = std::process::id() as i32;
+    let mut windows = Vec::new();
+    for window in unsafe { content.windows() }.iter() {
+        // SAFETY: plain property access on live SCWindow/SCRunningApplication
+        // objects returned by this shareable content.
+        let (layer, on_screen, app, frame, window_id, title) = unsafe {
+            (
+                window.windowLayer(),
+                window.isOnScreen(),
+                window.owningApplication(),
+                window.frame(),
+                window.windowID(),
+                window.title(),
+            )
+        };
+        if layer != 0 || !on_screen {
+            continue;
+        }
+        let Some(app) = app else {
+            continue;
+        };
+        // SAFETY: plain property access on a live SCRunningApplication object.
+        if unsafe { app.processID() } == own_pid {
+            continue;
+        }
+        windows.push(T0Window {
+            frame,
+            window_id,
+            title: title.map(|t| t.to_string()),
+        });
+    }
+    windows
 }
 
 /// Coordinate conversions between the three spaces the capture pipeline
