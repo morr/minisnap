@@ -1,6 +1,7 @@
 mod app;
 mod capture;
 mod config;
+mod editor;
 mod hotkeys;
 mod overlay;
 mod output;
