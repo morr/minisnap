@@ -829,12 +829,29 @@ impl OverlayView {
                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
             );
             window.setFrame_display(screen_frame, false);
-            // This accessory app is not active when launched from a shell:
-            // without activation the overlay never becomes the key window,
-            // and Esc goes nowhere until the first click activates it.
-            NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"))
-                .activate();
+            // This accessory app is not active when launched from a shell or
+            // when another app is frontmost: NSApp.activate() alone is
+            // silently denied without user-interaction attribution, the
+            // window never becomes key, and Esc goes nowhere until the
+            // first click activates the app. The deprecated
+            // activateIgnoringOtherApps is still honored for this exact
+            // case; the extra makeKeyAndOrderFront on the next runloop tick
+            // locks the key status in after the activation lands.
+            let app =
+                NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"));
+            // SAFETY: deprecated NSObject method with a BOOL argument.
+            let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
+            app.activate();
             window.makeKeyAndOrderFront(None);
+            // SAFETY: NSObject delayed-perform scheduling; the selector is a
+            // valid window method, the object argument is nil.
+            let _: () = unsafe {
+                msg_send![window,
+                    performSelector: objc2::sel!(makeKeyAndOrderFront:),
+                    withObject: None::<&AnyObject>,
+                    afterDelay: 0.05
+                ]
+            };
         }
 
         // Border: reset invisible without animation, fade in, arm the idle
