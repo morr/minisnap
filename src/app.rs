@@ -544,6 +544,14 @@ impl AppController {
     /// Start the frozen-area capture: pick the display under the cursor and
     /// log the T0 data (overlay and screenshot come next).
     fn start_capture(&self) {
+        // No permission — no capture: explain instead (7.2). The preflight
+        // here also re-checks after the user granted the permission in
+        // System Settings without a relaunch.
+        if !crate::permission::preflight_screen_capture() {
+            eprintln!("capture blocked: screen recording not granted");
+            self.show_permission_dialog();
+            return;
+        }
         if self.ivars().overlay.borrow().is_active() {
             eprintln!("capture hotkey ignored: overlay already active");
             return;
