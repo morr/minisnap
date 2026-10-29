@@ -13,9 +13,10 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
-    NSEvent, NSFocusRingType, NSFont, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSScreen, NSStackView, NSTextField, NSTextFieldDelegate,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
+    NSCursor, NSEvent, NSFocusRingType, NSFont, NSGraphicsContext, NSImage,
+    NSImageSymbolConfiguration, NSPopover, NSScreen, NSStackView, NSTextField,
+    NSTextFieldDelegate, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGImage, CGContext};
@@ -25,7 +26,7 @@ use crate::editor::hit_test::{Hit, top_hit};
 use crate::editor::text;
 use crate::editor::{
     render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint, OpenShot, Point,
-    Rect, Rgba,
+    Rect, Rgba, Size,
 };
 
 /// The dark backdrop the frame sits on.
@@ -56,6 +57,12 @@ const CALLOUT_TEXT_OFFSET_PX: f64 = 16.0;
 /// Width of the field editor for new (empty) text, in view points.
 const TEXT_EDITOR_WIDTH_PT: f64 = 200.0;
 
+/// Radius of the crop/resize frame handles, in view points.
+const HANDLE_RADIUS_PT: f64 = 5.0;
+
+/// Size of the frame mode's OK button, in view points.
+const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
+
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
 enum TextTarget {
@@ -84,6 +91,36 @@ enum Drag {
         start: Point,
         last: Point,
     },
+    /// Dragging a spot of the crop/resize frame; nothing is committed on
+    /// mouse-up — the frame persists until OK/Enter applies or Esc cancels.
+    Frame {
+        spot: FrameSpot,
+        orig: Rect,
+        start: Point,
+        last: Point,
+    },
+}
+
+/// Which grabbable spot of the crop/resize frame is under the cursor.
+#[derive(Clone, Copy)]
+enum FrameSpot {
+    Nw,
+    N,
+    Ne,
+    E,
+    Se,
+    S,
+    Sw,
+    W,
+    Center,
+}
+
+/// The active crop/resize frame, in image pixel space (always standardized).
+struct FrameEdit {
+    /// True for the resize tool (resample to the frame size), false for
+    /// crop (cut the frame out).
+    resize: bool,
+    rect: Rect,
 }
 
 /// Color presets offered by the popover; magenta is the default.
@@ -172,6 +209,11 @@ struct EditorIvars {
     text_editor: RefCell<Option<Retained<NSTextField>>>,
     /// What the open field editor will commit.
     text_target: Cell<Option<TextTarget>>,
+    /// The active crop/resize frame, if the tool is up.
+    frame_edit: RefCell<Option<FrameEdit>>,
+    /// The frame mode's size label and OK button subviews.
+    frame_label: RefCell<Option<Retained<NSTextField>>>,
+    frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -203,6 +245,9 @@ define_class!(
                 drag: RefCell::new(None),
                 text_editor: RefCell::new(None),
                 text_target: Cell::new(None),
+                frame_edit: RefCell::new(None),
+                frame_label: RefCell::new(None),
+                frame_ok: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -240,15 +285,36 @@ define_class!(
         fn __key_down(&self, event: &NSEvent) {
             match event.keyCode() {
                 53 => {
-                    // Esc: close the editor.
-                    if let Some(window) = self.window() {
+                    // Esc: cancel the crop/resize frame, else close.
+                    if self.ivars().frame_edit.borrow().is_some() {
+                        self.cancel_frame_edit();
+                    } else if let Some(window) = self.window() {
                         window.close();
                     }
                 }
+                // Return and keypad enter apply the frame.
+                36 | 76 => self.commit_frame_edit(),
                 // Backspace and forward delete remove the selection.
                 51 | 117 => self.delete_selected(),
                 _ => {}
             }
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn __reset_cursor_rects(&self) {
+            if self.ivars().frame_edit.borrow().is_none() {
+                return;
+            }
+            let cursor = NSCursor::crosshairCursor();
+            for (_, point) in self.frame_spot_points() {
+                let rect = self.spot_cursor_rect(point);
+                self.addCursorRect_cursor(rect, &cursor);
+            }
+        }
+
+        #[unsafe(method(frameOkClicked:))]
+        fn __frame_ok_clicked(&self, _sender: Option<&AnyObject>) {
+            self.commit_frame_edit();
         }
 
         #[unsafe(method(toolClicked:))]
@@ -260,6 +326,13 @@ define_class!(
             if let Some(tool) = Tool::from_tag(tag) {
                 self.ivars().tool.set(tool);
                 self.update_tool_highlight();
+                // The crop/resize tools bring up their adjustable frame;
+                // any other tool tears it down.
+                match tool {
+                    Tool::Crop => self.enter_frame_edit(false),
+                    Tool::Resize => self.enter_frame_edit(true),
+                    _ => self.exit_frame_edit(),
+                }
             }
         }
 
@@ -411,6 +484,8 @@ impl EditorView {
                 Some((*id, el))
             }
             Drag::Draw(_) => None,
+            // The frame drag previews through the frame overlay, not here.
+            Drag::Frame { .. } => None,
         });
         let hidden = preview.as_ref().map(|(id, _)| *id);
         let editing = match ivars.text_target.get() {
@@ -448,6 +523,58 @@ impl EditorView {
         // sized; they never reach a saved composite.
         if let Some(id) = ivars.selection.get() {
             self.draw_markers(&cg, shot, id, &bounds, sx, sy);
+        }
+
+        // The crop/resize frame overlay on top of everything.
+        if ivars.frame_edit.borrow().is_some() {
+            self.draw_frame_overlay(&cg, &bounds, sx, sy);
+        }
+    }
+
+    /// The crop/resize frame: dimmed frame surroundings, white border,
+    /// nine handle dots.
+    fn draw_frame_overlay(&self, cg: &CGContext, bounds: &CGRect, sx: f64, sy: f64) {
+        let Some(rect) = self.current_frame_rect() else {
+            return;
+        };
+        let vx = rect.x * sx;
+        let vw = rect.width * sx;
+        let vh = rect.height * sy;
+        let y0 = bounds.size.height - rect.max_y() * sy;
+        // Dim everything outside the frame.
+        CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 0.45);
+        let dim = [
+            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(bounds.size.width, y0.max(0.0))),
+            CGRect::new(
+                CGPoint::new(0.0, y0 + vh),
+                CGSize::new(bounds.size.width, (bounds.size.height - y0 - vh).max(0.0)),
+            ),
+            CGRect::new(CGPoint::new(0.0, y0), CGSize::new(vx.max(0.0), vh)),
+            CGRect::new(
+                CGPoint::new(vx + vw, y0),
+                CGSize::new((bounds.size.width - vx - vw).max(0.0), vh),
+            ),
+        ];
+        for r in dim {
+            CGContext::fill_rect(Some(cg), r);
+        }
+        // Frame border.
+        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+        CGContext::set_line_width(Some(cg), 1.5);
+        CGContext::stroke_rect(Some(cg), CGRect::new(CGPoint::new(vx, y0), CGSize::new(vw, vh)));
+        // Handle dots: white fill with the accent ring.
+        for (_, point) in self.frame_spot_points() {
+            let c = CGPoint::new(point.x * sx, bounds.size.height - point.y * sy);
+            let r = HANDLE_RADIUS_PT;
+            let marker =
+                CGRect::new(CGPoint::new(c.x - r, c.y - r), CGSize::new(2.0 * r, 2.0 * r));
+            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+            CGContext::fill_ellipse_in_rect(Some(cg), marker);
+            let accent: Retained<NSColor> = NSColor::controlAccentColor();
+            let accent_cg = accent.CGColor();
+            CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
+            CGContext::set_line_width(Some(cg), 1.5);
+            CGContext::stroke_ellipse_in_rect(Some(cg), marker);
         }
     }
 
@@ -566,8 +693,27 @@ impl EditorView {
                 }
                 return;
             }
-            // Crop/resize have their own click protocol (later task).
-            Tool::Crop | Tool::Resize => return,
+            // Crop/resize drag the frame's spots; the click never draws
+            // or selects elements.
+            Tool::Crop | Tool::Resize => {
+                if let Some((spot, _)) = self.frame_spot_at(point) {
+                    let orig = self
+                        .ivars()
+                        .frame_edit
+                        .borrow()
+                        .as_ref()
+                        .map(|edit| edit.rect);
+                    if let Some(orig) = orig {
+                        *self.ivars().drag.borrow_mut() = Some(Drag::Frame {
+                            spot,
+                            orig,
+                            start: point,
+                            last: point,
+                        });
+                    }
+                }
+                return;
+            }
         };
         // A hit on an existing element decides between moving it and
         // dragging one of its ends; the empty frame draws a new element.
@@ -666,6 +812,16 @@ impl EditorView {
                 }
                 self.redraw();
             }
+            Drag::Frame { spot, orig, start, last } => {
+                // Persist the settled rect; nothing is applied yet — the
+                // OK button and Enter do that.
+                let rect = frame_rect(orig, spot, start, last);
+                if let Some(edit) = ivars.frame_edit.borrow_mut().as_mut() {
+                    edit.rect = rect;
+                }
+                self.layout_frame_chrome();
+                self.redraw();
+            }
         }
     }
 
@@ -697,8 +853,10 @@ impl EditorView {
                     }
                 }
                 Drag::End { last, .. } => *last = point,
+                Drag::Frame { last, .. } => *last = point,
             }
         }
+        self.layout_frame_chrome();
         self.redraw();
     }
 
@@ -935,6 +1093,226 @@ impl EditorView {
         ivars.text_target.take();
     }
 
+    /// The crop/resize frame rect in image pixels, including an in-flight
+    /// drag.
+    fn current_frame_rect(&self) -> Option<Rect> {
+        let ivars = self.ivars();
+        let edit = ivars.frame_edit.borrow();
+        let edit = edit.as_ref()?;
+        let drag = ivars.drag.borrow();
+        Some(match drag.as_ref() {
+            Some(Drag::Frame { spot, orig, start, last }) => frame_rect(*orig, *spot, *start, *last),
+            _ => edit.rect,
+        })
+    }
+
+    /// The nine frame spots (image pixels), corners first for hit priority.
+    fn frame_spot_points(&self) -> Vec<(FrameSpot, Point)> {
+        let Some(r) = self.current_frame_rect() else {
+            return Vec::new();
+        };
+        let (cx, cy) = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+        vec![
+            (FrameSpot::Nw, Point::new(r.x, r.y)),
+            (FrameSpot::Ne, Point::new(r.max_x(), r.y)),
+            (FrameSpot::Se, Point::new(r.max_x(), r.max_y())),
+            (FrameSpot::Sw, Point::new(r.x, r.max_y())),
+            (FrameSpot::N, Point::new(cx, r.y)),
+            (FrameSpot::E, Point::new(r.max_x(), cy)),
+            (FrameSpot::S, Point::new(cx, r.max_y())),
+            (FrameSpot::W, Point::new(r.x, cy)),
+            (FrameSpot::Center, Point::new(cx, cy)),
+        ]
+    }
+
+    /// The frame spot under an image-space cursor, if any.
+    fn frame_spot_at(&self, p: Point) -> Option<(FrameSpot, Point)> {
+        let (sx, sy) = self.view_scale();
+        let tol_x = (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001);
+        let tol_y = (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001);
+        self.frame_spot_points()
+            .into_iter()
+            .find(|(_, c)| (p.x - c.x).abs() <= tol_x && (p.y - c.y).abs() <= tol_y)
+    }
+
+    /// The view-space cursor rect around a frame spot.
+    fn spot_cursor_rect(&self, point: Point) -> CGRect {
+        let bounds = self.bounds();
+        let (sx, sy) = self.view_scale();
+        let pad = HANDLE_RADIUS_PT + 3.0;
+        let cx = point.x * sx;
+        let cy = bounds.size.height - point.y * sy;
+        CGRect::new(
+            CGPoint::new(cx - pad, cy - pad),
+            CGSize::new(pad * 2.0, pad * 2.0),
+        )
+    }
+
+    /// Bring up the crop (`resize = false`) or resize frame with its size
+    /// label, OK button, and crosshair cursor zones.
+    fn enter_frame_edit(&self, resize: bool) {
+        let ivars = self.ivars();
+        self.exit_frame_edit();
+        let (iw, ih) = self.image_size();
+        if iw == 0 || ih == 0 {
+            return;
+        }
+        let rect = if resize {
+            let (w, h) = (iw as f64 * 0.75, ih as f64 * 0.75);
+            Rect::new((iw as f64 - w) / 2.0, (ih as f64 - h) / 2.0, w, h)
+        } else {
+            Rect::new(0.0, 0.0, iw as f64, ih as f64)
+        };
+        *ivars.frame_edit.borrow_mut() = Some(FrameEdit { resize, rect });
+
+        let mtm = MainThreadMarker::new().expect("frame chrome on main thread");
+        let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        label.setTextColor(Some(&NSColor::whiteColor()));
+        self.addSubview(&label);
+        // SAFETY: class convenience constructor, plain setters afterwards.
+        let ok = unsafe {
+            NSButton::buttonWithTitle_target_action(&NSString::from_str("OK"), None, None, mtm)
+        };
+        // SAFETY: target is this canvas view, alive for the process.
+        unsafe {
+            ok.setTarget(Some(self));
+            ok.setAction(Some(sel!(frameOkClicked:)));
+        }
+        self.addSubview(&ok);
+        *ivars.frame_label.borrow_mut() = Some(label);
+        *ivars.frame_ok.borrow_mut() = Some(ok);
+        self.layout_frame_chrome();
+        self.redraw();
+    }
+
+    /// Position the frame mode's size label and OK button along the frame's
+    /// bottom edge (above it when the frame reaches the window bottom).
+    fn layout_frame_chrome(&self) {
+        let ivars = self.ivars();
+        let Some(rect) = self.current_frame_rect() else {
+            return;
+        };
+        let bounds = self.bounds();
+        let (sx, sy) = self.view_scale();
+        let bottom_y = bounds.size.height - rect.max_y() * sy;
+        let top_y = bounds.size.height - rect.y * sy;
+        let below = bottom_y - FRAME_OK_SIZE.height - 6.0;
+        let strip_y = if below >= 2.0 { below } else { top_y + 6.0 };
+        if let Some(ok) = ivars.frame_ok.borrow().as_ref() {
+            let x = (rect.max_x() * sx - FRAME_OK_SIZE.width)
+                .clamp(0.0, (bounds.size.width - FRAME_OK_SIZE.width).max(0.0));
+            ok.setFrame(CGRect::new(
+                CGPoint::new(x, strip_y),
+                CGSize::new(FRAME_OK_SIZE.width, FRAME_OK_SIZE.height),
+            ));
+        }
+        if let Some(label) = ivars.frame_label.borrow().as_ref() {
+            let text = format!("{} × {}", rect.width.round(), rect.height.round());
+            label.setStringValue(&NSString::from_str(&text));
+            let label_w = 160.0;
+            let x = (rect.x * sx).clamp(0.0, (bounds.size.width - label_w).max(0.0));
+            label.setFrame(CGRect::new(
+                CGPoint::new(x, strip_y),
+                CGSize::new(label_w, 18.0),
+            ));
+        }
+    }
+
+    /// Apply the frame as a Crop or Resize command and return to the arrow
+    /// tool. A degenerate (sub-pixel) frame is kept up for another try.
+    fn commit_frame_edit(&self) {
+        let ivars = self.ivars();
+        let Some(edit) = ivars.frame_edit.borrow_mut().take() else {
+            return;
+        };
+        self.remove_frame_chrome();
+        let (iw, ih) = self.image_size();
+        let r = edit.rect.standardize();
+        let x0 = r.x.max(0.0);
+        let y0 = r.y.max(0.0);
+        let x1 = r.max_x().min(iw as f64);
+        let y1 = r.max_y().min(ih as f64);
+        let (w, h) = ((x1 - x0).round(), (y1 - y0).round());
+        if w < 1.0 || h < 1.0 {
+            *ivars.frame_edit.borrow_mut() = Some(edit);
+            self.layout_frame_chrome();
+            self.redraw();
+            return;
+        }
+        let cmd = if edit.resize {
+            Command::Resize(Size::new(w, h))
+        } else {
+            Command::Crop(Rect::new(x0, y0, w, h))
+        };
+        let result = ivars
+            .shot
+            .borrow_mut()
+            .as_mut()
+            .map(|shot| shot.apply(cmd));
+        if let Some(Err(err)) = result {
+            eprintln!("editor: failed to apply the frame: {err}");
+        }
+        ivars.tool.set(Tool::Arrow);
+        self.update_tool_highlight();
+        self.redraw();
+        self.refit_window();
+    }
+
+    /// Cancel the frame mode (Esc): drop the frame, return to the arrow.
+    fn cancel_frame_edit(&self) {
+        self.exit_frame_edit();
+        self.ivars().tool.set(Tool::Arrow);
+        self.update_tool_highlight();
+        self.redraw();
+    }
+
+    /// Tear the frame mode down (tool switch, new shot).
+    fn exit_frame_edit(&self) {
+        let ivars = self.ivars();
+        if ivars.frame_edit.borrow().is_some() {
+            *ivars.frame_edit.borrow_mut() = None;
+            self.remove_frame_chrome();
+            self.redraw();
+        }
+    }
+
+    /// Remove the frame mode subviews.
+    fn remove_frame_chrome(&self) {
+        let ivars = self.ivars();
+        if let Some(label) = ivars.frame_label.borrow_mut().take() {
+            label.removeFromSuperview();
+        }
+        if let Some(ok) = ivars.frame_ok.borrow_mut().take() {
+            ok.removeFromSuperview();
+        }
+    }
+
+    /// Resize the window to fit the current shot's frame into the screen.
+    fn refit_window(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let (iw, ih) = self.image_size();
+        if iw == 0 || ih == 0 {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let content_size = NSScreen::mainScreen(mtm)
+            .map(|screen| screen.visibleFrame().size)
+            .map(|visible| {
+                fit_size(iw as f64, ih as f64, visible.width, visible.height - TOOLBAR_HEIGHT)
+            })
+            .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
+        window.setContentSize(CGSize::new(
+            content_size.width,
+            content_size.height + TOOLBAR_HEIGHT,
+        ));
+        window.center();
+        self.redraw();
+    }
+
     /// Accent-tint the active tool's button, clear the others.
     fn update_tool_highlight(&self) {
         let active = self.ivars().tool.get().tag();
@@ -1039,6 +1417,45 @@ fn callout_anchor(tip: Point, text: &str, size: f64) -> Point {
         tip.x + CALLOUT_TEXT_OFFSET_PX,
         (tip.y - height - 6.0).max(0.0),
     )
+}
+
+/// The crop/resize frame rect while dragging `spot` from the original rect
+/// `orig`, with the drag start at `start` and the cursor at `cur`.
+fn frame_rect(orig: Rect, spot: FrameSpot, start: Point, cur: Point) -> Rect {
+    let r = orig.standardize();
+    if matches!(spot, FrameSpot::Center) {
+        return Rect::new(
+            r.x + cur.x - start.x,
+            r.y + cur.y - start.y,
+            r.width,
+            r.height,
+        );
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (r.x, r.y, r.max_x(), r.max_y());
+    match spot {
+        FrameSpot::Nw => {
+            x0 = cur.x;
+            y0 = cur.y;
+        }
+        FrameSpot::N => y0 = cur.y,
+        FrameSpot::Ne => {
+            x1 = cur.x;
+            y0 = cur.y;
+        }
+        FrameSpot::E => x1 = cur.x,
+        FrameSpot::Se => {
+            x1 = cur.x;
+            y1 = cur.y;
+        }
+        FrameSpot::S => y1 = cur.y,
+        FrameSpot::Sw => {
+            x0 = cur.x;
+            y1 = cur.y;
+        }
+        FrameSpot::W => x0 = cur.x,
+        FrameSpot::Center => {}
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0).standardize()
 }
 
 /// The four corners of a rect (top-left, top-right, bottom-right,
@@ -1169,33 +1586,14 @@ impl EditorWindow {
     /// screen's visible frame, full redraw.
     pub fn show_shot(&self, shot: OpenShot) {
         let title = shot.file_name();
-        let (iw, ih) = {
-            let base = shot.doc.base();
-            (
-                CGImage::width(Some(base)) as usize,
-                CGImage::height(Some(base)) as usize,
-            )
-        };
         let view = &self.view;
-        // A new shot arrives: drop any open text editor without committing.
+        // A new shot arrives: drop any open text editor and frame mode.
         view.discard_text_editor();
+        view.exit_frame_edit();
         *view.ivars().shot.borrow_mut() = Some(shot);
         view.ivars().selection.set(None);
         self.window.setTitle(&NSString::from_str(&title));
-
-        // Content size = frame size in points plus the toolbar, uniformly
-        // scaled down when the frame exceeds the screen's visible frame.
-        let mtm = MainThreadMarker::new().expect("editor window on main thread");
-        let content = NSScreen::mainScreen(mtm)
-            .map(|screen| screen.visibleFrame().size)
-            .map(|visible| {
-                fit_size(iw as f64, ih as f64, visible.width, visible.height - TOOLBAR_HEIGHT)
-            })
-            .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
-        self.window
-            .setContentSize(CGSize::new(content.width, content.height + TOOLBAR_HEIGHT));
-        self.window.center();
-        view.setNeedsDisplayInRect(view.bounds());
+        view.refit_window();
         self.window.makeKeyAndOrderFront(None);
     }
 
