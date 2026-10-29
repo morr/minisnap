@@ -167,6 +167,8 @@ pub struct T0Capture {
     /// Full display frame in display pixels (top-left origin image space).
     pub image: Retained<CGImage>,
     /// Visible regular windows, front-to-back.
+    // Consumed by the overlay's click-to-window hit-testing.
+    #[allow(dead_code)]
     pub windows: Vec<T0Window>,
     /// Captured display's frame in ScreenCaptureKit global points.
     pub display_frame: CGRect,

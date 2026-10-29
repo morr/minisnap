@@ -11,11 +11,13 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSImage, NSMenu,
     NSMenuItem, NSStatusBar, NSStatusItem,
 };
-use objc2_core_foundation::CGPoint;
-use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
+use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_foundation::{NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
+use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 
 use crate::config::Config;
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
+use crate::overlay::Overlay;
 use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
@@ -28,8 +30,16 @@ const STATUS_ITEM_SQUARE_LENGTH: f64 = -2.0;
 /// How often the main-thread tick polls global-hotkey events, in seconds.
 const TICK_INTERVAL: f64 = 0.05;
 
-/// A closure to run on the main thread (results of background capture work).
-type MainJob = Box<dyn FnOnce() + Send>;
+/// Owned data produced on background threads, dispatched on the main thread
+/// by the tick. The controller itself is main-thread-only, so jobs carry
+/// data instead of closures over it.
+enum MainJob {
+    CaptureReady {
+        result: Result<crate::capture::T0Capture, String>,
+        screen_frame: CGRect,
+        scale: f64,
+    },
+}
 
 struct AppIvars {
     // NSStatusBar keeps only a weak reference to its items; holding the
@@ -47,6 +57,7 @@ struct AppIvars {
     hotkeys: RefCell<HotkeyRegistry>,
     jobs_tx: mpsc::Sender<MainJob>,
     jobs_rx: RefCell<mpsc::Receiver<MainJob>>,
+    overlay: RefCell<Overlay>,
 }
 
 define_class!(
@@ -79,14 +90,28 @@ define_class!(
             NSApplication::sharedApplication(mtm).terminate(None);
         }
 
+        #[unsafe(method(screenParamsChanged:))]
+        fn screen_params_changed(&self, _notification: Option<&objc2_foundation::NSNotification>) {
+            // Display configuration changed (monitor plugged/unplugged):
+            // the frozen frame no longer matches reality — cancel the mode.
+            if self.ivars().overlay.borrow().is_active() {
+                eprintln!("screens changed: cancelling capture mode");
+                self.ivars().overlay.borrow().cancel();
+            }
+        }
+
         #[unsafe(method(tick:))]
         fn tick(&self, _sender: Option<&AnyObject>) {
             loop {
                 let next = self.ivars().jobs_rx.borrow_mut().try_recv().ok();
-                let Some(job) = next else {
-                    break;
-                };
-                job();
+                match next {
+                    Some(MainJob::CaptureReady {
+                        result,
+                        screen_frame,
+                        scale,
+                    }) => self.capture_ready(result, screen_frame, scale),
+                    None => break,
+                }
             }
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
@@ -168,6 +193,7 @@ impl AppController {
 
         status_item.setMenu(Some(&menu));
         let (jobs_tx, jobs_rx) = mpsc::channel::<MainJob>();
+        let overlay = Overlay::new(mtm);
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             status_item: status_item.clone(),
             capture_item: capture_item.clone(),
@@ -176,6 +202,7 @@ impl AppController {
             hotkeys: RefCell::new(HotkeyRegistry::new()),
             jobs_tx,
             jobs_rx: RefCell::new(jobs_rx),
+            overlay: RefCell::new(overlay),
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -194,8 +221,19 @@ impl AppController {
         Self::apply_menu_hotkey(&open_latest_item, &open_hk);
 
         let mut hotkeys = HotkeyRegistry::new();
-        hotkeys.apply(capture_hk, open_hk);
+        hotkeys.apply(config.capture_hotkey, config.open_hotkey);
         this.ivars().hotkeys.replace(hotkeys);
+
+        // Display configuration changes cancel the overlay mode (4.7).
+        // SAFETY: observer registration with a live selector on `this`.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &this,
+                sel!(screenParamsChanged:),
+                Some(&NSApplicationDidChangeScreenParametersNotification),
+                None,
+            );
+        }
 
         this.schedule_tick(mtm);
         this
@@ -229,12 +267,16 @@ impl AppController {
     /// Start the frozen-area capture: pick the display under the cursor and
     /// log the T0 data (overlay and screenshot come next).
     fn start_capture(&self) {
+        if self.ivars().overlay.borrow().is_active() {
+            eprintln!("capture hotkey ignored: overlay already active");
+            return;
+        }
         let mtm = MainThreadMarker::from(self);
         let Some(screen) = crate::capture::screen_under_cursor(mtm) else {
             eprintln!("capture: no screens found");
             return;
         };
-        let frame = screen.frame();
+        let screen_frame = screen.frame();
         let scale = screen.backingScaleFactor();
         let primary_height = crate::capture::primary_screen_height(mtm);
         let mouse = NSEvent::mouseLocation();
@@ -244,10 +286,10 @@ impl AppController {
         );
         eprintln!(
             "capture: screen under cursor frame=({:.0},{:.0} {}x{}) scale={} mouse_sckit=({:.0},{:.0})",
-            frame.origin.x,
-            frame.origin.y,
-            frame.size.width,
-            frame.size.height,
+            screen_frame.origin.x,
+            screen_frame.origin.y,
+            screen_frame.size.width,
+            screen_frame.size.height,
             scale,
             mouse_sckit.x,
             mouse_sckit.y
@@ -257,26 +299,43 @@ impl AppController {
         std::thread::spawn(move || {
             objc2::rc::autoreleasepool(|_pool| {
                 let result = crate::capture::capture_t0(mouse_sckit);
-                let _ = jobs_tx.send(Box::new(move || match result {
-                    Ok(t0) => {
-                        let w = objc2_core_graphics::CGImage::width(Some(&t0.image));
-                        let h = objc2_core_graphics::CGImage::height(Some(&t0.image));
-                        eprintln!(
-                            "capture: t0 ready: {}x{} px, {} windows, display frame=({:.0},{:.0} {}x{})",
-                            w,
-                            h,
-                            t0.windows.len(),
-                            t0.display_frame.origin.x,
-                            t0.display_frame.origin.y,
-                            t0.display_frame.size.width,
-                            t0.display_frame.size.height
-                        );
-                        // The overlay mode is wired up in section 4.
-                    }
-                    Err(e) => eprintln!("capture: {e}"),
-                }));
+                let _ = jobs_tx.send(MainJob::CaptureReady {
+                    result,
+                    screen_frame,
+                    scale,
+                });
             });
         });
+    }
+
+    /// T0 data arrived: enter the frozen-frame overlay mode. Main thread.
+    fn capture_ready(
+        &self,
+        result: Result<crate::capture::T0Capture, String>,
+        screen_frame: CGRect,
+        scale: f64,
+    ) {
+        let Ok(t0) = result else {
+            if let Err(e) = &result {
+                eprintln!("capture: {e}");
+            }
+            return;
+        };
+        let overlay = self.ivars().overlay.borrow();
+        if overlay.is_active() {
+            eprintln!("capture: t0 ready but mode already active, dropping");
+            return;
+        }
+        overlay.show(
+            t0,
+            screen_frame,
+            scale,
+            Vec::new(),
+            Box::new(|outcome| {
+                // Output wiring comes in section 5.
+                eprintln!("overlay outcome: {outcome:?}");
+            }),
+        );
     }
 }
 
@@ -298,8 +357,8 @@ pub fn run() {
 
     let controller = AppController::new(mtm, config);
     app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
-    // NSMenuItem targets and the app delegate hold weak references, so the
-    // controller must outlive everything: leak the single process-wide copy.
+    // NSMenuItem targets and the app delegate hold weak references; the
+    // controller (and its overlay) live for the whole process.
     std::mem::forget(controller);
 
     app.run();
