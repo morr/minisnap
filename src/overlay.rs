@@ -26,7 +26,7 @@ use objc2_quartz_core::{
     CATransaction,
 };
 
-use crate::capture::T0Capture;
+use crate::capture::{T0Capture, T0Window};
 
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
@@ -129,8 +129,10 @@ struct OverlayIvars {
     /// Full-image pixel size.
     image_size_px: Cell<(usize, usize)>,
     /// Captured display frame in ScreenCaptureKit global points.
-    #[allow(dead_code)]
     display_frame_sckit: Cell<CGRect>,
+    /// Visible regular windows at capture time (T0), front-to-back, for
+    /// click-to-window hit-testing.
+    windows: RefCell<Vec<T0Window>>,
     /// Overlay window frame = captured screen frame (AppKit points).
     screen_frame: Cell<CGRect>,
     scale: Cell<f64>,
@@ -226,6 +228,7 @@ define_class!(
                 image: RefCell::new(None),
                 image_size_px: Cell::new((0, 0)),
                 display_frame_sckit: Cell::new(CGRect::ZERO),
+                windows: RefCell::new(Vec::new()),
                 screen_frame: Cell::new(CGRect::ZERO),
                 scale: Cell::new(1.0),
                 frame_layer: CALayer::new(),
@@ -771,6 +774,7 @@ impl OverlayView {
         *ivars.image.borrow_mut() = Some(t0.image);
         ivars.image_size_px.set((w_px, h_px));
         ivars.display_frame_sckit.set(t0.display_frame);
+        *ivars.windows.borrow_mut() = t0.windows;
         ivars.screen_frame.set(screen_frame);
         ivars.scale.set(scale);
         *ivars.on_done.borrow_mut() = Some(on_done);
@@ -877,7 +881,7 @@ impl OverlayView {
             .map(|w| w.isKeyWindow())
             .unwrap_or(false);
         eprintln!(
-            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}",
+            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, windows: {}",
             w_px,
             h_px,
             screen_frame.origin.x,
@@ -885,7 +889,8 @@ impl OverlayView {
             screen_frame.size.width,
             screen_frame.size.height,
             app.isActive(),
-            key_state
+            key_state,
+            ivars.windows.borrow().len()
         );
     }
 
@@ -960,13 +965,37 @@ impl OverlayView {
         let moved = (up.x - start.x).abs() > CLICK_TOLERANCE_PT
             || (up.y - start.y).abs() > CLICK_TOLERANCE_PT;
         if !moved {
-            // Click: whole display for now; click-to-window lands in 4.6.
-            let (w_px, h_px) = ivars.image_size_px.get();
-            let full = CGRect::new(
-                CGPoint::ZERO,
-                objc2_core_foundation::CGSize::new(w_px as f64, h_px as f64),
+            // Click: capture the topmost T0 window under the cursor; a miss
+            // (empty desktop area) takes the whole display. Window frames
+            // are SCKit-global top-left points; the click converts from
+            // display-local AppKit the same way the pixel mapping does.
+            let sckit = ivars.display_frame_sckit.get();
+            let point_sckit = CGPoint::new(
+                sckit.origin.x + up.x,
+                sckit.origin.y + (ivars.screen_frame.get().size.height - up.y),
             );
-            self.finish(OverlayOutcome::Selected { pixel_rect: full });
+            let frames: Vec<CGRect> = ivars.windows.borrow().iter().map(|w| w.frame).collect();
+            eprintln!(
+                "click: sckit point ({:.0},{:.0}), {} T0 windows",
+                point_sckit.x,
+                point_sckit.y,
+                frames.len()
+            );
+            let rect = match crate::capture::geometry::topmost_window_at(&frames, point_sckit) {
+                Some(i) => crate::capture::geometry::window_frame_to_pixel_rect(
+                    frames[i],
+                    sckit,
+                    ivars.scale.get(),
+                ),
+                None => {
+                    let (w_px, h_px) = ivars.image_size_px.get();
+                    CGRect::new(
+                        CGPoint::ZERO,
+                        objc2_core_foundation::CGSize::new(w_px as f64, h_px as f64),
+                    )
+                }
+            };
+            self.finish(OverlayOutcome::Selected { pixel_rect: rect });
             return;
         }
 

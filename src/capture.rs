@@ -311,6 +311,7 @@ mod tests {
 #[allow(dead_code)]
 pub mod geometry {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::CGRectContainsPoint;
 
     /// AppKit global point → ScreenCaptureKit global point.
     pub fn point_to_sckit(point: CGPoint, primary_height_pt: f64) -> CGPoint {
@@ -402,6 +403,15 @@ pub mod geometry {
     /// Display-local AppKit point → pixel point in the captured image.
     pub fn display_point_to_pixel(point: CGPoint, display_height_pt: f64, scale: f64) -> CGPoint {
         CGPoint::new(point.x * scale, (display_height_pt - point.y) * scale)
+    }
+
+    /// Index of the first (front-to-back) window frame containing `point`,
+    /// or None — the click-to-window target. Zero-sized frames never hit.
+    #[allow(dead_code)]
+    pub fn topmost_window_at(frames: &[CGRect], point: CGPoint) -> Option<usize> {
+        frames
+            .iter()
+            .position(|f| f.size.width > 0.0 && f.size.height > 0.0 && CGRectContainsPoint(*f, point))
     }
 
     #[cfg(test)]
@@ -523,6 +533,29 @@ pub mod geometry {
         fn display_point_maps_to_pixel() {
             let p = display_point_to_pixel(CGPoint::new(100.0, 450.0), 600.0, 2.0);
             assert_eq!((p.x, p.y), (200.0, 300.0));
+        }
+
+        #[test]
+        fn topmost_window_hits_front_to_back() {
+            let frames = [
+                rect(100.0, 100.0, 200.0, 100.0),
+                rect(0.0, 0.0, 500.0, 500.0),
+            ];
+            // Where both frames contain the point, the front one wins.
+            assert_eq!(topmost_window_at(&frames, CGPoint::new(120.0, 120.0)), Some(0));
+            // Outside the front window but inside the one behind it.
+            assert_eq!(topmost_window_at(&frames, CGPoint::new(20.0, 20.0)), Some(1));
+            // Desktop: no window contains the point.
+            assert_eq!(topmost_window_at(&frames, CGPoint::new(600.0, 600.0)), None);
+        }
+
+        #[test]
+        fn topmost_window_skips_zero_sized_frames() {
+            let frames = [
+                rect(10.0, 10.0, 0.0, 0.0),
+                rect(0.0, 0.0, 100.0, 100.0),
+            ];
+            assert_eq!(topmost_window_at(&frames, CGPoint::new(50.0, 50.0)), Some(1));
         }
     }
 }
