@@ -11,15 +11,15 @@ use objc2::{
     define_class, extern_methods, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSScreen, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect};
 use objc2_core_graphics::{
     CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath,
     CGPath, CGContext,
 };
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::{NSNotification, NSNumber, NSString};
 use objc2_quartz_core::{
     kCAAlignmentCenter, kCAFilterNearest, kCAMediaTimingFunctionEaseInEaseOut, CABasicAnimation,
     CACurrentMediaTime, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer, CATextLayer,
@@ -284,10 +284,56 @@ define_class!(
         fn __mouse_up(&self, event: &NSEvent) {
             self.handle_mouse_up(event);
         }
+
+        #[unsafe(method(screenDidChange:))]
+        fn __screen_did_change(&self, _notification: &NSNotification) {
+            // Display configuration changed while frozen: the T0 frame no
+            // longer matches the screens, so the mode is invalid.
+            if self.ivars().active.get() {
+                eprintln!("overlay: display configuration changed, cancelling");
+                self.finish(OverlayOutcome::Cancelled);
+            }
+        }
     }
 );
 
-impl OverlayView {
+/// Click anywhere on a veil = cancel the whole mode.
+#[derive(Default)]
+struct VeilIvars {
+    on_click: RefCell<Option<Box<dyn Fn()>>>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = VeilIvars]
+    struct VeilView;
+
+    unsafe impl NSObjectProtocol for VeilView {}
+
+    impl VeilView {
+        #[unsafe(method_id(initWithFrame:))]
+        unsafe fn __init_with_frame(
+            this: Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self> {
+            let this = this.set_ivars(VeilIvars {
+                on_click: RefCell::new(None),
+            });
+            // SAFETY: NSView's designated initializer with plain ivars set.
+            unsafe { msg_send![super(this), initWithFrame: frame_rect] }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, _event: &NSEvent) {
+            if let Some(on_click) = self.ivars().on_click.borrow_mut().take() {
+                on_click();
+            }
+        }
+    }
+);
+
+impl VeilView {
     extern_methods!(
         #[unsafe(method(initWithFrame:))]
         unsafe fn init_with_frame(
@@ -300,11 +346,78 @@ impl OverlayView {
         // SAFETY: overridden designated initializer, ivars fully set.
         unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
     }
+}
+
+impl OverlayView {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        unsafe fn init_with_frame(
+            this: Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self>;
+    );
+
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let view = unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) };
+        // Cancel the mode when the display configuration changes (monitor
+        // plugged or unplugged, resolution change): the frozen frame and the
+        // window frames no longer match the screens. The observer lives as
+        // long as the view, i.e. for the whole process.
+        let name = NSString::from_str("NSWorkspaceDidChangeScreenParametersNotification");
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: the selector names the screenDidChange: method defined on
+        // OverlayView; the observer outlives every notification (process
+        // lifetime), so no removal bookkeeping is needed.
+        unsafe {
+            center.addObserver_selector_name_object(
+                &view,
+                objc2::sel!(screenDidChange:),
+                Some(&name),
+                None,
+            );
+        }
+        view
+    }
 
     /// Style a dimming strip once.
     fn setup_strip(strip: &CALayer) {
         let dim_color = NSColor::blackColor().colorWithAlphaComponent(DIM_ALPHA);
         strip.setBackgroundColor(Some(&dim_color.CGColor()));
+    }
+
+    /// Build a veil window over one of the other displays: same shielding
+    /// level, translucent black, a click cancels the mode.
+    fn make_veil(mtm: MainThreadMarker, frame: CGRect, view: &OverlayView) -> Retained<NSWindow> {
+        let window = unsafe {
+            OverlayWindow::init_with_content_rect(
+                OverlayWindow::alloc(mtm),
+                frame,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: CGShieldingWindowLevel is a plain C function.
+        let level = unsafe { CGShieldingWindowLevel() };
+        window.setLevel(level as _);
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(
+            &NSColor::blackColor().colorWithAlphaComponent(DIM_ALPHA),
+        ));
+        window.setIgnoresMouseEvents(false);
+        window.setHidesOnDeactivate(false);
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        let veil_view = VeilView::new(mtm);
+        // Cancel the whole mode when the veil is clicked.
+        let target = view.retain();
+        *veil_view.ivars().on_click.borrow_mut() =
+            Some(Box::new(move || target.finish(OverlayOutcome::Cancelled)));
+        window.setContentView(Some(&veil_view));
+        // Upcast to the base window class for the veil list.
+        Retained::from(&window)
     }
 
     /// Place the four dimming strips around `hole` (display-local points);
@@ -760,7 +873,6 @@ impl OverlayView {
         t0: T0Capture,
         screen_frame: CGRect,
         scale: f64,
-        veils: Vec<Retained<NSWindow>>,
         on_done: Box<dyn FnOnce(OverlayOutcome)>,
     ) {
         let ivars = self.ivars();
@@ -820,12 +932,27 @@ impl OverlayView {
             .as_ref()
             .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
 
-        // Veils for other displays (created by the caller per show()).
-        let mut old_veils = ivars.veils.borrow_mut();
-        for veil in old_veils.drain(..) {
-            veil.orderOut(None);
+        // Veils for the other displays: take down the previous session's,
+        // then cover every screen except the captured one. A veil click
+        // cancels the mode.
+        {
+            let mut old_veils = ivars.veils.borrow_mut();
+            for veil in old_veils.drain(..) {
+                veil.orderOut(None);
+            }
         }
-        *old_veils = veils;
+        let mtm = MainThreadMarker::new().expect("overlay on main thread");
+        let mut veils = Vec::new();
+        for screen in NSScreen::screens(mtm).iter() {
+            let frame = screen.frame();
+            if frame.origin == screen_frame.origin && frame.size == screen_frame.size {
+                continue;
+            }
+            let veil = Self::make_veil(mtm, frame, self);
+            veil.orderFrontRegardless();
+            veils.push(veil);
+        }
+        *ivars.veils.borrow_mut() = veils;
 
         if let Some(window) = ivars.window.borrow().as_ref() {
             window.setCollectionBehavior(
@@ -881,7 +1008,7 @@ impl OverlayView {
             .map(|w| w.isKeyWindow())
             .unwrap_or(false);
         eprintln!(
-            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, windows: {}",
+            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, windows: {}, veils: {}",
             w_px,
             h_px,
             screen_frame.origin.x,
@@ -890,7 +1017,8 @@ impl OverlayView {
             screen_frame.size.height,
             app.isActive(),
             key_state,
-            ivars.windows.borrow().len()
+            ivars.windows.borrow().len(),
+            ivars.veils.borrow().len()
         );
     }
 
@@ -1114,10 +1242,9 @@ impl Overlay {
         t0: T0Capture,
         screen_frame: CGRect,
         scale: f64,
-        veils: Vec<Retained<NSWindow>>,
         on_done: Box<dyn FnOnce(OverlayOutcome)>,
     ) {
-        self.view.show(t0, screen_frame, scale, veils, on_done);
+        self.view.show(t0, screen_frame, scale, on_done);
     }
 
     /// Cancel the active mode without a result (e.g. display config change).

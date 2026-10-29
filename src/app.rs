@@ -339,7 +339,6 @@ impl AppController {
             t0,
             screen_frame,
             scale,
-            Vec::new(),
             Box::new(|outcome| {
                 // Output wiring comes in section 5.
                 eprintln!("overlay outcome: {outcome:?}");
