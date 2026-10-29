@@ -22,6 +22,7 @@ extern "C-unwind" {
 }
 
 /// Cheap non-prompting check: has Screen Recording been granted?
+#[allow(dead_code)] // wired into the startup check in section 7
 pub fn preflight_screen_capture() -> bool {
     // SAFETY: plain C function, no arguments.
     unsafe { CGPreflightScreenCaptureAccess() }

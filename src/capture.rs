@@ -8,10 +8,11 @@ use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSEvent, NSScreen};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics::CGImage;
+use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGImage};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+    SCCaptureResolutionType,
 };
 
 /// Find the screen that contains the mouse cursor; fall back to the main
@@ -174,8 +175,9 @@ pub struct T0Capture {
     pub display_frame: CGRect,
 }
 
-/// One-shot screenshot of a whole display, blocking until the image arrives.
-/// Call from a background thread.
+/// One-shot screenshot of a whole display at its full pixel resolution
+/// (from the display mode), blocking until the image arrives. Call from a
+/// background thread.
 pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, String> {
     let empty = NSArray::new();
     // SAFETY: plain init on a freshly allocated filter; empty window list.
@@ -188,13 +190,21 @@ pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, S
     };
     // SAFETY: plain constructor.
     let config = unsafe { SCStreamConfiguration::new() };
+    // SCDisplay.width reports the scaled (point) size on current macOS, so
+    // the capture resolution comes from the display mode's true pixel size.
+    // SAFETY: plain C queries on a live display id.
+    let display_id = unsafe { display.displayID() };
+    let mode = CGDisplayCopyDisplayMode(display_id).ok_or("screenshot: no display mode")?;
+    let pixels = (mode.pixel_width(), mode.pixel_height());
     // SAFETY: plain property access on a live SCDisplay object.
-    let (width, height) = unsafe { (display.width(), display.height()) };
+    let frame_pt = unsafe { display.frame() };
     // SAFETY: plain property setters on a freshly created configuration.
     unsafe {
-        config.setWidth(width as usize);
-        config.setHeight(height as usize);
+        config.setCaptureResolution(SCCaptureResolutionType::Best);
+        config.setWidth(pixels.0);
+        config.setHeight(pixels.1);
         config.setShowsCursor(false);
+        config.setSourceRect(CGRect::new(CGPoint::ZERO, frame_pt.size));
     }
 
     let (tx, rx) = mpsc::channel::<Result<Retained<CGImage>, String>>();
@@ -221,8 +231,9 @@ pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, S
 }
 
 /// Capture the whole T0 state for the display under `mouse_sckit`:
-/// shareable content (display + window list) and the display screenshot.
-/// Blocking; call from a background thread.
+/// shareable content (display + window list) and the display screenshot at
+/// `display_pixels` resolution (points × backing scale). Blocking; call
+/// from a background thread.
 pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
     let content = shareable_content()?;
     let display =
@@ -247,14 +258,25 @@ mod tests {
     #[test]
     #[ignore = "requires Screen Recording permission for the calling process"]
     fn capture_saves_frame_to_tmp() {
+        // Cargo tests run off the main thread, so no NSScreen here: the
+        // expected pixel size comes from the display mode.
+        use objc2_core_graphics::{
+            CGDisplayCopyDisplayMode, CGDisplayModeGetPixelHeight, CGDisplayModeGetPixelWidth,
+        };
         let content = shareable_content().expect("shareable content");
         let display = pick_display(&content, CGPoint::new(0.0, 0.0)).expect("a display");
+        let display_id = unsafe { display.displayID() };
+        let mode = unsafe { CGDisplayCopyDisplayMode(display_id) }.expect("display mode");
+        let expected = (
+            CGDisplayModeGetPixelWidth(Some(&mode)),
+            CGDisplayModeGetPixelHeight(Some(&mode)),
+        );
+        eprintln!("expected {expected:?} px");
         let image = capture_display_image(&display).expect("screenshot");
         let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
-        let (dw, dh) = (unsafe { display.width() }, unsafe { display.height() });
-        eprintln!("frame {w}x{h} px vs display {dw}x{dh} px");
-        assert_eq!(w as isize, dw);
-        assert_eq!(h as isize, dh);
+        eprintln!("frame {w}x{h} px");
+        assert_eq!(w, expected.0);
+        assert_eq!(h, expected.1);
 
         // Dump the frame as PNG so it can be eyeballed.
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
