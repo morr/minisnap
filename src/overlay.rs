@@ -4,9 +4,12 @@
 
 use std::cell::{Cell, RefCell};
 
+use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{define_class, extern_methods, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, extern_methods, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
@@ -16,9 +19,11 @@ use objc2_core_graphics::{
     CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath,
     CGPath, CGContext,
 };
-use objc2_foundation::NSString;
+use objc2_foundation::{NSNumber, NSString};
 use objc2_quartz_core::{
-    kCAAlignmentCenter, kCAFilterNearest, CALayer, CAShapeLayer, CATextLayer, CATransaction,
+    kCAAlignmentCenter, kCAFilterNearest, kCAMediaTimingFunctionEaseInEaseOut, CABasicAnimation,
+    CACurrentMediaTime, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer, CATextLayer,
+    CATransaction,
 };
 
 use crate::capture::T0Capture;
@@ -158,6 +163,8 @@ struct OverlayIvars {
     /// Readout pinned under the loupe: cursor coordinates while idle, the
     /// selection size while dragging (logical pixels).
     size_label: Retained<CATextLayer>,
+    /// Red mode border along the display perimeter.
+    border: Retained<CAShapeLayer>,
     /// The logical-pixel copy of the frozen frame, alive while the mode is
     /// active (the context and its backing bytes must live together).
     sampler: RefCell<Option<FrameSampler>>,
@@ -186,6 +193,15 @@ const LOUPE_GAP_PT: f64 = 18.0;
 /// draws from the top; 18pt for a 14pt font leaves near-equal gaps above
 /// and below the digits.
 const HUD_LABEL_H_PT: f64 = 18.0;
+/// Red mode border along the display perimeter, in points.
+const BORDER_W_PT: f64 = 4.0;
+/// Opacity floor of the idle pulse.
+const BORDER_MIN_OPACITY: f64 = 0.55;
+const BORDER_FADE_IN_DUR: f64 = 0.25;
+const BORDER_PULSE_DUR: f64 = 0.8;
+const BORDER_FADE_OUT_DUR: f64 = 0.2;
+/// Animation key of the idle pulse on the border layer.
+const BORDER_PULSE_KEY: &str = "border-pulse";
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -227,6 +243,7 @@ define_class!(
                 axis_h_dark: CAShapeLayer::new(),
                 axis_h_light: CAShapeLayer::new(),
                 size_label: CATextLayer::new(),
+                border: CAShapeLayer::new(),
                 sampler: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -432,6 +449,70 @@ impl OverlayView {
             label.setHidden(true);
             ivars.root_layer.addSublayer(label);
         }
+
+        // Red mode border along the display perimeter, Monosnap-style. The
+        // rect is inset by half the stroke so the line stays fully inside
+        // the window. Invisible until show() fades it in.
+        let border = &ivars.border;
+        let inset = BORDER_W_PT / 2.0;
+        let size = ivars.screen_frame.get().size;
+        let border_path = CGMutablePath::new();
+        // SAFETY: plain C path builders with a null transform.
+        unsafe {
+            CGMutablePath::move_to_point(Some(&border_path), std::ptr::null(), inset, inset);
+            CGMutablePath::add_line_to_point(
+                Some(&border_path),
+                std::ptr::null(),
+                size.width - inset,
+                inset,
+            );
+            CGMutablePath::add_line_to_point(
+                Some(&border_path),
+                std::ptr::null(),
+                size.width - inset,
+                size.height - inset,
+            );
+            CGMutablePath::add_line_to_point(
+                Some(&border_path),
+                std::ptr::null(),
+                inset,
+                size.height - inset,
+            );
+            CGMutablePath::add_line_to_point(Some(&border_path), std::ptr::null(), inset, inset);
+        }
+        let border_ref: &CGPath = &border_path;
+        border.setPath(Some(border_ref));
+        border.setStrokeColor(Some(&NSColor::redColor().CGColor()));
+        border.setFillColor(None);
+        border.setLineWidth(BORDER_W_PT);
+        border.setContentsScale(ivars.scale.get());
+        border.setOpacity(0.0);
+        // On top of every other HUD element.
+        ivars.root_layer.addSublayer(border);
+    }
+
+    /// Arm the idle pulse on the border. The model opacity stays 1.0, so
+    /// removing the pulse key drops the border back to full red while
+    /// dragging.
+    fn start_border_pulse(border: &CAShapeLayer) {
+        let pulse = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+        let from = NSNumber::numberWithDouble(1.0);
+        let to = NSNumber::numberWithDouble(BORDER_MIN_OPACITY);
+        // SAFETY: opacity animations encode from/to values as NSNumber.
+        unsafe {
+            pulse.setFromValue(Some(&*(std::ptr::from_ref(&*from).cast::<AnyObject>())));
+            pulse.setToValue(Some(&*(std::ptr::from_ref(&*to).cast::<AnyObject>())));
+        }
+        pulse.setDuration(BORDER_PULSE_DUR);
+        pulse.setAutoreverses(true);
+        pulse.setRepeatCount(f32::INFINITY);
+        pulse.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(unsafe {
+            kCAMediaTimingFunctionEaseInEaseOut
+        })));
+        // No overlap with the fade-in: the pulse starts only after the fade
+        // completes.
+        pulse.setBeginTime(CACurrentMediaTime() + BORDER_FADE_IN_DUR);
+        border.addAnimation_forKey(&pulse, Some(&NSString::from_str(BORDER_PULSE_KEY)));
     }
 
     /// Replace the text of a CATextLayer-backed HUD label.
@@ -755,14 +836,39 @@ impl OverlayView {
                 .activate();
             window.makeKeyAndOrderFront(None);
         }
+
+        // Border: reset invisible without animation, fade in, arm the idle
+        // pulse (it starts only after the fade completes).
+        let border = &ivars.border;
+        border.removeAllAnimations();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        border.setHidden(false);
+        border.setOpacity(0.0);
+        CATransaction::commit();
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(BORDER_FADE_IN_DUR);
+        border.setOpacity(1.0);
+        CATransaction::commit();
+        Self::start_border_pulse(border);
+
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"));
+        let key_state = ivars
+            .window
+            .borrow()
+            .as_ref()
+            .map(|w| w.isKeyWindow())
+            .unwrap_or(false);
         eprintln!(
-            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{})",
+            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}",
             w_px,
             h_px,
             screen_frame.origin.x,
             screen_frame.origin.y,
             screen_frame.size.width,
-            screen_frame.size.height
+            screen_frame.size.height,
+            app.isActive(),
+            key_state
         );
     }
 
@@ -783,6 +889,10 @@ impl OverlayView {
         ivars.drag_start.set(point);
         ivars.mouse.set(point);
         ivars.state.set(OverlayState::Drag);
+        // Drag: the border holds full red, no pulse.
+        ivars
+            .border
+            .removeAnimationForKey(&NSString::from_str(BORDER_PULSE_KEY));
         // Zero-size hole: full dimming until the drag opens a rectangle.
         self.update_dim(Some(CGRect::new(point, objc2_core_foundation::CGSize::ZERO)));
         self.update_hud(point, Some((0.0, 0.0)));
@@ -882,9 +992,29 @@ impl OverlayView {
         ivars.axis_v_light.setHidden(true);
         ivars.axis_h_dark.setHidden(true);
         ivars.axis_h_light.setHidden(true);
-        if let Some(window) = ivars.window.borrow().as_ref() {
-            window.orderOut(None);
+
+        // The border fades out; the window goes down in the fade's
+        // completion block, so the frozen frame and the dimming linger for
+        // the fade (a short freeze-frame flash). The guard keeps the window
+        // up if the mode was re-entered during the fade.
+        let border = &ivars.border;
+        border.removeAnimationForKey(&NSString::from_str(BORDER_PULSE_KEY));
+        let window = ivars.window.borrow().as_ref().map(|w| w.clone());
+        let view = self.retain();
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(BORDER_FADE_OUT_DUR);
+        if let Some(window) = window {
+            let on_fade = RcBlock::new(move || {
+                if !view.ivars().active.get() {
+                    window.orderOut(None);
+                }
+            });
+            // SAFETY: the completion block runs on the main thread and only
+            // touches retained ObjC handles owned by the closure.
+            unsafe { CATransaction::setCompletionBlock(Some(&on_fade)) };
         }
+        border.setOpacity(0.0);
+        CATransaction::commit();
 
         if let Some(on_done) = ivars.on_done.borrow_mut().take() {
             on_done(outcome);

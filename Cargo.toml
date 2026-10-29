@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
+    "NSValue",
     "NSString",
     "NSArray",
     "NSDictionary",
@@ -58,6 +59,7 @@ objc2-quartz-core = { version = "0.3", features = [
     "CATransaction",
     "CAAnimation",
     "CAMediaTiming",
+    "CAMediaTimingFunction",
 ] }
 objc2-core-graphics = { version = "0.3", features = [
     "CGImage",
