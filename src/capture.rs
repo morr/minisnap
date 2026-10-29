@@ -38,3 +38,236 @@ pub fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
     }
     fallback
 }
+
+/// Coordinate conversions between the three spaces the capture pipeline
+/// touches. This is the single converter in the codebase — pixel-precision
+/// of the crop depends on it.
+///
+/// Spaces:
+/// - *AppKit global points*: origin at the bottom-left corner of the primary
+///   screen, Y grows up (`NSScreen.frame`, `NSEvent.mouseLocation`).
+/// - *ScreenCaptureKit global points*: origin at the top-left corner of the
+///   primary screen, Y grows down (`SCWindow.frame`, `SCDisplay.frame`).
+///   The two are related by `y_sckit = primary_height_pt - y_appkit`.
+/// - *Image pixels*: origin at the top-left corner of the captured display,
+///   Y grows down; point coordinates on that display scale by the display's
+///   `backingScaleFactor`.
+// Consumed by the overlay (selection, magnifier) and output (crop) modules.
+#[allow(dead_code)]
+pub mod geometry {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    /// AppKit global point → ScreenCaptureKit global point.
+    pub fn point_to_sckit(point: CGPoint, primary_height_pt: f64) -> CGPoint {
+        CGPoint::new(point.x, primary_height_pt - point.y)
+    }
+
+    /// Clip a rect to `bounds`, returning `CGRect::ZERO` when they do not
+    /// intersect.
+    pub fn intersect(rect: CGRect, bounds: CGRect) -> CGRect {
+        let r = rect.standardize();
+        let b = bounds.standardize();
+        let x0 = r.origin.x.max(b.origin.x);
+        let y0 = r.origin.y.max(b.origin.y);
+        let x1 = r.max().x.min(b.max().x);
+        let y1 = r.max().y.min(b.max().y);
+        if x1 <= x0 || y1 <= y0 {
+            return CGRect::ZERO;
+        }
+        CGRect::new(
+            CGPoint::new(x0, y0),
+            CGSize::new(x1 - x0, y1 - y0),
+        )
+    }
+
+    /// Clamp a point into the `bounds` rect.
+    pub fn clamp_point(point: CGPoint, bounds: CGRect) -> CGPoint {
+        let b = bounds.standardize();
+        CGPoint::new(
+            point.x.clamp(b.origin.x, b.max().x),
+            point.y.clamp(b.origin.y, b.max().y),
+        )
+    }
+
+    /// A selection rect given in display-local AppKit points (bottom-left
+    /// origin) → the corresponding pixel rect of the captured image
+    /// (top-left origin). Edges round inward-safe: origin down, extent up,
+    /// then the result is clamped to the image bounds.
+    pub fn selection_to_pixel_rect(
+        selection: CGRect,
+        display_size_pt: CGSize,
+        scale: f64,
+    ) -> CGRect {
+        let s = selection.standardize();
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let x0 = (s.origin.x * scale).floor();
+        let x1 = ((s.origin.x + s.size.width) * scale).ceil();
+        // Flip Y: bottom of the selection in points maps to the bottom of
+        // the pixel rect (larger Y in image space).
+        let y_top_px = (display_size_pt.height - (s.origin.y + s.size.height)) * scale;
+        let y_bottom_px = (display_size_pt.height - s.origin.y) * scale;
+        let y0 = y_top_px.floor().max(0.0);
+        let y1 = y_bottom_px.ceil();
+        let image_bounds = CGRect::new(
+            CGPoint::ZERO,
+            CGSize::new(display_size_pt.width * scale, display_size_pt.height * scale),
+        );
+        let px = CGRect::new(CGPoint::new(x0, y0), CGSize::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)));
+        intersect(px, image_bounds)
+    }
+
+    /// A window frame in ScreenCaptureKit global points → pixel rect inside
+    /// the captured display's image. `display_frame_sckit` is the captured
+    /// display's frame in the same SCKit space; the result is clamped to the
+    /// image bounds.
+    pub fn window_frame_to_pixel_rect(
+        window_frame: CGRect,
+        display_frame_sckit: CGRect,
+        scale: f64,
+    ) -> CGRect {
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        let x0 = (window_frame.origin.x - display_frame_sckit.origin.x) * scale;
+        let y0 = (window_frame.origin.y - display_frame_sckit.origin.y) * scale;
+        let w = window_frame.size.width * scale;
+        let h = window_frame.size.height * scale;
+        let image_bounds = CGRect::new(
+            CGPoint::ZERO,
+            CGSize::new(
+                display_frame_sckit.size.width * scale,
+                display_frame_sckit.size.height * scale,
+            ),
+        );
+        let px = CGRect::new(
+            CGPoint::new(x0, y0),
+            CGSize::new(w.max(0.0), h.max(0.0)),
+        );
+        intersect(px, image_bounds)
+    }
+
+    /// Display-local AppKit point → pixel point in the captured image.
+    pub fn display_point_to_pixel(point: CGPoint, display_height_pt: f64, scale: f64) -> CGPoint {
+        CGPoint::new(point.x * scale, (display_height_pt - point.y) * scale)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+            CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+        }
+
+        #[test]
+        fn point_to_sckit_flips_y() {
+            // Primary screen 900pt tall: bottom-left (0,0) is top-left (0,900).
+            let p = point_to_sckit(CGPoint::new(100.0, 0.0), 900.0);
+            assert_eq!((p.x, p.y), (100.0, 900.0));
+            let p = point_to_sckit(CGPoint::new(100.0, 900.0), 900.0);
+            assert_eq!((p.x, p.y), (100.0, 0.0));
+        }
+
+        #[test]
+        fn intersect_clips_and_handles_disjoint() {
+            let bounds = rect(0.0, 0.0, 100.0, 100.0);
+            let r = intersect(rect(20.0, 30.0, 50.0, 40.0), bounds);
+            assert_eq!((r.origin.x, r.origin.y), (20.0, 30.0));
+            assert_eq!((r.size.width, r.size.height), (50.0, 40.0));
+            // Extends past the right/bottom edges.
+            let r = intersect(rect(80.0, 80.0, 60.0, 60.0), bounds);
+            assert_eq!((r.size.width, r.size.height), (20.0, 20.0));
+            // Disjoint.
+            let r = intersect(rect(200.0, 0.0, 10.0, 10.0), bounds);
+            assert!(r == CGRect::ZERO);
+        }
+
+        #[test]
+        fn intersect_handles_negative_display_coords() {
+            // A display left of the primary has negative x in both spaces.
+            let display = rect(-1920.0, 0.0, 1920.0, 1080.0);
+            let window = rect(-1800.0, 100.0, 3000.0, 500.0); // spills right
+            let r = intersect(window, display);
+            assert_eq!((r.origin.x, r.origin.y), (-1800.0, 100.0));
+            assert_eq!((r.size.width, r.size.height), (1920.0 - 120.0, 500.0));
+        }
+
+        #[test]
+        fn clamp_point_keeps_inside_bounds() {
+            let bounds = rect(0.0, 0.0, 100.0, 50.0);
+            let p = clamp_point(CGPoint::new(-5.0, 60.0), bounds);
+            assert_eq!((p.x, p.y), (0.0, 50.0));
+            let p = clamp_point(CGPoint::new(10.0, 20.0), bounds);
+            assert_eq!((p.x, p.y), (10.0, 20.0));
+        }
+
+        #[test]
+        fn selection_maps_1x_bottom_left_origin() {
+            // Display 800x600pt at 1x, selection y=400..600 (top half in
+            // AppKit space) → pixel rect y=0..200 from the top.
+            let px = selection_to_pixel_rect(rect(100.0, 400.0, 300.0, 200.0), CGSize::new(800.0, 600.0), 1.0);
+            assert_eq!((px.origin.x, px.origin.y), (100.0, 0.0));
+            assert_eq!((px.size.width, px.size.height), (300.0, 200.0));
+        }
+
+        #[test]
+        fn selection_maps_2x_and_rounds_edges() {
+            // 2x: a 300.5 x 200.25pt selection covers ceil-rounded pixels.
+            let px = selection_to_pixel_rect(
+                rect(10.2, 400.0, 300.5, 200.25),
+                CGSize::new(800.0, 600.0),
+                2.0,
+            );
+            assert_eq!(px.origin.x, 20.0); // floor(10.2 * 2)
+            assert_eq!(px.size.width, 602.0); // ceil(310.7 * 2) - floor(10.2 * 2) = 622 - 20
+            assert_eq!(px.origin.y, 0.0); // selection spills past the top edge
+            assert_eq!(px.size.height, (600.0 - 400.0) * 2.0);
+        }
+
+        #[test]
+        fn selection_off_display_clamps_to_image() {
+            // Selection partially outside the display: pixels clamp to bounds.
+            let px = selection_to_pixel_rect(rect(-50.0, 500.0, 200.0, 200.0), CGSize::new(800.0, 600.0), 2.0);
+            assert_eq!((px.origin.x, px.origin.y), (0.0, 0.0));
+            assert_eq!((px.size.width, px.size.height), (300.0, 200.0));
+        }
+
+        #[test]
+        fn window_frame_maps_to_display_pixels() {
+            // Display at SCKit origin (0,0) 800x600pt; window at (100, 50)
+            // 200x100pt → pixel rect (100,50) 200x100 at 1x.
+            let px = window_frame_to_pixel_rect(
+                rect(100.0, 50.0, 200.0, 100.0),
+                rect(0.0, 0.0, 800.0, 600.0),
+                1.0,
+            );
+            assert_eq!((px.origin.x, px.origin.y), (100.0, 50.0));
+            assert_eq!((px.size.width, px.size.height), (200.0, 100.0));
+
+            // Secondary display with negative SCKit origin and 2x scale.
+            let px = window_frame_to_pixel_rect(
+                rect(-900.0, 100.0, 200.0, 100.0),
+                rect(-1000.0, 0.0, 1000.0, 800.0),
+                2.0,
+            );
+            assert_eq!((px.origin.x, px.origin.y), (200.0, 200.0));
+            assert_eq!((px.size.width, px.size.height), (400.0, 200.0));
+        }
+
+        #[test]
+        fn window_frame_clamps_when_off_display() {
+            // Window spills past the display's right edge: pixel rect clamps.
+            let px = window_frame_to_pixel_rect(
+                rect(700.0, 50.0, 400.0, 100.0),
+                rect(0.0, 0.0, 800.0, 600.0),
+                1.0,
+            );
+            assert_eq!((px.origin.x, px.origin.y), (700.0, 50.0));
+            assert_eq!((px.size.width, px.size.height), (100.0, 100.0));
+        }
+
+        #[test]
+        fn display_point_maps_to_pixel() {
+            let p = display_point_to_pixel(CGPoint::new(100.0, 450.0), 600.0, 2.0);
+            assert_eq!((p.x, p.y), (200.0, 300.0));
+        }
+    }
+}
