@@ -13,7 +13,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
-    NSCursor, NSEvent, NSFocusRingType, NSFont, NSGraphicsContext, NSImage,
+    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSImage,
     NSImageSymbolConfiguration, NSPopover, NSScreen, NSStackView, NSTextField,
     NSTextFieldDelegate, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowStyleMask,
@@ -294,6 +294,10 @@ define_class!(
                 }
                 // Return and keypad enter apply the frame.
                 36 | 76 => self.commit_frame_edit(),
+                // ⌘C copies the composite (no markers, no chrome).
+                8 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
+                    self.copy_composite()
+                }
                 // Backspace and forward delete remove the selection.
                 51 | 117 => self.delete_selected(),
                 _ => {}
@@ -876,6 +880,24 @@ impl EditorView {
         }
         ivars.selection.set(None);
         self.redraw();
+    }
+
+    /// Put the current composite — frame plus elements, no markers or
+    /// chrome — on the general pasteboard.
+    fn copy_composite(&self) {
+        let ivars = self.ivars();
+        let shot_guard = ivars.shot.borrow();
+        let Some(shot) = shot_guard.as_ref() else {
+            return;
+        };
+        let Some(image) = render::render_composite(shot.doc.base(), shot.doc.elements()) else {
+            eprintln!("editor: failed to render the composite for copying");
+            return;
+        };
+        drop(shot_guard);
+        if let Err(err) = crate::output::copy_to_pasteboard(&image) {
+            eprintln!("editor: failed to copy to the pasteboard: {err}");
+        }
     }
 
     /// Whether a finished drag drew something real (as opposed to a plain
