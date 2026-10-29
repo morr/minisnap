@@ -178,9 +178,71 @@ pub fn modifier_flags(mods: Modifiers) -> NSEventModifierFlags {
     flags
 }
 
+/// Render a modifier+key combo as glyphs in the system order (⌃⌥⇧⌘).
+/// Used by minisnap's own UI (the preferences recorder); the tray menu
+/// renders shortcuts itself via `NSMenuItem.keyEquivalent`.
+#[allow(dead_code)] // wired up by the preferences window
+pub fn render_combo(mods: Modifiers, key: Code) -> String {
+    let mut out = String::new();
+    if mods.contains(Modifiers::CONTROL) {
+        out.push('⌃');
+    }
+    if mods.contains(Modifiers::ALT) {
+        out.push('⌥');
+    }
+    if mods.contains(Modifiers::SHIFT) {
+        out.push('⇧');
+    }
+    if mods.contains(Modifiers::META) {
+        out.push('⌘');
+    }
+    out.push_str(&key_symbol(key));
+    out
+}
+
+/// Human-readable symbol for a key code (used by `render_combo`).
+#[allow(dead_code)] // wired up by the preferences window
+pub fn key_symbol(key: Code) -> String {
+    match key {
+        Code::Space => "␣".into(),
+        Code::Enter => "↩".into(),
+        Code::Escape => "⎋".into(),
+        Code::Tab => "⇥".into(),
+        Code::Backspace => "⌫".into(),
+        Code::Delete => "⌦".into(),
+        Code::ArrowLeft => "←".into(),
+        Code::ArrowRight => "→".into(),
+        Code::ArrowUp => "↑".into(),
+        Code::ArrowDown => "↓".into(),
+        Code::Minus => "−".into(),
+        Code::CapsLock => "⇪".into(),
+        Code::NumpadAdd => "+".into(),
+        Code::NumpadSubtract => "−".into(),
+        Code::NumpadMultiply => "*".into(),
+        Code::NumpadDivide => "/".into(),
+        Code::NumpadEnter => "↩".into(),
+        other => {
+            // Digits ("Digit5" → "5"), letters ("KeyA" → "A"), F-keys
+            // ("F12" → "F12"), punctuation names as-is.
+            let name = format!("{other:?}");
+            if let Some(rest) = name.strip_prefix("Digit") {
+                return rest.to_string();
+            }
+            if let Some(rest) = name.strip_prefix("Key") {
+                return rest.to_uppercase();
+            }
+            name
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn combo(mods: Modifiers, key: Code) -> String {
+        render_combo(mods, key)
+    }
 
     #[test]
     fn key_equivalents_map_to_menu_characters() {
@@ -199,5 +261,30 @@ mod tests {
         assert!(flags.contains(NSEventModifierFlags::Option));
         assert!(flags.contains(NSEventModifierFlags::Command));
         assert!(!flags.contains(NSEventModifierFlags::Shift));
+    }
+
+    #[test]
+    fn system_modifier_order_is_control_option_shift_command() {
+        let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::META;
+        assert_eq!(combo(all, Code::Digit5), "⌃⌥⇧⌘5");
+    }
+
+    #[test]
+    fn typical_combos_render() {
+        assert_eq!(
+            combo(Modifiers::ALT | Modifiers::META, Code::Digit5),
+            "⌥⌘5"
+        );
+        assert_eq!(
+            combo(Modifiers::ALT | Modifiers::META, Code::Digit0),
+            "⌥⌘0"
+        );
+        assert_eq!(combo(Modifiers::META, Code::KeyQ), "⌘Q");
+        assert_eq!(
+            combo(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyA),
+            "⌃⇧A"
+        );
+        assert_eq!(combo(Modifiers::empty(), Code::Escape), "⎋");
+        assert_eq!(combo(Modifiers::META, Code::F5), "⌘F5");
     }
 }
