@@ -282,7 +282,8 @@ fn redraw_at_size(image: &CGImage, width: usize, height: usize) -> Option<CFReta
 }
 
 /// Shift every coordinate of an element by a delta.
-fn shift_element(kind: &mut ElementKind, dx: f64, dy: f64) {
+/// Shift every coordinate of an element by a delta in base pixel space.
+pub(crate) fn shift_element(kind: &mut ElementKind, dx: f64, dy: f64) {
     let shift = |p: &mut Point| {
         p.x += dx;
         p.y += dy;
@@ -341,7 +342,8 @@ fn scale_element(kind: &mut ElementKind, sx: f64, sy: f64) {
 }
 
 /// Move one end of an arrow/line/callout. Other kinds have no ends.
-fn set_endpoint(kind: &mut ElementKind, end: Endpoint, point: Point) {
+/// Move one end of an arrow/line/callout to `point`.
+pub(crate) fn set_endpoint(kind: &mut ElementKind, end: Endpoint, point: Point) {
     match kind {
         ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => match end {
             Endpoint::A => *a = point,

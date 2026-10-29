@@ -23,7 +23,10 @@ use objc2_foundation::{NSString, NSNotification, NSRectEdge};
 
 use crate::editor::hit_test::{Hit, top_hit};
 use crate::editor::text;
-use crate::editor::{render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba};
+use crate::editor::{
+    render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint, OpenShot, Point,
+    Rect, Rgba,
+};
 
 /// The dark backdrop the frame sits on.
 const BACKDROP: [f64; 4] = [0.12, 0.12, 0.14, 1.0];
@@ -60,6 +63,27 @@ enum TextTarget {
     New { origin: Point, callout: bool },
     /// An existing text/callout element being re-edited.
     Existing { id: u64 },
+}
+
+/// The in-progress mouse interaction; committed as one command on mouse-up.
+enum Drag {
+    /// Drawing a new element; live-previewed until mouse-up.
+    Draw(ElementKind),
+    /// Moving an existing element: `last` trails the cursor, the preview
+    /// shifts the element by `last - start`.
+    Move {
+        id: u64,
+        start: Point,
+        last: Point,
+        moved: bool,
+    },
+    /// Dragging one endpoint of an existing element to `last`.
+    End {
+        id: u64,
+        endpoint: Endpoint,
+        start: Point,
+        last: Point,
+    },
 }
 
 /// Color presets offered by the popover; magenta is the default.
@@ -142,9 +166,8 @@ struct EditorIvars {
     color: Cell<Rgba>,
     /// Stroke width for new elements, in image pixels.
     stroke_width: Cell<f64>,
-    /// The element being drawn by the current drag, if any; committed on
-    /// mouse-up.
-    draft: RefCell<Option<ElementKind>>,
+    /// The in-progress mouse drag (draw, move, or endpoint drag).
+    drag: RefCell<Option<Drag>>,
     /// The open field editor (text/callout input), if any.
     text_editor: RefCell<Option<Retained<NSTextField>>>,
     /// What the open field editor will commit.
@@ -177,7 +200,7 @@ define_class!(
                 tool: Cell::new(Tool::Arrow),
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
-                draft: RefCell::new(None),
+                drag: RefCell::new(None),
                 text_editor: RefCell::new(None),
                 text_target: Cell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
@@ -215,11 +238,16 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn __key_down(&self, event: &NSEvent) {
-            if event.keyCode() == 53 {
-                // Esc: close the editor.
-                if let Some(window) = self.window() {
-                    window.close();
+            match event.keyCode() {
+                53 => {
+                    // Esc: close the editor.
+                    if let Some(window) = self.window() {
+                        window.close();
+                    }
                 }
+                // Backspace and forward delete remove the selection.
+                51 | 117 => self.delete_selected(),
+                _ => {}
             }
         }
 
@@ -360,9 +388,9 @@ impl EditorView {
         let (sx, sy) = (bw / iw as f64, bh / ih as f64);
 
         // The composite content: base frame + elements, drawn in image
-        // pixel units (`draw_elements` applies its own Y flip). The
-        // element being edited in place is hidden so it doesn't double
-        // under the transparent field editor.
+        // pixel units (`draw_elements` applies its own Y flip). A move or
+        // endpoint drag hides its element and shows a transformed preview;
+        // an element under in-place text editing is hidden entirely.
         CGContext::save_g_state(Some(&cg));
         CGContext::scale_ctm(Some(&cg), sx, sy);
         CGContext::draw_image(
@@ -370,33 +398,51 @@ impl EditorView {
             CGRect::new(CGPoint::ZERO, CGSize::new(iw as f64, ih as f64)),
             Some(base),
         );
+        let drag_guard = ivars.drag.borrow();
+        let preview: Option<(u64, Element)> = drag_guard.as_ref().and_then(|drag| match drag {
+            Drag::Move { id, start, last, .. } => {
+                let mut el = shot.doc.element(*id)?.clone();
+                shift_element(&mut el.kind, last.x - start.x, last.y - start.y);
+                Some((*id, el))
+            }
+            Drag::End { id, endpoint, last, .. } => {
+                let mut el = shot.doc.element(*id)?.clone();
+                set_endpoint(&mut el.kind, *endpoint, *last);
+                Some((*id, el))
+            }
+            Drag::Draw(_) => None,
+        });
+        let hidden = preview.as_ref().map(|(id, _)| *id);
         let editing = match ivars.text_target.get() {
             Some(TextTarget::Existing { id }) => Some(id),
             _ => None,
         };
-        if let Some(id) = editing {
+        if hidden.is_some() || editing.is_some() {
             let visible: Vec<Element> = shot
                 .doc
                 .elements()
                 .iter()
-                .filter(|el| el.id != id)
+                .filter(|el| Some(el.id) != hidden && Some(el.id) != editing)
                 .cloned()
                 .collect();
             render::draw_elements(&cg, base, ih as f64, &visible);
         } else {
             render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
         }
-        CGContext::restore_g_state(Some(&cg));
-
-        // Live preview of the element being dragged; view-only, it never
-        // reaches a saved composite until mouse-up commits it.
-        if let Some(draft) = ivars.draft.borrow().as_ref() {
-            let preview = Element {
-                id: 0,
-                kind: draft.clone(),
-            };
-            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&preview));
+        if let Some((_, el)) = preview.as_ref() {
+            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(el));
         }
+        drop(drag_guard);
+        // Live preview of the element being drawn (view-only until the
+        // mouse-up commit).
+        if let Some(Drag::Draw(kind)) = ivars.drag.borrow().as_ref() {
+            let draw_preview = Element {
+                id: 0,
+                kind: kind.clone(),
+            };
+            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&draw_preview));
+        }
+        CGContext::restore_g_state(Some(&cg));
 
         // Selection markers on top, in screen points so they stay constant
         // sized; they never reach a saved composite.
@@ -467,7 +513,9 @@ impl EditorView {
     fn handle_mouse_down(&self, event: &NSEvent) {
         let point = self.pixel_point(event);
         let ivars = self.ivars();
-        let draft = match ivars.tool.get() {
+        // Finish any in-flight text edit before interpreting the click.
+        self.commit_text_editor();
+        let draft_kind = match ivars.tool.get() {
             Tool::Arrow => ElementKind::Arrow {
                 a: point,
                 b: point,
@@ -493,10 +541,9 @@ impl EditorView {
             Tool::Blur => ElementKind::Blur {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
             },
-            // Text and callout take the click, not a drag: finish any
-            // in-flight edit, then open (or re-open) the field editor.
+            // Text and callout take the click, not a drag: open (or
+            // re-open) the field editor.
             Tool::Text | Tool::Callout => {
-                self.commit_text_editor();
                 let callout = ivars.tool.get() == Tool::Callout;
                 // A click on an existing text/callout re-edits it in place.
                 let existing = ivars
@@ -522,11 +569,40 @@ impl EditorView {
             // Crop/resize have their own click protocol (later task).
             Tool::Crop | Tool::Resize => return,
         };
-        // A drawing interaction starts from a clean selection; if this
-        // drag ends up a plain click, that is the "click on empty space
-        // deselects" rule.
-        ivars.selection.set(None);
-        *ivars.draft.borrow_mut() = Some(draft);
+        // A hit on an existing element decides between moving it and
+        // dragging one of its ends; the empty frame draws a new element.
+        let hit = ivars
+            .shot
+            .borrow()
+            .as_ref()
+            .and_then(|shot| top_hit(shot.doc.elements(), point));
+        let drag = match hit {
+            Some(Hit::End(id, endpoint)) => {
+                ivars.selection.set(Some(id));
+                Drag::End {
+                    id,
+                    endpoint,
+                    start: point,
+                    last: point,
+                }
+            }
+            Some(Hit::Body(id)) => {
+                ivars.selection.set(Some(id));
+                Drag::Move {
+                    id,
+                    start: point,
+                    last: point,
+                    moved: false,
+                }
+            }
+            _ => {
+                // Drawing on the empty frame starts from a clean selection;
+                // a plain click here is the deselect rule.
+                ivars.selection.set(None);
+                Drag::Draw(draft_kind)
+            }
+        };
+        *ivars.drag.borrow_mut() = Some(drag);
         self.redraw();
     }
 
@@ -537,51 +613,110 @@ impl EditorView {
     fn handle_mouse_up(&self, event: &NSEvent) {
         self.update_drag(self.pixel_point(event));
         let ivars = self.ivars();
-        let Some(kind) = ivars.draft.borrow_mut().take() else {
+        let Some(drag) = ivars.drag.borrow_mut().take() else {
             return;
         };
-        if !Self::draft_is_real(&kind) {
-            // Plain click: the draft is discarded and the selection was
-            // already cleared at mouse-down.
-            self.redraw();
-            return;
+        match drag {
+            Drag::Draw(kind) => {
+                if !Self::draft_is_real(&kind) {
+                    // Plain click: the draft is discarded and the selection
+                    // was already cleared at mouse-down.
+                    self.redraw();
+                    return;
+                }
+                let mut shot_slot = ivars.shot.borrow_mut();
+                let Some(shot) = shot_slot.as_mut() else {
+                    return;
+                };
+                let id = shot.doc.next_element_id();
+                let element = Element { id, kind };
+                if let Err(err) = shot.apply(Command::AddElement(element)) {
+                    eprintln!("editor: failed to commit the drawn element: {err}");
+                    self.redraw();
+                    return;
+                }
+                drop(shot_slot);
+                ivars.selection.set(Some(id));
+                self.redraw();
+            }
+            Drag::Move { id, start, last, moved } => {
+                if moved {
+                    let delta = Point::new(last.x - start.x, last.y - start.y);
+                    let result = ivars
+                        .shot
+                        .borrow_mut()
+                        .as_mut()
+                        .map(|shot| shot.apply(Command::MoveElement(id, delta)));
+                    if let Some(Err(err)) = result {
+                        eprintln!("editor: failed to move the element: {err}");
+                    }
+                }
+                self.redraw();
+            }
+            Drag::End { id, endpoint, start, last } => {
+                if point_dist(start, last) >= MIN_DRAG_PX {
+                    let result = ivars
+                        .shot
+                        .borrow_mut()
+                        .as_mut()
+                        .map(|shot| shot.apply(Command::MovePoint(id, endpoint, last)));
+                    if let Some(Err(err)) = result {
+                        eprintln!("editor: failed to drag the endpoint: {err}");
+                    }
+                }
+                self.redraw();
+            }
         }
-        let mut shot_slot = ivars.shot.borrow_mut();
-        let Some(shot) = shot_slot.as_mut() else {
-            return;
-        };
-        let id = shot.doc.next_element_id();
-        let element = Element { id, kind };
-        if let Err(err) = shot.apply(Command::AddElement(element)) {
-            eprintln!("editor: failed to commit the drawn element: {err}");
-            self.redraw();
-            return;
+    }
+
+    /// Move the drag's trailing point (or grow the drawn trace) to `point`.
+    fn update_drag(&self, point: Point) {
+        let ivars = self.ivars();
+        {
+            let mut drag_slot = ivars.drag.borrow_mut();
+            let Some(drag) = drag_slot.as_mut() else {
+                return;
+            };
+            match drag {
+                Drag::Draw(kind) => match kind {
+                    ElementKind::Arrow { b, .. } | ElementKind::Line { b, .. } => *b = point,
+                    // The drag start stays the origin; the size may go
+                    // negative and is standardized at draw/commit time.
+                    ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
+                        *rect = Rect::new(rect.x, rect.y, point.x - rect.x, point.y - rect.y);
+                    }
+                    ElementKind::Pen { points, .. } if points.last() != Some(&point) => {
+                        points.push(point);
+                    }
+                    _ => {}
+                },
+                Drag::Move { start, last, moved, .. } => {
+                    *last = point;
+                    if point_dist(*start, point) >= MIN_DRAG_PX {
+                        *moved = true;
+                    }
+                }
+                Drag::End { last, .. } => *last = point,
+            }
         }
-        drop(shot_slot);
-        ivars.selection.set(Some(id));
         self.redraw();
     }
 
-    /// Move the draft's far end (or grow its trace) to `point`.
-    fn update_drag(&self, point: Point) {
+    /// Delete the selected element, if any.
+    fn delete_selected(&self) {
         let ivars = self.ivars();
-        let mut draft = ivars.draft.borrow_mut();
-        let Some(kind) = draft.as_mut() else {
+        let Some(id) = ivars.selection.get() else {
             return;
         };
-        match kind {
-            ElementKind::Arrow { b, .. } | ElementKind::Line { b, .. } => *b = point,
-            // The drag start stays the origin; the size may go negative
-            // and is standardized at draw/commit time.
-            ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
-                *rect = Rect::new(rect.x, rect.y, point.x - rect.x, point.y - rect.y);
-            }
-            ElementKind::Pen { points, .. } if points.last() != Some(&point) => {
-                points.push(point);
-            }
-            _ => {}
+        let result = ivars
+            .shot
+            .borrow_mut()
+            .as_mut()
+            .map(|shot| shot.apply(Command::DeleteElement(id)));
+        if let Some(Err(err)) = result {
+            eprintln!("editor: failed to delete the element: {err}");
         }
-        drop(draft);
+        ivars.selection.set(None);
         self.redraw();
     }
 
