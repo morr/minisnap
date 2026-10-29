@@ -76,9 +76,7 @@ define_class!(
         fn tick(&self, _sender: Option<&AnyObject>) {
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
-                    HotkeyAction::Capture => {
-                        eprintln!("hotkey: capture frozen area (mode not wired yet)");
-                    }
+                    HotkeyAction::Capture => self.start_capture(),
                     HotkeyAction::OpenLatest => {
                         eprintln!("hotkey: open latest image (not wired yet)");
                     }
@@ -209,6 +207,28 @@ impl AppController {
         // dropping our reference would fire nothing, so keep it alive until
         // the process ends.
         std::mem::forget(timer);
+    }
+
+    /// Start the frozen-area capture: pick the display under the cursor and
+    /// log the choice (the overlay mode itself is wired up later).
+    fn start_capture(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let Some(screen) = crate::capture::screen_under_cursor(mtm) else {
+            eprintln!("capture: no screens found");
+            return;
+        };
+        let frame = screen.frame();
+        let scale = screen.backingScaleFactor();
+        let primary_height = crate::capture::primary_screen_height(mtm);
+        eprintln!(
+            "capture: screen under cursor frame=({:.0},{:.0} {}x{}) scale={} primary_height={:.0}",
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+            scale,
+            primary_height
+        );
     }
 }
 
