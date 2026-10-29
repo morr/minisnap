@@ -68,6 +68,7 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGImage",
     "CGColor",
     "CGColorSpace",
+    "CGDataProvider",
     "CGDirectDisplay",
     "CGWindow",
     "CGGeometry",

@@ -7,8 +7,53 @@
 //! base frame, so it can never drift from the journal.
 
 use objc2::rc::Retained;
-use objc2_core_graphics::CGImage;
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGColorSpace, CGImage, CGImageAlphaInfo, CGContext};
+use objc2_core_graphics::CGBitmapContextCreateImage;
 use serde::{Deserialize, Serialize};
+
+// The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
+// only wraps the block-based adaptive variant).
+extern "C-unwind" {
+    fn CGBitmapContextCreate(
+        data: *mut std::ffi::c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: &CGColorSpace,
+        bitmap_info: u32,
+    ) -> *mut CGContext;
+}
+
+/// Draw `image` into a fresh bitmap context of the given pixel size and
+/// return the resulting image. A plain draw-then-snapshot keeps the source
+/// orientation (image → context → image round trip does not flip).
+pub(crate) fn redraw_at_size(image: &CGImage, width: usize, height: usize) -> Option<CFRetained<CGImage>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let space = CGColorSpace::new_device_rgb()?;
+    // SAFETY: the context owns its buffer for the lifetime of this function;
+    // the snapshot below copies it.
+    let ctx_ptr = unsafe {
+        CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            width * 4,
+            &space,
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    };
+    // SAFETY: ctx_ptr comes from a Create-rule constructor; on success we
+    // take ownership of the +1 reference.
+    let ctx = unsafe { std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))? };
+    let full = CGRect::new(CGPoint::ZERO, CGSize::new(width as f64, height as f64));
+    CGContext::draw_image(Some(&ctx), full, Some(image));
+    CGBitmapContextCreateImage(Some(&ctx))
+}
 
 /// RGBA color with components in 0..1 (straight alpha; strokes are opaque).
 pub type Rgba = [f64; 4];
@@ -204,10 +249,60 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
                 }
             }
         }
-        // Base-frame mutations land with the crop/resize task.
-        Command::Crop(_) => {}
-        Command::Resize(_) => {}
+        Command::Crop(rect) => {
+            let (w, h) = image_size(&state.base);
+            let bounds = Rect::new(0.0, 0.0, w, h);
+            let rect = rect.standardize();
+            let x0 = rect.x.max(bounds.x);
+            let y0 = rect.y.max(bounds.y);
+            let x1 = rect.max_x().min(bounds.max_x());
+            let y1 = rect.max_y().min(bounds.max_y());
+            let clipped = Rect::new(x0, y0, x1 - x0, y1 - y0);
+            if clipped.is_empty() {
+                return;
+            }
+            let cg = CGRect::new(
+                CGPoint::new(clipped.x, clipped.y),
+                CGSize::new(clipped.width, clipped.height),
+            );
+            let Some(cropped) = crate::output::crop(&state.base, cg) else {
+                return;
+            };
+            state.base = cropped.into();
+            for el in &mut state.elements {
+                shift_element(&mut el.kind, -clipped.x, -clipped.y);
+            }
+        }
+        Command::Resize(size) => {
+            if size.width <= 0.0 || size.height <= 0.0 {
+                return;
+            }
+            let (w, h) = image_size(&state.base);
+            if w == 0.0 || h == 0.0 {
+                return;
+            }
+            let Some(resized) = redraw_at_size(
+                &state.base,
+                size.width.round() as usize,
+                size.height.round() as usize,
+            ) else {
+                return;
+            };
+            state.base = resized.into();
+            let (sx, sy) = (size.width / w, size.height / h);
+            for el in &mut state.elements {
+                scale_element(&mut el.kind, sx, sy);
+            }
+        }
     }
+}
+
+/// Image size in pixels (the space all element coordinates live in).
+fn image_size(image: &CGImage) -> (f64, f64) {
+    (
+        CGImage::width(Some(image)) as f64,
+        CGImage::height(Some(image)) as f64,
+    )
 }
 
 /// Shift every coordinate of an element by a delta.
@@ -234,6 +329,37 @@ fn shift_element(kind: &mut ElementKind, dx: f64, dy: f64) {
         ElementKind::Callout { tip, anchor, .. } => {
             shift(tip);
             shift(anchor);
+        }
+    }
+}
+
+/// Scale every coordinate of an element by per-axis factors (the base frame
+/// was resized). Stroke widths and font sizes stay as authored.
+fn scale_element(kind: &mut ElementKind, sx: f64, sy: f64) {
+    let scale = |p: &mut Point| {
+        p.x *= sx;
+        p.y *= sy;
+    };
+    match kind {
+        ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => {
+            scale(a);
+            scale(b);
+        }
+        ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
+            rect.x *= sx;
+            rect.y *= sy;
+            rect.width *= sx;
+            rect.height *= sy;
+        }
+        ElementKind::Pen { points, .. } => {
+            for p in points {
+                scale(p);
+            }
+        }
+        ElementKind::Text { origin, .. } => scale(origin),
+        ElementKind::Callout { tip, anchor, .. } => {
+            scale(tip);
+            scale(anchor);
         }
     }
 }
@@ -365,7 +491,8 @@ impl EditorDoc {
 mod tests {
     use super::*;
     use objc2_core_foundation::CFRetained;
-    use objc2_core_graphics::{CGColorSpace, CGImageAlphaInfo, CGContext};
+    use objc2_core_foundation::CFData;
+    use objc2_core_graphics::{CGDataProvider, CGColorSpace, CGImageAlphaInfo, CGContext};
     use objc2_core_graphics::CGBitmapContextCreateImage;
 
     // The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
@@ -565,5 +692,143 @@ mod tests {
         }));
         assert!(doc.undo());
         assert_eq!(doc.next_element_id(), 3);
+    }
+
+    /// Red above the middle, blue below (top-left origin) — an asymmetric
+    /// frame for orientation assertions.
+    pub(crate) fn split_frame(w: usize, h: usize) -> Retained<CGImage> {
+        let mut buf = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let (r, g, b) = if y < h / 2 { (255, 0, 0) } else { (0, 0, 255) };
+                buf[i] = r;
+                buf[i + 1] = g;
+                buf[i + 2] = b;
+                buf[i + 3] = 255;
+            }
+        }
+        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
+        // SAFETY: buf outlives the context within this function.
+        let ctx_ptr = unsafe {
+            CGBitmapContextCreate(
+                buf.as_ptr() as *mut std::ffi::c_void,
+                w,
+                h,
+                8,
+                w * 4,
+                &space,
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        };
+        assert!(!ctx_ptr.is_null(), "bitmap context");
+        // SAFETY: non-null context from the constructor above.
+        let ctx = unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
+        CGBitmapContextCreateImage(Some(&ctx))
+            .expect("image from context")
+            .into()
+    }
+
+    /// The image's raw RGBA bytes, top row first (the CGImage's own data).
+    fn pixel_bytes(image: &CGImage) -> Vec<u8> {
+        let provider = CGImage::data_provider(Some(image)).expect("data provider");
+        let data: CFRetained<CFData> = CGDataProvider::data(Some(&provider)).expect("data");
+        data.to_vec()
+    }
+
+    fn assert_blue(px: [u8; 3]) {
+        assert_eq!(px, [0, 0, 255], "expected blue pixel");
+    }
+
+    fn assert_red(px: [u8; 3]) {
+        assert_eq!(px, [255, 0, 0], "expected red pixel");
+    }
+
+    fn top_pixel(bytes: &[u8]) -> [u8; 3] {
+        [bytes[0], bytes[1], bytes[2]]
+    }
+
+    fn bottom_pixel(bytes: &[u8], row_width_bytes: usize) -> [u8; 3] {
+        let start = bytes.len() - row_width_bytes;
+        [bytes[start], bytes[start + 1], bytes[start + 2]]
+    }
+
+    #[test]
+    fn crop_shifts_elements_and_cuts_the_base() {
+        let mut doc = EditorDoc::new(split_frame(64, 64));
+        doc.apply(Command::AddElement(arrow(1, 10.0, 40.0, 20.0, 50.0)));
+        // The bottom half in top-left origin pixel space.
+        doc.apply(Command::Crop(Rect::new(0.0, 32.0, 64.0, 32.0)));
+
+        assert_eq!(image_size(doc.base()), (64.0, 32.0));
+        match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { a, b, .. } => {
+                assert_eq!((a.x, a.y), (10.0, 8.0), "shifted by -origin");
+                assert_eq!((b.x, b.y), (20.0, 18.0));
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+        // The kept region is the original's bottom half: blue on top.
+        let bytes = pixel_bytes(doc.base());
+        assert_blue(top_pixel(&bytes));
+
+        // Undo restores the full frame and the original coordinates.
+        assert!(doc.undo());
+        assert_eq!(image_size(doc.base()), (64.0, 64.0));
+        match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { a, b, .. } => {
+                assert_eq!((a.x, a.y), (10.0, 40.0));
+                assert_eq!((b.x, b.y), (20.0, 50.0));
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resize_scales_elements_and_the_base() {
+        let mut doc = EditorDoc::new(split_frame(64, 64));
+        doc.apply(Command::AddElement(arrow(1, 10.0, 40.0, 20.0, 50.0)));
+        doc.apply(Command::Resize(Size::new(32.0, 16.0)));
+
+        assert_eq!(image_size(doc.base()), (32.0, 16.0));
+        match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { a, b, .. } => {
+                assert_eq!((a.x, a.y), (5.0, 10.0), "coordinates halved");
+                assert_eq!((b.x, b.y), (10.0, 12.5));
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+        // Orientation survives the resample: red on top, blue at the bottom.
+        let bytes = pixel_bytes(doc.base());
+        assert_red(top_pixel(&bytes));
+        assert_blue(bottom_pixel(&bytes, 32 * 4));
+
+        // Undo restores the size and the coordinates.
+        assert!(doc.undo());
+        assert_eq!(image_size(doc.base()), (64.0, 64.0));
+        match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { a, b, .. } => {
+                assert_eq!((a.x, a.y), (10.0, 40.0));
+                assert_eq!((b.x, b.y), (20.0, 50.0));
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn off_bounds_crop_and_zero_resize_change_nothing() {
+        let mut doc = EditorDoc::new(split_frame(64, 64));
+        doc.apply(Command::AddElement(arrow(1, 10.0, 40.0, 20.0, 50.0)));
+
+        doc.apply(Command::Crop(Rect::new(100.0, 100.0, 10.0, 10.0)));
+        doc.apply(Command::Resize(Size::new(0.0, 10.0)));
+        assert_eq!(image_size(doc.base()), (64.0, 64.0));
+        match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { a, b, .. } => {
+                assert_eq!((a.x, a.y), (10.0, 40.0));
+                assert_eq!((b.x, b.y), (20.0, 50.0));
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
     }
 }
