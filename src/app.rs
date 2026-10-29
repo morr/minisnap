@@ -335,6 +335,7 @@ impl AppController {
             eprintln!("capture: t0 ready but mode already active, dropping");
             return;
         }
+        let save_dir = self.ivars().config.borrow().save_dir.clone();
         overlay.show(
             t0,
             screen_frame,
@@ -347,6 +348,10 @@ impl AppController {
                     };
                     if let Err(e) = crate::output::copy_to_pasteboard(&image) {
                         eprintln!("output: pasteboard: {e}");
+                    }
+                    match crate::output::save_to_file(&image, &save_dir) {
+                        Ok(path) => eprintln!("output: saved {}", path.display()),
+                        Err(e) => eprintln!("output: save: {e}"),
                     }
                 }
                 OverlayOutcome::Cancelled => {}

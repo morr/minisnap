@@ -1,14 +1,19 @@
-//! Output of a finished selection: pixel-space crop of the T0 frame and the
-//! pasteboard. File saving and retention land in 5.2/5.3.
+//! Output of a finished selection: pixel-space crop of the T0 frame, the
+//! pasteboard, and the silent PNG file with collision-safe naming.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
     NSPasteboardTypeTIFF,
 };
-use objc2_core_foundation::{CFRetained, CGRect};
+use objc2_core_foundation::{CFRetained, CFString, CFURL, CGRect};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::NSDictionary;
+use objc2_image_io::CGImageDestination;
 
 /// Crop the T0 frame to `rect` (top-left-origin pixel space). None for an
 /// empty rect.
@@ -40,6 +45,97 @@ pub fn copy_to_pasteboard(image: &CGImage) -> Result<(), String> {
         return Err(format!("pasteboard rejected data (png={png_ok}, tiff={tiff_ok})"));
     }
     Ok(())
+}
+
+/// Local calendar components of a Unix timestamp shifted by `utc_offset_secs`
+/// (civil-from-days, Howard Hinnant's algorithm; valid for any year ≥ 1).
+/// Returns (year, month, day, hour, minute, second).
+fn timestamp_components(unix_secs: i64, utc_offset_secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let secs = unix_secs + utc_offset_secs;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if m <= 2 { y + 1 } else { y };
+    (
+        year,
+        m,
+        d,
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    )
+}
+
+/// `MiniSnap YYYY-MM-DD HH-MM-SS` in local time.
+fn shot_base_name(unix_secs: i64, utc_offset_secs: i64) -> String {
+    let (y, mo, d, h, mi, s) = timestamp_components(unix_secs, utc_offset_secs);
+    format!("MiniSnap {y:04}-{mo:02}-{d:02} {h:02}-{mi:02}-{s:02}")
+}
+
+/// First unused `MiniSnap …png` path for the given local time. Same-second
+/// collisions get a Finder-style ` (2)`, ` (3)`… suffix; a nanosecond
+/// fallback guarantees the name is free even after 999 shots in one second.
+fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64) -> PathBuf {
+    let base = shot_base_name(unix_secs, utc_offset_secs);
+    let first = dir.join(format!("{base}.png"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..1000u32 {
+        let candidate = dir.join(format!("{base} ({n}).png"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    dir.join(format!("{base} ({nanos}).png"))
+}
+
+/// System time zone offset from UTC, in seconds.
+fn local_utc_offset_secs() -> i64 {
+    objc2_foundation::NSTimeZone::systemTimeZone().secondsFromGMT() as i64
+}
+
+/// Encode the image as PNG into `path` via ImageIO.
+fn encode_png(image: &CGImage, path: &Path) -> Result<(), String> {
+    let url = CFURL::from_file_path(path).ok_or_else(|| format!("bad path {}", path.display()))?;
+    // SAFETY: url/type are live CF objects; the destination type parameters
+    // (count=1, no options) have no further invariants.
+    let dest = unsafe {
+        CGImageDestination::with_url(&url, &CFString::from_str("public.png"), 1, None)
+    }
+    .ok_or_else(|| format!("cannot create image destination for {}", path.display()))?;
+    // SAFETY: `image` is a live CGImage; no properties needed.
+    unsafe { dest.add_image(image, None) };
+    if !unsafe { dest.finalize() } {
+        return Err(format!("PNG encoding failed for {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Save the shot silently as `dir/MiniSnap YYYY-MM-DD HH-MM-SS.png`, creating
+/// `dir` (and parents) on demand and numbering same-second collisions.
+/// Returns the file path.
+pub fn save_to_file(image: &CGImage, dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let path = unique_shot_path(dir, unix_secs, local_utc_offset_secs());
+    encode_png(image, &path)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -121,5 +217,73 @@ mod tests {
         assert!(crop(&frame, CGRect::ZERO).is_none());
         let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 10.0));
         assert!(crop(&frame, rect).is_none());
+    }
+
+    #[test]
+    fn epoch_maps_to_unix_start() {
+        assert_eq!(timestamp_components(0, 0), (1970, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn utc_timestamp_splits_into_components() {
+        // 2026-10-29 12:34:56 UTC.
+        assert_eq!(timestamp_components(1793277296, 0), (2026, 10, 29, 12, 34, 56));
+    }
+
+    #[test]
+    fn offsets_roll_days_forward_and_back() {
+        // 2026-10-29 23:59:00 UTC +1h → next day.
+        assert_eq!(timestamp_components(1793318340, 3600), (2026, 10, 30, 0, 59, 0));
+        // 2026-10-29 01:30:00 UTC -2h → previous day.
+        assert_eq!(timestamp_components(1793237400, -7200), (2026, 10, 28, 23, 30, 0));
+    }
+
+    #[test]
+    fn base_name_matches_spec_pattern() {
+        // 2026-10-29 12:34:56 UTC rendered with a +3h offset.
+        assert_eq!(shot_base_name(1793277296, 3 * 3600), "MiniSnap 2026-10-29 15-34-56");
+    }
+
+    #[test]
+    fn unique_path_numbers_same_second_collisions() {
+        let dir = std::env::temp_dir().join(format!("minisnap-output-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let base = shot_base_name(1793277296, 0);
+
+        let first = unique_shot_path(&dir, 1793277296, 0);
+        assert_eq!(first, dir.join(format!("{base}.png")));
+        fs::write(&first, b"x").unwrap();
+
+        let second = unique_shot_path(&dir, 1793277296, 0);
+        assert_eq!(second, dir.join(format!("{base} (2).png")));
+        fs::write(&second, b"x").unwrap();
+
+        let third = unique_shot_path(&dir, 1793277296, 0);
+        assert_eq!(third, dir.join(format!("{base} (3).png")));
+
+        // A different second is unaffected by the collisions.
+        let other = unique_shot_path(&dir, 1793277296 + 1, 0);
+        assert!(other.to_string_lossy().ends_with("12-34-57.png"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_creates_nested_dir_and_writes_png() {
+        let dir = std::env::temp_dir().join(format!("minisnap-output-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let nested = dir.join("one").join("minisnap");
+        let frame = synthetic_frame();
+        let path = save_to_file(&frame, &nested).expect("save");
+        assert!(path.is_file(), "file written");
+        assert!(path.extension().unwrap() == "png");
+        // A valid PNG starts with the well-known signature.
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        // Second save in the same second gets the collision number.
+        let second = save_to_file(&frame, &nested).expect("save again");
+        assert_ne!(path, second);
+        assert!(second.to_string_lossy().contains(" (2)"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
