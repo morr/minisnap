@@ -76,7 +76,7 @@ define_class!(
 
         #[unsafe(method(openLatestImage:))]
         fn open_latest_image(&self, _sender: Option<&AnyObject>) {
-            eprintln!("open latest image: not implemented yet");
+            self.open_latest();
         }
 
         #[unsafe(method(openPreferences:))]
@@ -116,9 +116,7 @@ define_class!(
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
                     HotkeyAction::Capture => self.start_capture(),
-                    HotkeyAction::OpenLatest => {
-                        eprintln!("hotkey: open latest image (not wired yet)");
-                    }
+                    HotkeyAction::OpenLatest => self.open_latest(),
                 }
             }
         }
@@ -271,6 +269,13 @@ impl AppController {
         // dropping our reference would fire nothing, so keep it alive until
         // the process ends.
         std::mem::forget(timer);
+    }
+
+    /// Open the newest saved shot; shared by the tray menu and the open
+    /// hotkey.
+    fn open_latest(&self) {
+        let dir = self.ivars().config.borrow().save_dir.clone();
+        crate::output::open_latest(&dir);
     }
 
     /// Start the frozen-area capture: pick the display under the cursor and
