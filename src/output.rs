@@ -197,6 +197,14 @@ pub fn latest_shot(dir: &Path) -> Option<PathBuf> {
         .map(|(path, _)| path)
 }
 
+/// All shot files in `dir`, oldest first. Missing directory reads as empty.
+pub fn sorted_shots(dir: &Path) -> Vec<PathBuf> {
+    shot_files_oldest_first(dir)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

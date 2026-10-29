@@ -634,7 +634,8 @@ impl AppController {
         {
             let mut slot = self.ivars().editor.borrow_mut();
             if slot.is_none() {
-                *slot = Some(EditorWindow::new(mtm));
+                let save_dir = self.ivars().config.borrow().save_dir.clone();
+                *slot = Some(EditorWindow::new(mtm, save_dir));
             }
             slot.as_ref().expect("editor window").show_shot(shot);
         }

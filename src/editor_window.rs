@@ -63,6 +63,10 @@ const HANDLE_RADIUS_PT: f64 = 5.0;
 /// Size of the frame mode's OK button, in view points.
 const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 
+/// Toolbar tags of the ◄/► leafing buttons.
+const PAGE_PREV_TAG: isize = -2;
+const PAGE_NEXT_TAG: isize = -3;
+
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
 enum TextTarget {
@@ -214,6 +218,8 @@ struct EditorIvars {
     /// The frame mode's size label and OK button subviews.
     frame_label: RefCell<Option<Retained<NSTextField>>>,
     frame_ok: RefCell<Option<Retained<NSButton>>>,
+    /// The folder the shots are saved to (for the ◄/► leafing).
+    save_dir: RefCell<std::path::PathBuf>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -248,6 +254,7 @@ define_class!(
                 frame_edit: RefCell::new(None),
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
+                save_dir: RefCell::new(std::path::PathBuf::new()),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -298,6 +305,9 @@ define_class!(
                 8 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
                     self.copy_composite()
                 }
+                // ←/→ leaf through the saved shots.
+                123 => self.page(-1),
+                124 => self.page(1),
                 // Backspace and forward delete remove the selection.
                 51 | 117 => self.delete_selected(),
                 _ => {}
@@ -319,6 +329,19 @@ define_class!(
         #[unsafe(method(frameOkClicked:))]
         fn __frame_ok_clicked(&self, _sender: Option<&AnyObject>) {
             self.commit_frame_edit();
+        }
+
+        #[unsafe(method(pageClicked:))]
+        fn __page_clicked(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: the sender is the clicked NSButton; `tag` is the
+            // NSView accessor we stamped on the button.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            if tag == PAGE_PREV_TAG {
+                self.page(-1);
+            } else {
+                self.page(1);
+            }
         }
 
         #[unsafe(method(toolClicked:))]
@@ -393,6 +416,11 @@ impl EditorView {
     fn new(mtm: MainThreadMarker) -> Retained<EditorView> {
         // SAFETY: designated initializer with plain ivars.
         unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::new(CGPoint::ZERO, INITIAL_SIZE)) }
+    }
+
+    /// Remember the shots folder for leafing.
+    fn set_save_dir(&self, dir: std::path::PathBuf) {
+        *self.ivars().save_dir.borrow_mut() = dir;
     }
 
     /// The image pixel size of the open shot.
@@ -1335,6 +1363,46 @@ impl EditorView {
         self.redraw();
     }
 
+    /// Show (or replace) the shot in the window: title, size, full redraw.
+    fn display_shot(&self, shot: OpenShot) {
+        let title = shot.file_name();
+        // Any in-flight interaction belongs to the outgoing shot.
+        self.discard_text_editor();
+        self.exit_frame_edit();
+        *self.ivars().shot.borrow_mut() = Some(shot);
+        self.ivars().selection.set(None);
+        if let Some(window) = self.window() {
+            window.setTitle(&NSString::from_str(&title));
+        }
+        self.refit_window();
+    }
+
+    /// Show the previous (-1) or next (1) shot of the save folder by time;
+    /// the edges stop the leafing. Pending text edits are committed so
+    /// they land in the outgoing shot's file.
+    fn page(&self, delta: isize) {
+        let ivars = self.ivars();
+        self.commit_text_editor();
+        self.exit_frame_edit();
+        let current = ivars.shot.borrow().as_ref().map(|shot| shot.shot_path.clone());
+        let Some(current) = current else {
+            return;
+        };
+        let shots = crate::output::sorted_shots(&ivars.save_dir.borrow());
+        let Some(index) = shots.iter().position(|path| *path == current) else {
+            return;
+        };
+        let target = (index as isize + delta).clamp(0, shots.len() as isize - 1);
+        if target == index as isize {
+            return;
+        }
+        let sessions_root = crate::editor::session::default_root();
+        match OpenShot::open(shots[target as usize].clone(), &sessions_root) {
+            Some(shot) => self.display_shot(shot),
+            None => eprintln!("editor: cannot open the paged shot"),
+        }
+    }
+
     /// Accent-tint the active tool's button, clear the others.
     fn update_tool_highlight(&self) {
         let active = self.ivars().tool.get().tag();
@@ -1518,8 +1586,9 @@ fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NS
 }
 
 impl EditorWindow {
-    pub fn new(mtm: MainThreadMarker) -> EditorWindow {
+    pub fn new(mtm: MainThreadMarker, save_dir: std::path::PathBuf) -> EditorWindow {
         let view = EditorView::new(mtm);
+        view.set_save_dir(save_dir);
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -1540,11 +1609,23 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // Toolbar: tool buttons, a color swatch with a preset popover, a
-        // stroke-width slider.
+        // Toolbar: ◄/► leafing on the left, then tool buttons, the color
+        // swatch with a preset popover, and the stroke-width slider.
         let toolbar = NSStackView::new(mtm);
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(6.0);
+        for (tag, symbol) in [
+            (PAGE_PREV_TAG, "chevron.left"),
+            (PAGE_NEXT_TAG, "chevron.right"),
+        ] {
+            let button = symbol_button(mtm, symbol, tag);
+            // SAFETY: target is this canvas view, alive for the process.
+            unsafe {
+                button.setTarget(Some(&view));
+                button.setAction(Some(sel!(pageClicked:)));
+            }
+            toolbar.addArrangedSubview(&button);
+        }
         let mut tool_buttons = Vec::new();
         for tool in Tool::all() {
             let button = symbol_button(mtm, tool.symbol(), tool.tag());
@@ -1604,30 +1685,10 @@ impl EditorWindow {
         EditorWindow { window, view }
     }
 
-    /// Show (or replace) the shot in this window: title, size limited by the
-    /// screen's visible frame, full redraw.
+    /// Show (or replace) the shot in this window and bring it to the front.
     pub fn show_shot(&self, shot: OpenShot) {
-        let title = shot.file_name();
-        let view = &self.view;
-        // A new shot arrives: drop any open text editor and frame mode.
-        view.discard_text_editor();
-        view.exit_frame_edit();
-        *view.ivars().shot.borrow_mut() = Some(shot);
-        view.ivars().selection.set(None);
-        self.window.setTitle(&NSString::from_str(&title));
-        view.refit_window();
+        self.view.display_shot(shot);
         self.window.makeKeyAndOrderFront(None);
-    }
-
-    /// The selected element id, if any.
-    pub fn selection(&self) -> Option<u64> {
-        self.view.ivars().selection.get()
-    }
-
-    pub fn set_selection(&self, id: Option<u64>) {
-        let view = &self.view;
-        view.ivars().selection.set(id);
-        view.setNeedsDisplayInRect(view.bounds());
     }
 }
 
