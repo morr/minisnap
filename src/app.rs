@@ -12,12 +12,15 @@ use objc2_app_kit::{
     NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::{NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
+use objc2_foundation::{
+    NSDefaultRunLoopMode, NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
+};
 use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 
 use crate::config::Config;
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
 use crate::overlay::{Overlay, OverlayOutcome};
+use crate::prefs;
 use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
@@ -58,6 +61,9 @@ struct AppIvars {
     jobs_tx: mpsc::Sender<MainJob>,
     jobs_rx: RefCell<mpsc::Receiver<MainJob>>,
     overlay: RefCell<Overlay>,
+    // Created lazily on the first Preferences click; kept afterwards so
+    // reopening focuses the existing window.
+    prefs: RefCell<Option<prefs::PrefsWindow>>,
 }
 
 define_class!(
@@ -81,7 +87,34 @@ define_class!(
 
         #[unsafe(method(openPreferences:))]
         fn open_preferences(&self, _sender: Option<&AnyObject>) {
-            eprintln!("preferences: not implemented yet");
+            self.open_prefs_window();
+        }
+
+        /// Deferred from `openPreferences:` so the activation happens after
+        /// the tray menu finishes tracking — ordering a window key from
+        /// inside the menu action does not stick.
+        #[unsafe(method(prefsWindowToFront:))]
+        fn prefs_window_to_front(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let app = NSApplication::sharedApplication(mtm);
+            // Cooperative activation answers to a real user click on the
+            // tray icon; the legacy call is the fallback for older systems.
+            app.activate();
+            app.activateIgnoringOtherApps(true);
+            if let Some(prefs) = self.ivars().prefs.borrow().as_ref() {
+                prefs.window.makeKeyAndOrderFront(None);
+                eprintln!(
+                    "prefs window: active={} key={}",
+                    app.isActive(),
+                    prefs.window.isKeyWindow()
+                );
+            }
+        }
+
+        #[unsafe(method(prefsRowClicked:))]
+        fn prefs_row_clicked(&self, sender: Option<&AnyObject>) {
+            let _ = sender;
+            eprintln!("prefs row clicked: recording not implemented yet");
         }
 
         #[unsafe(method(quit:))]
@@ -210,6 +243,7 @@ impl AppController {
             jobs_tx,
             jobs_rx: RefCell::new(jobs_rx),
             overlay: RefCell::new(overlay),
+            prefs: RefCell::new(None),
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -269,6 +303,46 @@ impl AppController {
         // dropping our reference would fire nothing, so keep it alive until
         // the process ends.
         std::mem::forget(timer);
+    }
+
+    /// Open (or focus) the preferences window. Menu entry point.
+    fn open_prefs_window(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let mut slot = self.ivars().prefs.borrow_mut();
+        if slot.is_none() {
+            let (capture_combo, open_combo) = {
+                let config = self.ivars().config.borrow();
+                (
+                    hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
+                    hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
+                )
+            };
+            *slot = Some(prefs::build(mtm, &capture_combo, &open_combo));
+            let window = slot.as_ref().unwrap();
+            for button in [&window.capture_button, &window.open_button] {
+                // SAFETY: target is this controller, whose selector lives as
+                // long as the process.
+                unsafe {
+                    button.setTarget(Some(self));
+                    button.setAction(Some(sel!(prefsRowClicked:)));
+                }
+            }
+        }
+        // Ordering the window key must wait until the tray menu stops
+        // tracking; a one-shot timer in the default run loop mode fires on
+        // the next pass once the menu is closed.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                0.0,
+                self,
+                sel!(prefsWindowToFront:),
+                None,
+                false,
+            )
+        };
+        unsafe {
+            NSRunLoop::currentRunLoop().addTimer_forMode(&timer, &NSDefaultRunLoopMode);
+        }
     }
 
     /// Open the newest saved shot; shared by the tray menu and the open

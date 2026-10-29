@@ -53,6 +53,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSFontDescriptor",
     "NSLayoutAnchor",
     "NSLayoutConstraint",
+    "NSUserInterfaceLayout",
 ] }
 objc2-quartz-core = { version = "0.3", features = [
     "CALayer",

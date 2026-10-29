@@ -5,6 +5,7 @@ mod hotkeys;
 mod overlay;
 mod output;
 mod permission;
+mod prefs;
 
 fn main() {
     app::run();
