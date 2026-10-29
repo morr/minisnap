@@ -701,6 +701,41 @@ mod tests {
             .into()
     }
 
+    /// A deterministic high-frequency noise frame: no flat regions, so any
+    /// meaningful cell of a pixelation differs from any other.
+    pub(crate) fn noisy_frame(w: usize, h: usize) -> Retained<CGImage> {
+        let mut buf = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let v = (((x * 13 + y * 7) % 11) * 23) as u8;
+                buf[i] = v;
+                buf[i + 1] = v;
+                buf[i + 2] = v;
+                buf[i + 3] = 255;
+            }
+        }
+        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
+        // SAFETY: buf outlives the context within this function.
+        let ctx_ptr = unsafe {
+            CGBitmapContextCreate(
+                buf.as_ptr() as *mut std::ffi::c_void,
+                w,
+                h,
+                8,
+                w * 4,
+                &space,
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        };
+        assert!(!ctx_ptr.is_null(), "bitmap context");
+        // SAFETY: non-null context from the constructor above.
+        let ctx = unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
+        CGBitmapContextCreateImage(Some(&ctx))
+            .expect("image from context")
+            .into()
+    }
+
     /// The image's raw RGBA bytes, top row first (the CGImage's own data).
     pub(crate) fn pixel_bytes(image: &CGImage) -> Vec<u8> {
         let provider = CGImage::data_provider(Some(image)).expect("data provider");
