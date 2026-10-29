@@ -8,13 +8,13 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{define_class, extern_methods, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSFont, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath, CGPath,
-    CGContext,
+    CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath,
+    CGPath, CGContext,
 };
 use objc2_foundation::NSString;
 use objc2_quartz_core::{
@@ -147,15 +147,16 @@ struct OverlayIvars {
     loupe_grid: Retained<CAShapeLayer>,
     /// Crosshair through the loupe's center (cursor-pixel) cell.
     loupe_cross: Retained<CAShapeLayer>,
-    /// Full-screen guide lines through the cursor (idle only). Thin
-    /// hairlines whose color adapts to the content underneath.
-    axis_v: Retained<CAShapeLayer>,
-    axis_h: Retained<CAShapeLayer>,
-    /// Cursor pixel coordinate at the top end of the vertical guide.
-    x_label: Retained<CATextLayer>,
-    /// Cursor pixel coordinate at the right end of the horizontal guide.
-    y_label: Retained<CATextLayer>,
-    /// Live "W × H px" of the selection while dragging.
+    /// Full-screen guide lines through the cursor (idle only): a white
+    /// outline layer under a thin black core layer, Monosnap-style. The pair
+    /// reads on any background and never flickers, unlike content-sampled
+    /// coloring.
+    axis_v_dark: Retained<CAShapeLayer>,
+    axis_v_light: Retained<CAShapeLayer>,
+    axis_h_dark: Retained<CAShapeLayer>,
+    axis_h_light: Retained<CAShapeLayer>,
+    /// Readout pinned under the loupe: cursor coordinates while idle, the
+    /// selection size while dragging (logical pixels).
     size_label: Retained<CATextLayer>,
     /// The logical-pixel copy of the frozen frame, alive while the mode is
     /// active (the context and its backing bytes must live together).
@@ -166,17 +167,25 @@ struct OverlayIvars {
 const DIM_ALPHA: f64 = 0.4;
 
 /// Loupe magnification: on-screen points per logical (UI) pixel.
-const LOUPE_ZOOM_PT: f64 = 16.0;
+const LOUPE_ZOOM_PT: f64 = 10.0;
 /// Loupe sample side, in logical pixels (the loupe is square).
-const LOUPE_SAMPLE_PX: f64 = 12.0;
+const LOUPE_SAMPLE_PX: f64 = 14.0;
 /// Brightness (0..255 per channel) above which content counts as light.
+/// Used by the sampler tests; production guides are constant two-tone.
+#[allow(dead_code)]
 const LIGHT_CONTENT_THRESHOLD: u32 = 128;
+/// Guide line widths, in points: white outline underneath, black core on
+/// top.
+const AXIS_OUTLINE_W_PT: f64 = 1.5;
+const AXIS_CORE_W_PT: f64 = 0.75;
 /// Loupe side, in points.
 const LOUPE_SIZE_PT: f64 = LOUPE_SAMPLE_PX * LOUPE_ZOOM_PT;
 /// Gap between the cursor and the loupe corner.
 const LOUPE_GAP_PT: f64 = 18.0;
-/// Height of the HUD labels (axis coordinates, "W × H px"), in points.
-const HUD_LABEL_H_PT: f64 = 20.0;
+/// Height of the HUD readout bar under the loupe, in points. The text layer
+/// draws from the top; 18pt for a 14pt font leaves near-equal gaps above
+/// and below the digits.
+const HUD_LABEL_H_PT: f64 = 18.0;
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -213,10 +222,10 @@ define_class!(
                 loupe: CALayer::new(),
                 loupe_grid: CAShapeLayer::new(),
                 loupe_cross: CAShapeLayer::new(),
-                axis_v: CAShapeLayer::new(),
-                axis_h: CAShapeLayer::new(),
-                x_label: CATextLayer::new(),
-                y_label: CATextLayer::new(),
+                axis_v_dark: CAShapeLayer::new(),
+                axis_v_light: CAShapeLayer::new(),
+                axis_h_dark: CAShapeLayer::new(),
+                axis_h_light: CAShapeLayer::new(),
                 size_label: CATextLayer::new(),
                 sampler: RefCell::new(None),
             });
@@ -386,10 +395,18 @@ impl OverlayView {
         cross.setContentsScale(ivars.scale.get());
         loupe.addSublayer(cross);
 
-        for axis in [&ivars.axis_v, &ivars.axis_h] {
-            let axis_color = NSColor::whiteColor().colorWithAlphaComponent(0.55);
-            axis.setStrokeColor(Some(&axis_color.CGColor()));
-            axis.setLineWidth(0.75);
+        // Guides: white outline first, black cores on top of it.
+        let outline = NSColor::whiteColor().colorWithAlphaComponent(0.9).CGColor();
+        let core = NSColor::blackColor().colorWithAlphaComponent(0.9).CGColor();
+        let axes: [(&Retained<CAShapeLayer>, &CGColor, f64); 4] = [
+            (&ivars.axis_v_light, &outline, AXIS_OUTLINE_W_PT),
+            (&ivars.axis_h_light, &outline, AXIS_OUTLINE_W_PT),
+            (&ivars.axis_v_dark, &core, AXIS_CORE_W_PT),
+            (&ivars.axis_h_dark, &core, AXIS_CORE_W_PT),
+        ];
+        for (axis, color, width) in axes {
+            axis.setStrokeColor(Some(color));
+            axis.setLineWidth(width);
             axis.setContentsScale(ivars.scale.get());
             axis.setHidden(true);
             ivars.root_layer.addSublayer(axis);
@@ -397,14 +414,14 @@ impl OverlayView {
         // The loupe rides above the axis lines, its grid and crosshair on top.
         ivars.root_layer.addSublayer(loupe);
 
-        let font = NSFont::monospacedDigitSystemFontOfSize_weight(11.0, 0.4);
+        let font = NSFont::monospacedDigitSystemFontOfSize_weight(14.0, 0.4);
         // SAFETY: NSFont is an ObjC object at runtime; CATextLayer.font
         // expects it as CFType.
         let as_cf: &CFType = unsafe { &*(std::ptr::from_ref(&*font).cast::<CFType>()) };
-        for label in [&ivars.x_label, &ivars.y_label, &ivars.size_label] {
+        for label in [&ivars.size_label] {
             // SAFETY: plain property setters.
             unsafe { label.setFont(Some(as_cf)) };
-            label.setFontSize(11.0);
+            label.setFontSize(14.0);
             label.setForegroundColor(Some(&NSColor::whiteColor().CGColor()));
             let bg = NSColor::blackColor().colorWithAlphaComponent(0.65);
             label.setBackgroundColor(Some(&bg.CGColor()));
@@ -474,21 +491,35 @@ impl OverlayView {
     }
 
     /// Mean per-channel brightness (0..255) of the content along a
-    /// logical-pixel line through `at` (a column if `vertical`).
-    fn line_mean_brightness(sampler: &FrameSampler, vertical: bool, at: usize) -> u32 {
+    /// logical-pixel line through `at`, over the range `from..=to` along the
+    /// line (rows for a vertical line, columns for a horizontal one).
+    /// Production HUD uses constant two-tone guides; this stays for the
+    /// sampler tests and possible future content-aware styling.
+    #[allow(dead_code)]
+    fn line_brightness_in(
+        sampler: &FrameSampler,
+        vertical: bool,
+        at: usize,
+        from: usize,
+        to: usize,
+    ) -> u32 {
         let (w, h) = (sampler.width, sampler.height);
         let buf = &sampler.buf;
+        let dim = if vertical { h } else { w };
+        let lo = from.min(dim.saturating_sub(1));
+        let hi = to.min(dim.saturating_sub(1));
+        let (lo, hi) = (lo.min(hi), hi.max(lo));
         let mut total: u64 = 0;
         let mut n: u64 = 0;
         if vertical {
-            for by in (0..h).step_by(4) {
-                let i = (by * w + at) * 4;
+            for v in lo..=hi {
+                let i = (v * w + at) * 4;
                 total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
                 n += 1;
             }
         } else {
-            for bx in (0..w).step_by(4) {
-                let i = (at * w + bx) * 4;
+            for v in lo..=hi {
+                let i = (at * w + v) * 4;
                 total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
                 n += 1;
             }
@@ -497,11 +528,6 @@ impl OverlayView {
             return 0;
         }
         (total / (n * 3)) as u32
-    }
-
-    /// Label width that fits an 11pt monospaced-digit text.
-    fn label_width(text: &str) -> f64 {
-        text.chars().count() as f64 * 7.2 + 14.0
     }
 
     /// Reposition the HUD for the cursor. `selection_px` is the live pixel
@@ -551,70 +577,62 @@ impl OverlayView {
             unsafe { loupe.setContents(Some(as_any)) };
         }
 
-        // Place the loupe by the cursor, flipping at the screen edges.
+        // Place the loupe by the cursor, flipping at the screen edges. The
+        // origin snaps to whole points so the squares inside stay pinned to
+        // the screen grid while the crop steps in whole pixels — otherwise
+        // the picture visibly slides under the cursor in sub-pixel steps.
         let lx = if cursor.x + LOUPE_GAP_PT + LOUPE_SIZE_PT <= screen.width {
             cursor.x + LOUPE_GAP_PT
         } else {
             cursor.x - LOUPE_GAP_PT - LOUPE_SIZE_PT
-        };
+        }
+        .round();
         let ly = if cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT >= 0.0 {
             cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT
         } else {
             cursor.y + LOUPE_GAP_PT
-        };
+        }
+        .round();
         loupe.setFrame(CGRect::new(
             CGPoint::new(lx, ly),
             objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
         ));
         loupe.setHidden(false);
 
-        // "W × H px" next to the loupe while dragging.
-        let size_label = &ivars.size_label;
-        if let Some((w, h)) = selection_px {
-            let text = format!("{} × {} px", w.round() as i64, h.round() as i64);
-            Self::set_label_text(size_label, &text);
-            let ty = if ly >= HUD_LABEL_H_PT + 6.0 {
-                ly - HUD_LABEL_H_PT - 6.0
-            } else {
-                ly + LOUPE_SIZE_PT + 6.0
-            };
-            size_label.setFrame(CGRect::new(
-                CGPoint::new(lx, ty),
-                objc2_core_foundation::CGSize::new(Self::label_width(&text), HUD_LABEL_H_PT),
-            ));
-            size_label.setHidden(false);
+        // Monosnap-style readout pinned under the loupe: cursor coordinates
+        // while idle, the selection size while dragging. Logical pixels.
+        let text = match selection_px {
+            Some((w, h)) => format!("{} × {}", w.round() as i64, h.round() as i64),
+            None => format!(
+                "{} × {}",
+                (cursor.x * scale / factor).round() as i64,
+                ((screen.height - cursor.y) * scale / factor).round() as i64
+            ),
+        };
+        let label = &ivars.size_label;
+        Self::set_label_text(label, &text);
+        let ty = if ly >= HUD_LABEL_H_PT + 6.0 {
+            ly - HUD_LABEL_H_PT - 6.0
         } else {
-            size_label.setHidden(true);
-        }
+            ly + LOUPE_SIZE_PT + 6.0
+        };
+        label.setFrame(CGRect::new(
+            CGPoint::new(lx, ty),
+            objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, HUD_LABEL_H_PT),
+        ));
+        label.setHidden(false);
 
         // Idle: full-screen guides through the cursor with coordinate labels.
         // Drag: guides off — the rectangle is feedback enough. The line
         // color adapts to the content underneath, so the old thin hairlines
         // stay readable on light and dark backgrounds alike.
         if dragging {
-            ivars.axis_v.setHidden(true);
-            ivars.axis_h.setHidden(true);
-            ivars.x_label.setHidden(true);
-            ivars.y_label.setHidden(true);
+            ivars.axis_v_dark.setHidden(true);
+            ivars.axis_v_light.setHidden(true);
+            ivars.axis_h_dark.setHidden(true);
+            ivars.axis_h_light.setHidden(true);
         } else {
-            // Old thin hairlines; each line's color adapts to the mean
-            // brightness of the content underneath it.
-            let stroke = |light: bool| {
-                if light {
-                    NSColor::blackColor().colorWithAlphaComponent(0.55).CGColor()
-                } else {
-                    NSColor::whiteColor().colorWithAlphaComponent(0.55).CGColor()
-                }
-            };
-            let v_light =
-                Self::line_mean_brightness(sampler, true, (px.round() as usize).min(sampler.width - 1))
-                    > LIGHT_CONTENT_THRESHOLD;
-            let h_light =
-                Self::line_mean_brightness(sampler, false, (py.round() as usize).min(sampler.height - 1))
-                    > LIGHT_CONTENT_THRESHOLD;
-            ivars.axis_v.setStrokeColor(Some(&stroke(v_light)));
-            ivars.axis_h.setStrokeColor(Some(&stroke(h_light)));
-
+            // One path per direction, shared by the outline and the core.
             let v_path = CGMutablePath::new();
             let h_path = CGMutablePath::new();
             // SAFETY: plain C path builders with a null transform.
@@ -626,40 +644,14 @@ impl OverlayView {
             }
             let v_ref: &CGPath = &v_path;
             let h_ref: &CGPath = &h_path;
-            ivars.axis_v.setPath(Some(v_ref));
-            ivars.axis_h.setPath(Some(h_ref));
-            ivars.axis_v.setHidden(false);
-            ivars.axis_h.setHidden(false);
-
-            // Labels speak logical pixels, like the loupe (the real cursor
-            // position, not the sample-clamped one).
-            let x_text = format!("{}", (cursor.x * scale / factor).round() as i64);
-            Self::set_label_text(&ivars.x_label, &x_text);
-            let xw = Self::label_width(&x_text);
-            let xx = if cursor.x + 6.0 + xw <= screen.width {
-                cursor.x + 6.0
-            } else {
-                cursor.x - xw - 6.0
-            };
-            ivars.x_label.setFrame(CGRect::new(
-                CGPoint::new(xx, screen.height - HUD_LABEL_H_PT - 6.0),
-                objc2_core_foundation::CGSize::new(xw, HUD_LABEL_H_PT),
-            ));
-            ivars.x_label.setHidden(false);
-
-            let y_text = format!("{}", ((screen.height - cursor.y) * scale / factor).round() as i64);
-            Self::set_label_text(&ivars.y_label, &y_text);
-            let yw = Self::label_width(&y_text);
-            let yy = if cursor.y + 6.0 + HUD_LABEL_H_PT <= screen.height {
-                cursor.y + 6.0
-            } else {
-                cursor.y - HUD_LABEL_H_PT - 6.0
-            };
-            ivars.y_label.setFrame(CGRect::new(
-                CGPoint::new(screen.width - yw - 6.0, yy),
-                objc2_core_foundation::CGSize::new(yw, HUD_LABEL_H_PT),
-            ));
-            ivars.y_label.setHidden(false);
+            for layer in [&ivars.axis_v_dark, &ivars.axis_v_light] {
+                layer.setPath(Some(v_ref));
+                layer.setHidden(false);
+            }
+            for layer in [&ivars.axis_h_dark, &ivars.axis_h_light] {
+                layer.setPath(Some(h_ref));
+                layer.setHidden(false);
+            }
         }
     }
 
@@ -756,6 +748,11 @@ impl OverlayView {
                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
             );
             window.setFrame_display(screen_frame, false);
+            // This accessory app is not active when launched from a shell:
+            // without activation the overlay never becomes the key window,
+            // and Esc goes nowhere until the first click activates it.
+            NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"))
+                .activate();
             window.makeKeyAndOrderFront(None);
         }
         eprintln!(
@@ -881,10 +878,10 @@ impl OverlayView {
         *ivars.sampler.borrow_mut() = None;
         ivars.loupe.setHidden(true);
         ivars.size_label.setHidden(true);
-        ivars.axis_v.setHidden(true);
-        ivars.axis_h.setHidden(true);
-        ivars.x_label.setHidden(true);
-        ivars.y_label.setHidden(true);
+        ivars.axis_v_dark.setHidden(true);
+        ivars.axis_v_light.setHidden(true);
+        ivars.axis_h_dark.setHidden(true);
+        ivars.axis_h_light.setHidden(true);
         if let Some(window) = ivars.window.borrow().as_ref() {
             window.orderOut(None);
         }
@@ -998,8 +995,8 @@ mod tests {
         assert_eq!((sampler.width, sampler.height, sampler.factor), (32, 32, 2));
         // Left half of the frame is black, right half white: a column in the
         // dark half reads dark, one in the light half reads light.
-        let dark = OverlayView::line_mean_brightness(&sampler, true, 4);
-        let light = OverlayView::line_mean_brightness(&sampler, true, 28);
+        let dark = OverlayView::line_brightness_in(&sampler, true, 4, 0, 31);
+        let light = OverlayView::line_brightness_in(&sampler, true, 28, 0, 31);
         assert!(dark < LIGHT_CONTENT_THRESHOLD, "dark col: {dark}");
         assert!(light > LIGHT_CONTENT_THRESHOLD, "light col: {light}");
     }
