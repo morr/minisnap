@@ -108,7 +108,7 @@ fn local_utc_offset_secs() -> i64 {
 }
 
 /// Encode the image as PNG into `path` via ImageIO.
-fn encode_png(image: &CGImage, path: &Path) -> Result<(), String> {
+pub(crate) fn encode_png(image: &CGImage, path: &Path) -> Result<(), String> {
     let url = CFURL::from_file_path(path).ok_or_else(|| format!("bad path {}", path.display()))?;
     // SAFETY: url/type are live CF objects; the destination type parameters
     // (count=1, no options) have no further invariants.

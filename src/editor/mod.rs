@@ -11,7 +11,9 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use serde::{Deserialize, Serialize};
 
+pub mod hit_test;
 pub mod render;
+pub mod session;
 pub mod text;
 
 /// RGBA color with components in 0..1 (straight alpha; strokes are opaque).
