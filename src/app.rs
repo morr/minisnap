@@ -64,6 +64,8 @@ struct AppIvars {
     #[allow(dead_code)]
     capture_item: Retained<NSMenuItem>,
     #[allow(dead_code)]
+    capture_edit_item: Retained<NSMenuItem>,
+    #[allow(dead_code)]
     open_latest_item: Retained<NSMenuItem>,
     // The capture action consults the config when the mode is wired up.
     #[allow(dead_code)]
@@ -102,7 +104,12 @@ define_class!(
     impl AppController {
         #[unsafe(method(captureFrozenArea:))]
         fn capture_frozen_area(&self, _sender: Option<&AnyObject>) {
-            eprintln!("capture frozen area: not implemented yet");
+            self.start_capture(false);
+        }
+
+        #[unsafe(method(captureAndEdit:))]
+        fn capture_and_edit(&self, _sender: Option<&AnyObject>) {
+            self.start_capture(true);
         }
 
         #[unsafe(method(openLatestImage:))]
@@ -198,6 +205,7 @@ define_class!(
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
                     HotkeyAction::Capture => self.start_capture(false),
+                    HotkeyAction::CaptureEdit => self.start_capture(true),
                     HotkeyAction::OpenLatest => self.open_latest(),
                 }
             }
@@ -264,6 +272,16 @@ impl AppController {
         };
         menu.addItem(&capture_item);
 
+        let capture_edit_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str("Capture and Edit"),
+                Some(sel!(captureAndEdit:)),
+                &NSString::from_str(""),
+            )
+        };
+        menu.addItem(&capture_edit_item);
+
         let open_latest_item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
@@ -304,6 +322,7 @@ impl AppController {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             status_item: status_item.clone(),
             capture_item: capture_item.clone(),
+            capture_edit_item: capture_edit_item.clone(),
             open_latest_item: open_latest_item.clone(),
             config: RefCell::new(config.clone()),
             hotkeys: RefCell::new(HotkeyRegistry::new()),
@@ -323,18 +342,26 @@ impl AppController {
 
         // Menu item targets are weak (assign) references: set them on the
         // final retained controller.
-        for item in [&capture_item, &open_latest_item, &prefs_item, &quit_item] {
+        for item in [
+            &capture_item,
+            &capture_edit_item,
+            &open_latest_item,
+            &prefs_item,
+            &quit_item,
+        ] {
             unsafe { item.setTarget(Some(&this)) };
         }
 
         // Menu shortcuts come from the same config as the registrations —
         // one source of truth.
-        let (capture_hk, open_hk) = (config.capture_hotkey, config.open_hotkey);
+        let (capture_hk, edit_hk, open_hk) =
+            (config.capture_hotkey, config.capture_edit_hotkey, config.open_hotkey);
         Self::apply_menu_hotkey(&capture_item, &capture_hk);
+        Self::apply_menu_hotkey(&capture_edit_item, &edit_hk);
         Self::apply_menu_hotkey(&open_latest_item, &open_hk);
 
         let mut hotkeys = HotkeyRegistry::new();
-        hotkeys.apply(config.capture_hotkey, config.open_hotkey);
+        hotkeys.apply(capture_hk, edit_hk, open_hk);
         this.ivars().hotkeys.replace(hotkeys);
 
         // Display configuration changes cancel the overlay mode (4.7).
@@ -400,16 +427,20 @@ impl AppController {
         let mtm = MainThreadMarker::from(self);
         let mut slot = self.ivars().prefs.borrow_mut();
         if slot.is_none() {
-            let (capture_combo, open_combo) = {
+            let (capture_combo, edit_combo, open_combo) = {
                 let config = self.ivars().config.borrow();
                 (
                     hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
+                    hotkeys::render_combo(
+                        config.capture_edit_hotkey.mods,
+                        config.capture_edit_hotkey.key,
+                    ),
                     hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
                 )
             };
-            *slot = Some(prefs::build(mtm, &capture_combo, &open_combo));
+            *slot = Some(prefs::build(mtm, &capture_combo, &edit_combo, &open_combo));
             let window = slot.as_ref().unwrap();
-            for button in [&window.capture_button, &window.open_button] {
+            for button in [&window.capture_button, &window.capture_edit_button, &window.open_button] {
                 // SAFETY: target is this controller, whose selector lives as
                 // long as the process.
                 unsafe {
@@ -471,7 +502,10 @@ impl AppController {
 
     /// Begin recording a new combination for the row with the given tag.
     fn start_recording(&self, row: isize) {
-        if row != prefs::ROW_CAPTURE && row != prefs::ROW_OPEN_LATEST {
+        if row != prefs::ROW_CAPTURE
+            && row != prefs::ROW_CAPTURE_EDIT
+            && row != prefs::ROW_OPEN_LATEST
+        {
             return;
         }
         if self.ivars().recording.get().is_some() {
@@ -519,6 +553,7 @@ impl AppController {
             let mut config = self.ivars().config.borrow_mut();
             match row {
                 prefs::ROW_CAPTURE => config.capture_hotkey = hotkey,
+                prefs::ROW_CAPTURE_EDIT => config.capture_edit_hotkey = hotkey,
                 prefs::ROW_OPEN_LATEST => config.open_hotkey = hotkey,
                 _ => {}
             }
@@ -530,8 +565,9 @@ impl AppController {
             self.ivars()
                 .hotkeys
                 .borrow_mut()
-                .apply(config.capture_hotkey, config.open_hotkey);
+                .apply(config.capture_hotkey, config.capture_edit_hotkey, config.open_hotkey);
             Self::apply_menu_hotkey(&self.ivars().capture_item, &config.capture_hotkey);
+            Self::apply_menu_hotkey(&self.ivars().capture_edit_item, &config.capture_edit_hotkey);
             Self::apply_menu_hotkey(&self.ivars().open_latest_item, &config.open_hotkey);
             eprintln!(
                 "prefs: hotkeys applied: capture={} open={}",
@@ -554,6 +590,13 @@ impl AppController {
             Some(row) if row == prefs::ROW_CAPTURE => "Press keys…".to_string(),
             _ => hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
         };
+        let edit_title = match recording {
+            Some(row) if row == prefs::ROW_CAPTURE_EDIT => "Press keys…".to_string(),
+            _ => hotkeys::render_combo(
+                config.capture_edit_hotkey.mods,
+                config.capture_edit_hotkey.key,
+            ),
+        };
         let open_title = match recording {
             Some(row) if row == prefs::ROW_OPEN_LATEST => "Press keys…".to_string(),
             _ => hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
@@ -561,6 +604,9 @@ impl AppController {
         prefs_window
             .capture_button
             .setTitle(&NSString::from_str(&capture_title));
+        prefs_window
+            .capture_edit_button
+            .setTitle(&NSString::from_str(&edit_title));
         prefs_window
             .open_button
             .setTitle(&NSString::from_str(&open_title));

@@ -1,4 +1,4 @@
-//! Preferences window: two hotkey recorder rows, built in code (no xib).
+//! Preferences window: three hotkey recorder rows, built in code (no xib).
 //!
 //! The window is created once and kept by the app controller; reopening
 //! from the menu just brings the existing one to the front.
@@ -15,10 +15,11 @@ use objc2_foundation::NSString;
 
 /// Sender tags telling the recorder which hotkey a row edits.
 pub const ROW_CAPTURE: isize = 0;
-pub const ROW_OPEN_LATEST: isize = 1;
+pub const ROW_CAPTURE_EDIT: isize = 1;
+pub const ROW_OPEN_LATEST: isize = 2;
 
-/// Fixed window size: two rows fit with comfortable margins.
-const CONTENT_SIZE: CGSize = CGSize::new(380.0, 116.0);
+/// Fixed window size: three rows fit with comfortable margins.
+const CONTENT_SIZE: CGSize = CGSize::new(380.0, 148.0);
 const CONTENT_MARGIN: f64 = 16.0;
 const ROW_SPACING: f64 = 14.0;
 
@@ -27,6 +28,8 @@ pub struct PrefsWindow {
     pub window: Retained<NSWindow>,
     /// "Capture Frozen Area" combo button (tag `ROW_CAPTURE`).
     pub capture_button: Retained<NSButton>,
+    /// "Capture and Edit" combo button (tag `ROW_CAPTURE_EDIT`).
+    pub capture_edit_button: Retained<NSButton>,
     /// "Open Latest Image" combo button (tag `ROW_OPEN_LATEST`).
     pub open_button: Retained<NSButton>,
 }
@@ -76,7 +79,12 @@ fn row(
 
 /// Build the preferences window with the given rendered combinations.
 /// Buttons start without a target; the controller attaches its action.
-pub fn build(mtm: MainThreadMarker, capture_combo: &str, open_combo: &str) -> PrefsWindow {
+pub fn build(
+    mtm: MainThreadMarker,
+    capture_combo: &str,
+    capture_edit_combo: &str,
+    open_combo: &str,
+) -> PrefsWindow {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -112,13 +120,17 @@ pub fn build(mtm: MainThreadMarker, capture_combo: &str, open_combo: &str) -> Pr
     content.addSubview(&stack);
 
     let (capture_row, capture_button) = row(mtm, "Capture Frozen Area", capture_combo, ROW_CAPTURE);
+    let (capture_edit_row, capture_edit_button) =
+        row(mtm, "Capture and Edit", capture_edit_combo, ROW_CAPTURE_EDIT);
     let (open_row, open_button) = row(mtm, "Open Latest Image", open_combo, ROW_OPEN_LATEST);
     stack.addArrangedSubview(&capture_row);
+    stack.addArrangedSubview(&capture_edit_row);
     stack.addArrangedSubview(&open_row);
 
     PrefsWindow {
         window,
         capture_button,
+        capture_edit_button,
         open_button,
     }
 }

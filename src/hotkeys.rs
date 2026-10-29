@@ -12,6 +12,8 @@ use objc2_app_kit::NSEventModifierFlags;
 pub enum HotkeyAction {
     /// Start the frozen-area capture mode.
     Capture,
+    /// Start the frozen-area capture mode and open the editor afterwards.
+    CaptureEdit,
     /// Open the latest saved shot.
     OpenLatest,
 }
@@ -33,10 +35,10 @@ impl HotkeyRegistry {
         }
     }
 
-    /// Replace the current registrations with `capture` and `open`.
-    /// If one combination is already taken by another app it is reported,
-    /// and the other one is still registered.
-    pub fn apply(&mut self, capture: HotKey, open: HotKey) {
+    /// Replace the current registrations with the three actions. If one
+    /// combination is already taken by another app it is reported, and the
+    /// other ones are still registered.
+    pub fn apply(&mut self, capture: HotKey, capture_edit: HotKey, open: HotKey) {
         self.manager.borrow_mut().take();
         let manager = match GlobalHotKeyManager::new() {
             Ok(m) => m,
@@ -46,9 +48,11 @@ impl HotkeyRegistry {
             }
         };
         self.actions.clear();
-        for (hotkey, action) in
-            [(capture, HotkeyAction::Capture), (open, HotkeyAction::OpenLatest)]
-        {
+        for (hotkey, action) in [
+            (capture, HotkeyAction::Capture),
+            (capture_edit, HotkeyAction::CaptureEdit),
+            (open, HotkeyAction::OpenLatest),
+        ] {
             match manager.register(hotkey) {
                 Ok(()) => {
                     self.actions.insert(hotkey.id(), action);
