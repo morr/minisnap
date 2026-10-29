@@ -12,6 +12,7 @@ use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use serde::{Deserialize, Serialize};
 
 pub mod render;
+pub mod text;
 
 /// RGBA color with components in 0..1 (straight alpha; strokes are opaque).
 pub type Rgba = [f64; 4];

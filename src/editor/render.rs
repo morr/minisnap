@@ -98,9 +98,17 @@ fn draw_element(ctx: &CGContext, element: &Element) {
         ElementKind::Pen { points, color, width } => {
             stroke_polyline(ctx, points, *color, *width);
         }
-        // Text and callouts land with the Core Text task, blur with the
+        // Text and callouts render via Core Text; blur lands with the
         // pixelization task.
-        ElementKind::Text { .. } | ElementKind::Callout { .. } | ElementKind::Blur { .. } => {}
+        ElementKind::Text { origin, text, color, size } => {
+            super::text::draw_text(ctx, *origin, text, *color, *size);
+        }
+        ElementKind::Callout { tip, anchor, text, color, size } => {
+            // A small wedge pointer from the text block to the target.
+            draw_arrow(ctx, *anchor, *tip, *color, *size / 3.0);
+            super::text::draw_text(ctx, *anchor, text, *color, *size);
+        }
+        ElementKind::Blur { .. } => {}
     }
 }
 

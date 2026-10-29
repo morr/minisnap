@@ -76,6 +76,11 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGBitmapContext",
     "CGPath",
 ] }
+objc2-core-text = { version = "0.3", features = [
+    "CTFont",
+    "CTLine",
+    "CTStringAttributes",
+] }
 objc2-screen-capture-kit = { version = "0.3", features = [
     "SCScreenshotManager",
     "SCShareableContent",
