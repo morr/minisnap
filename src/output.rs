@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
-    NSPasteboardTypeTIFF, NSWorkspace,
+    NSPasteboardTypeTIFF,
 };
 use objc2_core_foundation::{CFRetained, CFString, CFURL, CGRect};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSDictionary, NSURL, NSString};
+use objc2_foundation::NSDictionary;
 use objc2_image_io::CGImageDestination;
 
 /// Crop the T0 frame to `rect` (top-left-origin pixel space). None for an
@@ -189,17 +189,12 @@ pub fn save_to_file(image: &CGImage, dir: &Path, retention: u32) -> Result<PathB
     Ok(path)
 }
 
-/// Open the newest shot in `dir` with the app the system associates with
-/// PNG. A missing or empty folder is a silent no-op.
-pub fn open_latest(dir: &Path) {
-    let newest = shot_files_oldest_first(dir)
+/// The newest shot file in `dir`, if any. A missing or empty folder reads
+/// as None.
+pub fn latest_shot(dir: &Path) -> Option<PathBuf> {
+    shot_files_oldest_first(dir)
         .pop()
-        .map(|(path, _)| path);
-    let Some(path) = newest else {
-        return;
-    };
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSWorkspace::sharedWorkspace().openURL(&url);
+        .map(|(path, _)| path)
 }
 
 #[cfg(test)]

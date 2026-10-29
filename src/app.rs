@@ -612,11 +612,14 @@ impl AppController {
             .setTitle(&NSString::from_str(&open_title));
     }
 
-    /// Open the newest saved shot; shared by the tray menu and the open
-    /// hotkey.
+    /// Open the newest saved shot in the editor; an empty folder is a
+    /// silent no-op. Shared by the tray menu and the open hotkey.
     fn open_latest(&self) {
         let dir = self.ivars().config.borrow().save_dir.clone();
-        crate::output::open_latest(&dir);
+        match crate::output::latest_shot(&dir) {
+            Some(path) => self.open_editor(path),
+            None => eprintln!("open latest: no shots yet"),
+        }
     }
 
     /// Open (or focus) the editor window on a shot file. Created lazily and
