@@ -65,6 +65,18 @@ impl OverlayWindow {
     );
 }
 
+/// Interaction state inside the overlay mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayState {
+    /// Moving the cursor, no button held.
+    Idle,
+    /// Left button held: selection rectangle is being drawn.
+    Drag,
+}
+
+/// Movement tolerance (in points) within which down+up counts as a click.
+const CLICK_TOLERANCE_PT: f64 = 3.0;
+
 struct OverlayIvars {
     window: RefCell<Option<Retained<OverlayWindow>>>,
     veils: RefCell<Vec<Retained<NSWindow>>>,
@@ -81,6 +93,11 @@ struct OverlayIvars {
     screen_frame: Cell<CGRect>,
     scale: Cell<f64>,
     frame_layer: Retained<CALayer>,
+    state: Cell<OverlayState>,
+    /// Selection start point and current cursor, display-local (AppKit,
+    /// bottom-left origin, points).
+    drag_start: Cell<CGPoint>,
+    mouse: Cell<CGPoint>,
 }
 
 define_class!(
@@ -109,6 +126,9 @@ define_class!(
                 screen_frame: Cell::new(CGRect::ZERO),
                 scale: Cell::new(1.0),
                 frame_layer: CALayer::new(),
+                state: Cell::new(OverlayState::Idle),
+                drag_start: Cell::new(CGPoint::ZERO),
+                mouse: Cell::new(CGPoint::ZERO),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -124,6 +144,21 @@ define_class!(
             if event.keyCode() == 53 {
                 self.finish(OverlayOutcome::Cancelled);
             }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            self.handle_mouse_down(event);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn __mouse_dragged(&self, event: &NSEvent) {
+            self.handle_mouse_dragged(event);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn __mouse_up(&self, event: &NSEvent) {
+            self.handle_mouse_up(event);
         }
     }
 );
@@ -205,6 +240,74 @@ impl OverlayView {
             screen_frame.size.width,
             screen_frame.size.height
         );
+    }
+
+    /// Cursor position in display-local points (bottom-left origin).
+    fn local_point(&self, event: &NSEvent) -> CGPoint {
+        let location = event.locationInWindow();
+        // The borderless content view covers the whole window, so window
+        // coordinates are display-local coordinates.
+        CGPoint::new(location.x, location.y)
+    }
+
+    fn handle_mouse_down(&self, event: &NSEvent) {
+        let ivars = self.ivars();
+        if !ivars.active.get() {
+            return;
+        }
+        let point = self.local_point(event);
+        ivars.drag_start.set(point);
+        ivars.mouse.set(point);
+        ivars.state.set(OverlayState::Drag);
+    }
+
+    fn handle_mouse_dragged(&self, event: &NSEvent) {
+        let ivars = self.ivars();
+        if ivars.state.get() != OverlayState::Drag {
+            return;
+        }
+        ivars.mouse.set(self.local_point(event));
+    }
+
+    fn handle_mouse_up(&self, event: &NSEvent) {
+        let ivars = self.ivars();
+        if ivars.state.get() != OverlayState::Drag {
+            return;
+        }
+        let up = self.local_point(event);
+        ivars.mouse.set(up);
+        ivars.state.set(OverlayState::Idle);
+
+        let start = ivars.drag_start.get();
+        let moved = (up.x - start.x).abs() > CLICK_TOLERANCE_PT
+            || (up.y - start.y).abs() > CLICK_TOLERANCE_PT;
+        if !moved {
+            // Click: whole display for now; click-to-window lands in 4.6.
+            let (w_px, h_px) = ivars.image_size_px.get();
+            let full = CGRect::new(
+                CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(w_px as f64, h_px as f64),
+            );
+            self.finish(OverlayOutcome::Selected { pixel_rect: full });
+            return;
+        }
+
+        // Drag: normalize the selection and crop in pixel space.
+        let screen_frame = ivars.screen_frame.get();
+        let scale = ivars.scale.get();
+        let rect = crate::capture::geometry::intersect(
+            CGRect::new(
+                CGPoint::new(start.x.min(up.x), start.y.min(up.y)),
+                objc2_core_foundation::CGSize::new((up.x - start.x).abs(), (up.y - start.y).abs()),
+            ),
+            CGRect::new(CGPoint::ZERO, screen_frame.size),
+        );
+        let pixel_rect = crate::capture::geometry::selection_to_pixel_rect(
+            rect,
+            screen_frame.size,
+            scale,
+        );
+        self.finish(OverlayOutcome::Selected { pixel_rect });
     }
 
     /// Complete the mode: hide everything and hand the outcome to the owner.
