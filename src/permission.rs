@@ -7,10 +7,25 @@
 
 use std::ffi::c_void;
 
+use objc2_app_kit::NSWorkspace;
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFMutableDictionary, CFRetained, CFString,
     kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
 };
+use objc2_foundation::{NSURL, NSString};
+
+/// System Settings privacy pane for Screen Recording.
+pub const SCREEN_RECORDING_PANE_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
+/// Open the Screen Recording privacy pane in System Settings.
+pub fn open_screen_recording_settings() {
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(SCREEN_RECORDING_PANE_URL)) else {
+        eprintln!("permission: cannot build the settings URL");
+        return;
+    };
+    NSWorkspace::sharedWorkspace().openURL(&url);
+}
 
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;

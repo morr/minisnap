@@ -10,9 +10,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask,
-    NSEventType, NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem,
-    NSStatusBar, NSStatusItem,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask, NSEventType,
+    NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
+    NSStatusItem,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_foundation::{
@@ -73,6 +74,11 @@ struct AppIvars {
     // `recording` is set; installed once at startup.
     #[allow(dead_code)]
     monitor: RefCell<Option<Retained<AnyObject>>>,
+    // Screen Recording state: whether the explanatory dialog is up (the
+    // modal loop re-enters the tick, so hotkey handlers must not re-show
+    // it) and whether the permission is currently granted.
+    permission_dialog_visible: Cell<bool>,
+    permission_granted: Cell<bool>,
 }
 
 define_class!(
@@ -171,6 +177,24 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: Option<&objc2_foundation::NSNotification>) {
             eprintln!("minisnap launched");
+            // Startup preflight (7.1): explain the Screen Recording
+            // permission before the user wonders why capture does nothing.
+            if !crate::permission::preflight_screen_capture() {
+                eprintln!("screen recording: not granted, showing the explanation dialog");
+                self.show_permission_dialog();
+            } else {
+                eprintln!("screen recording: granted");
+            }
+        }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: Option<&objc2_foundation::NSNotification>) {
+            // Recheck when the user returns from System Settings (7.1).
+            let granted = crate::permission::preflight_screen_capture();
+            if granted != self.ivars().permission_granted.get() {
+                eprintln!("screen recording: now {}", if granted { "granted" } else { "revoked" });
+                self.ivars().permission_granted.set(granted);
+            }
         }
     }
 );
@@ -258,6 +282,8 @@ impl AppController {
             prefs: RefCell::new(None),
             recording: Cell::new(None),
             monitor: RefCell::new(None),
+            permission_dialog_visible: Cell::new(false),
+            permission_granted: Cell::new(crate::permission::preflight_screen_capture()),
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -374,6 +400,40 @@ impl AppController {
         };
         unsafe {
             NSRunLoop::currentRunLoop().addTimer_forMode(&timer, &NSDefaultRunLoopMode);
+        }
+    }
+
+    /// The explanatory Screen Recording dialog (7.1); also shown instead of
+    /// the capture mode while the permission is missing (7.2). Runs its own
+    /// modal loop; the visibility flag keeps re-entrant callers (the tick
+    /// fires inside the modal run loop) from stacking a second dialog.
+    fn show_permission_dialog(&self) {
+        if self.ivars().permission_dialog_visible.get() {
+            return;
+        }
+        self.ivars().permission_dialog_visible.set(true);
+        let mtm = MainThreadMarker::from(self);
+        let app = NSApplication::sharedApplication(mtm);
+        app.activate();
+        app.activateIgnoringOtherApps(true);
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Screen Recording Permission Needed"));
+        alert.setInformativeText(&NSString::from_str(
+            "minisnap freezes the screen so you can select an area to copy or \
+             save. Screen Recording access is what makes that possible.\n\n\
+             Grant access in System Settings — Privacy & Security — Screen \
+             Recording. If capture still does not work afterwards, quit and \
+             reopen minisnap.",
+        ));
+        alert.setAlertStyle(NSAlertStyle::Informational);
+        alert.addButtonWithTitle(&NSString::from_str("Open System Settings"));
+        alert.addButtonWithTitle(&NSString::from_str("Not Now"));
+        eprintln!("permission: running modal…");
+        let response = alert.runModal();
+        eprintln!("permission: modal returned {response}");
+        self.ivars().permission_dialog_visible.set(false);
+        if response == NSAlertFirstButtonReturn {
+            crate::permission::open_screen_recording_settings();
         }
     }
 
