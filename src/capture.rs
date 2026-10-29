@@ -255,7 +255,6 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objc2_core_foundation::CGSize;
     use objc2_foundation::{NSDictionary, NSString};
 
     #[test]
@@ -263,16 +262,13 @@ mod tests {
     fn capture_saves_frame_to_tmp() {
         // Cargo tests run off the main thread, so no NSScreen here: the
         // expected pixel size comes from the display mode.
-        use objc2_core_graphics::{
-            CGDisplayCopyDisplayMode, CGDisplayModeGetPixelHeight, CGDisplayModeGetPixelWidth,
-        };
         let content = shareable_content().expect("shareable content");
         let display = pick_display(&content, CGPoint::new(0.0, 0.0)).expect("a display");
         let display_id = unsafe { display.displayID() };
-        let mode = unsafe { CGDisplayCopyDisplayMode(display_id) }.expect("display mode");
+        let mode = CGDisplayCopyDisplayMode(display_id).expect("display mode");
         let expected = (
-            CGDisplayModeGetPixelWidth(Some(&mode)),
-            CGDisplayModeGetPixelHeight(Some(&mode)),
+            CGDisplayMode::pixel_width(Some(&mode)),
+            CGDisplayMode::pixel_height(Some(&mode)),
         );
         eprintln!("expected {expected:?} px");
         let image = capture_display_image(&display).expect("screenshot");
