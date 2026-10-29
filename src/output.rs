@@ -124,10 +124,52 @@ fn encode_png(image: &CGImage, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Does this file name match the app's own shot pattern —
+/// `MiniSnap …png`, with an optional ` (n)` before the extension?
+/// Foreign files in the folder never match and are never touched.
+fn is_shot_file_name(name: &str) -> bool {
+    name.starts_with("MiniSnap ") && name.ends_with(".png")
+}
+
+/// All shot files in `dir`, oldest first (by modification time, name as
+/// tie-break). Missing directory reads as empty.
+fn shot_files_oldest_first(dir: &Path) -> Vec<(PathBuf, std::ffi::OsString)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(PathBuf, std::ffi::OsString, std::time::SystemTime)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            if !is_shot_file_name(&name.to_string_lossy()) {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((entry.path(), name, modified))
+        })
+        .collect();
+    files.sort_by_key(|(_, name, modified)| (*modified, name.clone()));
+    files.into_iter().map(|(path, name, _)| (path, name)).collect()
+}
+
+/// Keep at most `limit` shot files in `dir`, deleting the oldest ones.
+/// Best-effort: a file that cannot be removed is logged and skipped.
+pub fn enforce_retention(dir: &Path, limit: u32) {
+    let files = shot_files_oldest_first(dir);
+    let excess = files.len().saturating_sub(limit as usize);
+    for (path, name) in files.into_iter().take(excess) {
+        if let Err(e) = fs::remove_file(&path) {
+            eprintln!("retention: cannot remove {}: {e}", path.display());
+        } else {
+            eprintln!("retention: removed {}", name.to_string_lossy());
+        }
+    }
+}
+
 /// Save the shot silently as `dir/MiniSnap YYYY-MM-DD HH-MM-SS.png`, creating
-/// `dir` (and parents) on demand and numbering same-second collisions.
-/// Returns the file path.
-pub fn save_to_file(image: &CGImage, dir: &Path) -> Result<PathBuf, String> {
+/// `dir` (and parents) on demand, numbering same-second collisions and
+/// enforcing the retention limit. Returns the file path.
+pub fn save_to_file(image: &CGImage, dir: &Path, retention: u32) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -135,6 +177,7 @@ pub fn save_to_file(image: &CGImage, dir: &Path) -> Result<PathBuf, String> {
         .as_secs() as i64;
     let path = unique_shot_path(dir, unix_secs, local_utc_offset_secs());
     encode_png(image, &path)?;
+    enforce_retention(dir, retention);
     Ok(path)
 }
 
@@ -274,16 +317,69 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let nested = dir.join("one").join("minisnap");
         let frame = synthetic_frame();
-        let path = save_to_file(&frame, &nested).expect("save");
+        let path = save_to_file(&frame, &nested, 100).expect("save");
         assert!(path.is_file(), "file written");
         assert!(path.extension().unwrap() == "png");
         // A valid PNG starts with the well-known signature.
         let bytes = fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         // Second save in the same second gets the collision number.
-        let second = save_to_file(&frame, &nested).expect("save again");
+        let second = save_to_file(&frame, &nested, 100).expect("save again");
         assert_ne!(path, second);
         assert!(second.to_string_lossy().contains(" (2)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_keeps_latest_and_spares_foreign_files() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("minisnap-output-retention-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 101 own shots created sequentially, with strictly increasing
+        // modification times: name[0] is the oldest.
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut names = Vec::new();
+        for i in 0..101u32 {
+            let name = format!(
+                "MiniSnap 2026-01-01 {:02}-{:02}-{:02}.png",
+                i / 3600,
+                (i / 60) % 60,
+                i % 60
+            );
+            let path = dir.join(&name);
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(b"png").unwrap();
+            file.set_modified(start + std::time::Duration::from_secs(i as u64))
+                .unwrap();
+            drop(file);
+            names.push(name);
+        }
+        // Foreign files that never match the shot pattern.
+        let foreign = ["holiday photo.jpg", "MiniSnap notes.txt", "minisnap lower.png"];
+        for name in foreign {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        enforce_retention(&dir, 100);
+
+        let left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.iter().filter(|n| is_shot_file_name(n)).count(), 100);
+        assert!(!left.contains(&names[0]), "oldest shot removed");
+        assert!(left.contains(&names[100]), "newest shot kept");
+        for name in foreign {
+            assert!(left.contains(&name.to_string()), "{name} untouched");
+        }
+
+        // A limit above the current count removes nothing.
+        enforce_retention(&dir, 10_000);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 100 + foreign.len());
         let _ = fs::remove_dir_all(&dir);
     }
 }
