@@ -124,6 +124,14 @@ pub(crate) fn encode_png(image: &CGImage, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Encode into `path` atomically: write a `.tmp` sibling first, then rename,
+/// so a crash mid-encode never leaves a half-written shot behind.
+pub(crate) fn encode_png_atomic(image: &CGImage, path: &Path) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    encode_png(image, &tmp)?;
+    fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
 /// Does this file name match the app's own shot pattern —
 /// `MiniSnap …png`, with an optional ` (n)` before the extension?
 /// Foreign files in the folder never match and are never touched.

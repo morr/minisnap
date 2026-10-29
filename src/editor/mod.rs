@@ -384,6 +384,12 @@ impl EditorDoc {
         &self.state.base
     }
 
+    /// The pristine frame every replay starts from (persisted as the
+    /// session's `original.png`).
+    pub fn original(&self) -> &Retained<CGImage> {
+        &self.original
+    }
+
     /// The current elements, bottom-most first (paint order).
     pub fn elements(&self) -> &[Element] {
         &self.state.elements
