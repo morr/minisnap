@@ -129,6 +129,15 @@ pub fn run() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    let config = crate::config::Config::load_or_create();
+    eprintln!(
+        "config: capture={} open={} save_dir={} retention={}",
+        config.capture_hotkey,
+        config.open_hotkey,
+        config.save_dir.display(),
+        config.retention
+    );
+
     let controller = AppController::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     // NSMenuItem targets and the app delegate hold weak references, so the
