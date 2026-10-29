@@ -13,7 +13,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
 
 use crate::config::Config;
-use crate::hotkeys::{HotkeyAction, HotkeyRegistry};
+use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
+use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
 /// brand icon appears.
@@ -33,6 +34,8 @@ struct AppIvars {
     // Kept for re-reading the shortcuts from the preferences window.
     #[allow(dead_code)]
     capture_item: Retained<NSMenuItem>,
+    #[allow(dead_code)]
+    open_latest_item: Retained<NSMenuItem>,
     // The capture action consults the config when the mode is wired up.
     #[allow(dead_code)]
     config: RefCell<Config>,
@@ -51,6 +54,11 @@ define_class!(
         #[unsafe(method(captureFrozenArea:))]
         fn capture_frozen_area(&self, _sender: Option<&AnyObject>) {
             eprintln!("capture frozen area: not implemented yet");
+        }
+
+        #[unsafe(method(openLatestImage:))]
+        fn open_latest_image(&self, _sender: Option<&AnyObject>) {
+            eprintln!("open latest image: not implemented yet");
         }
 
         #[unsafe(method(openPreferences:))]
@@ -112,6 +120,16 @@ impl AppController {
         };
         menu.addItem(&capture_item);
 
+        let open_latest_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str("Open Latest Image"),
+                Some(sel!(openLatestImage:)),
+                &NSString::from_str(""),
+            )
+        };
+        menu.addItem(&open_latest_item);
+
         menu.addItem(&NSMenuItem::separatorItem(mtm));
 
         let prefs_item = unsafe {
@@ -140,6 +158,7 @@ impl AppController {
         let this = Self::alloc(mtm).set_ivars(AppIvars {
             status_item: status_item.clone(),
             capture_item: capture_item.clone(),
+            open_latest_item: open_latest_item.clone(),
             config: RefCell::new(config.clone()),
             hotkeys: RefCell::new(HotkeyRegistry::new()),
         });
@@ -149,16 +168,27 @@ impl AppController {
 
         // Menu item targets are weak (assign) references: set them on the
         // final retained controller.
-        for item in [&capture_item, &prefs_item, &quit_item] {
+        for item in [&capture_item, &open_latest_item, &prefs_item, &quit_item] {
             unsafe { item.setTarget(Some(&this)) };
         }
 
+        // Menu shortcuts come from the same config as the registrations —
+        // one source of truth.
+        let (capture_hk, open_hk) = (config.capture_hotkey, config.open_hotkey);
+        Self::apply_menu_hotkey(&capture_item, &capture_hk);
+        Self::apply_menu_hotkey(&open_latest_item, &open_hk);
+
         let mut hotkeys = HotkeyRegistry::new();
-        hotkeys.apply(config.capture_hotkey, config.open_hotkey);
+        hotkeys.apply(capture_hk, open_hk);
         this.ivars().hotkeys.replace(hotkeys);
 
         this.schedule_tick(mtm);
         this
+    }
+
+    fn apply_menu_hotkey(item: &NSMenuItem, hotkey: &HotKey) {
+        item.setKeyEquivalent(&NSString::from_str(&hotkeys::key_equivalent_string(hotkey.key)));
+        item.setKeyEquivalentModifierMask(hotkeys::modifier_flags(hotkey.mods));
     }
 
     fn schedule_tick(&self, _mtm: MainThreadMarker) {
