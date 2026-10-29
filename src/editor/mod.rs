@@ -16,6 +16,8 @@ pub mod render;
 pub mod session;
 pub mod text;
 
+pub use session::OpenShot;
+
 /// RGBA color with components in 0..1 (straight alpha; strokes are opaque).
 pub type Rgba = [f64; 4];
 

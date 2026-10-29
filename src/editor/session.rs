@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFURL, CFRetained};
+use objc2_core_foundation::CFURL;
 use objc2_core_graphics::CGImage;
 use objc2_image_io::CGImageSource;
 
