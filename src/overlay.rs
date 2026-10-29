@@ -98,7 +98,16 @@ struct OverlayIvars {
     /// bottom-left origin, points).
     drag_start: Cell<CGPoint>,
     mouse: Cell<CGPoint>,
+    /// Layer tree root; attached to the view's layer on the first show.
+    root_layer: Retained<CALayer>,
+    layers_attached: Cell<bool>,
+    /// Four black strips around the selection rectangle (top, bottom, left,
+    /// right) forming the dimming with a "hole" for the selection.
+    dim_strips: RefCell<[Retained<CALayer>; 4]>,
 }
+
+/// Dimming opacity over the frozen frame outside the selection.
+const DIM_ALPHA: f64 = 0.4;
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -129,6 +138,9 @@ define_class!(
                 state: Cell::new(OverlayState::Idle),
                 drag_start: Cell::new(CGPoint::ZERO),
                 mouse: Cell::new(CGPoint::ZERO),
+                root_layer: CALayer::new(),
+                layers_attached: Cell::new(false),
+                dim_strips: RefCell::new([CALayer::new(), CALayer::new(), CALayer::new(), CALayer::new()]),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -177,6 +189,46 @@ impl OverlayView {
         unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
     }
 
+    /// Style a dimming strip once.
+    fn setup_strip(strip: &CALayer) {
+        let dim_color = NSColor::blackColor().colorWithAlphaComponent(DIM_ALPHA);
+        strip.setBackgroundColor(Some(&dim_color.CGColor()));
+    }
+
+    /// Place the four dimming strips around `hole` (display-local points);
+    /// `None` hides them (no active selection yet).
+    fn update_dim(&self, hole: Option<CGRect>) {
+        let ivars = self.ivars();
+        let strips = ivars.dim_strips.borrow();
+        let screen_size = ivars.screen_frame.get().size;
+        let Some(rect) = hole else {
+            for strip in strips.iter() {
+                strip.setHidden(true);
+            }
+            return;
+        };
+        let rect = rect.standardize();
+        let w = screen_size.width;
+        let h = screen_size.height;
+        let frames = [
+            // top: from the hole's top edge up to the screen top
+            CGRect::new(CGPoint::new(0.0, rect.max().y), objc2_core_foundation::CGSize::new(w, h - rect.max().y)),
+            // bottom
+            CGRect::new(CGPoint::ZERO, objc2_core_foundation::CGSize::new(w, rect.min().y)),
+            // left
+            CGRect::new(CGPoint::new(0.0, rect.min().y), objc2_core_foundation::CGSize::new(rect.min().x, rect.size.height)),
+            // right
+            CGRect::new(
+                CGPoint::new(rect.max().x, rect.min().y),
+                objc2_core_foundation::CGSize::new(w - rect.max().x, rect.size.height),
+            ),
+        ];
+        for (strip, frame) in strips.iter().zip(frames) {
+            strip.setHidden(false);
+            strip.setFrame(frame);
+        }
+    }
+
     /// Point the frame layer at the T0 image and show the overlay on the
     /// captured screen. Main thread only.
     fn show(
@@ -203,6 +255,24 @@ impl OverlayView {
         *ivars.on_done.borrow_mut() = Some(on_done);
         ivars.finishing.set(false);
         ivars.active.set(true);
+
+        // Attach the layer tree to the view once.
+        if !ivars.layers_attached.get() {
+            ivars.layers_attached.set(true);
+            self.setWantsLayer(true);
+            if let Some(view_layer) = self.layer() {
+                let root = &ivars.root_layer;
+                root.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
+                // z-order: frozen frame, then dimming strips.
+                root.addSublayer(&ivars.frame_layer);
+                for strip in ivars.dim_strips.borrow().iter() {
+                    Self::setup_strip(strip);
+                    root.addSublayer(strip);
+                }
+                view_layer.addSublayer(root);
+            }
+        }
+        ivars.root_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
 
         // Frame layer: the frozen T0 bitmap, 1:1 with the display pixels.
         let frame_layer = &ivars.frame_layer;
@@ -259,6 +329,8 @@ impl OverlayView {
         ivars.drag_start.set(point);
         ivars.mouse.set(point);
         ivars.state.set(OverlayState::Drag);
+        // Zero-size hole: full dimming until the drag opens a rectangle.
+        self.update_dim(Some(CGRect::new(point, objc2_core_foundation::CGSize::ZERO)));
     }
 
     fn handle_mouse_dragged(&self, event: &NSEvent) {
@@ -266,7 +338,19 @@ impl OverlayView {
         if ivars.state.get() != OverlayState::Drag {
             return;
         }
-        ivars.mouse.set(self.local_point(event));
+        // Cursor leaving the display clamps the rectangle to its bounds; the
+        // drag loop keeps receiving events, so the rect follows the cursor.
+        let point = crate::capture::geometry::clamp_point(
+            self.local_point(event),
+            CGRect::new(CGPoint::ZERO, ivars.screen_frame.get().size),
+        );
+        ivars.mouse.set(point);
+        let start = ivars.drag_start.get();
+        let rect = CGRect::new(
+            CGPoint::new(start.x.min(point.x), start.y.min(point.y)),
+            objc2_core_foundation::CGSize::new((point.x - start.x).abs(), (point.y - start.y).abs()),
+        );
+        self.update_dim(Some(rect));
     }
 
     fn handle_mouse_up(&self, event: &NSEvent) {
@@ -277,6 +361,7 @@ impl OverlayView {
         let up = self.local_point(event);
         ivars.mouse.set(up);
         ivars.state.set(OverlayState::Idle);
+        self.update_dim(None);
 
         let start = ivars.drag_start.get();
         let moved = (up.x - start.x).abs() > CLICK_TOLERANCE_PT
