@@ -83,6 +83,9 @@ fn draw_element(ctx: &CGContext, base: &CGImage, element: &Element) {
     match &element.kind {
         ElementKind::Arrow { a, b, color, width } => draw_arrow(ctx, *a, *b, *color, *width),
         ElementKind::Rect { rect, color, width } => {
+            // Negative drag sizes (drawing up/left) normalize to a proper
+            // rect; committed elements are already standard.
+            let rect = rect.standardize();
             CGContext::set_rgb_stroke_color(Some(ctx), color[0], color[1], color[2], color[3]);
             CGContext::stroke_rect_with_width(
                 Some(ctx),

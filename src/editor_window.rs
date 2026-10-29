@@ -20,7 +20,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGImage, CGContext};
 use objc2_foundation::{NSString, NSRectEdge};
 
-use crate::editor::{render, ElementKind, OpenShot, Point, Rect, Rgba};
+use crate::editor::{render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba};
 
 /// The dark backdrop the frame sits on.
 const BACKDROP: [f64; 4] = [0.12, 0.12, 0.14, 1.0];
@@ -36,6 +36,10 @@ const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
 
 /// Default stroke width for new elements, in image pixels.
 const DEFAULT_STROKE_WIDTH: f64 = 4.0;
+
+/// A drag shorter than this (in image pixels) is a plain click, not a
+/// drawn element.
+const MIN_DRAG_PX: f64 = 4.0;
 
 /// Color presets offered by the popover; magenta is the default.
 const COLOR_PRESETS: [Rgba; 8] = [
@@ -117,6 +121,9 @@ struct EditorIvars {
     color: Cell<Rgba>,
     /// Stroke width for new elements, in image pixels.
     stroke_width: Cell<f64>,
+    /// The element being drawn by the current drag, if any; committed on
+    /// mouse-up.
+    draft: RefCell<Option<ElementKind>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -145,6 +152,7 @@ define_class!(
                 tool: Cell::new(Tool::Arrow),
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
+                draft: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -270,9 +278,12 @@ impl EditorView {
         if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || iw == 0 || ih == 0 {
             return Point::new(0.0, 0.0);
         }
+        // Clamp into the frame: drags that leave the image stick to its
+        // edge instead of drawing outside it.
         Point::new(
-            local.x * iw as f64 / bounds.size.width,
-            (bounds.size.height - local.y) * ih as f64 / bounds.size.height,
+            (local.x * iw as f64 / bounds.size.width).clamp(0.0, iw as f64),
+            ((bounds.size.height - local.y) * ih as f64 / bounds.size.height)
+                .clamp(0.0, ih as f64),
         )
     }
 
@@ -321,6 +332,16 @@ impl EditorView {
         );
         render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
         CGContext::restore_g_state(Some(&cg));
+
+        // Live preview of the element being dragged; view-only, it never
+        // reaches a saved composite until mouse-up commits it.
+        if let Some(draft) = ivars.draft.borrow().as_ref() {
+            let preview = Element {
+                id: 0,
+                kind: draft.clone(),
+            };
+            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&preview));
+        }
 
         // Selection markers on top, in screen points so they stay constant
         // sized; they never reach a saved composite.
@@ -390,17 +411,124 @@ impl EditorView {
 
     fn handle_mouse_down(&self, event: &NSEvent) {
         let point = self.pixel_point(event);
-        eprintln!("editor: mouse down at {point:?}");
+        let ivars = self.ivars();
+        let draft = match ivars.tool.get() {
+            Tool::Arrow => ElementKind::Arrow {
+                a: point,
+                b: point,
+                color: ivars.color.get(),
+                width: ivars.stroke_width.get(),
+            },
+            Tool::Rect => ElementKind::Rect {
+                rect: Rect::new(point.x, point.y, 0.0, 0.0),
+                color: ivars.color.get(),
+                width: ivars.stroke_width.get(),
+            },
+            Tool::Line => ElementKind::Line {
+                a: point,
+                b: point,
+                color: ivars.color.get(),
+                width: ivars.stroke_width.get(),
+            },
+            Tool::Pen => ElementKind::Pen {
+                points: vec![point],
+                color: ivars.color.get(),
+                width: ivars.stroke_width.get(),
+            },
+            Tool::Blur => ElementKind::Blur {
+                rect: Rect::new(point.x, point.y, 0.0, 0.0),
+            },
+            // Text/callout and crop/resize have their own click protocols
+            // (later tasks); nothing to draw with them yet.
+            Tool::Text | Tool::Callout | Tool::Crop | Tool::Resize => return,
+        };
+        // A drawing interaction starts from a clean selection; if this
+        // drag ends up a plain click, that is the "click on empty space
+        // deselects" rule.
+        ivars.selection.set(None);
+        *ivars.draft.borrow_mut() = Some(draft);
+        self.redraw();
     }
 
     fn handle_mouse_dragged(&self, event: &NSEvent) {
-        let point = self.pixel_point(event);
-        eprintln!("editor: mouse dragged to {point:?}");
+        self.update_drag(self.pixel_point(event));
     }
 
     fn handle_mouse_up(&self, event: &NSEvent) {
-        let point = self.pixel_point(event);
-        eprintln!("editor: mouse up at {point:?}");
+        self.update_drag(self.pixel_point(event));
+        let ivars = self.ivars();
+        let Some(kind) = ivars.draft.borrow_mut().take() else {
+            return;
+        };
+        if !Self::draft_is_real(&kind) {
+            // Plain click: the draft is discarded and the selection was
+            // already cleared at mouse-down.
+            self.redraw();
+            return;
+        }
+        let mut shot_slot = ivars.shot.borrow_mut();
+        let Some(shot) = shot_slot.as_mut() else {
+            return;
+        };
+        let id = shot.doc.next_element_id();
+        let element = Element { id, kind };
+        if let Err(err) = shot.apply(Command::AddElement(element)) {
+            eprintln!("editor: failed to commit the drawn element: {err}");
+            self.redraw();
+            return;
+        }
+        drop(shot_slot);
+        ivars.selection.set(Some(id));
+        self.redraw();
+    }
+
+    /// Move the draft's far end (or grow its trace) to `point`.
+    fn update_drag(&self, point: Point) {
+        let ivars = self.ivars();
+        let mut draft = ivars.draft.borrow_mut();
+        let Some(kind) = draft.as_mut() else {
+            return;
+        };
+        match kind {
+            ElementKind::Arrow { b, .. } | ElementKind::Line { b, .. } => *b = point,
+            // The drag start stays the origin; the size may go negative
+            // and is standardized at draw/commit time.
+            ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
+                *rect = Rect::new(rect.x, rect.y, point.x - rect.x, point.y - rect.y);
+            }
+            ElementKind::Pen { points, .. } => {
+                if points.last() != Some(&point) {
+                    points.push(point);
+                }
+            }
+            _ => {}
+        }
+        drop(draft);
+        self.redraw();
+    }
+
+    /// Whether a finished drag drew something real (as opposed to a plain
+    /// click, which must not produce zero-size elements).
+    fn draft_is_real(kind: &ElementKind) -> bool {
+        match kind {
+            ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => {
+                point_dist(*a, *b) >= MIN_DRAG_PX
+            }
+            ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
+                let rect = rect.standardize();
+                rect.width >= MIN_DRAG_PX && rect.height >= MIN_DRAG_PX
+            }
+            ElementKind::Pen { points, .. } => match (points.first(), points.last()) {
+                (Some(first), Some(last)) => point_dist(*first, *last) >= MIN_DRAG_PX,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Schedule a full redraw of the canvas.
+    fn redraw(&self) {
+        self.setNeedsDisplayInRect(self.bounds());
     }
 
     /// Accent-tint the active tool's button, clear the others.
@@ -491,6 +619,11 @@ impl EditorView {
         }
         *slot = Some(popover);
     }
+}
+
+/// Distance between two points.
+fn point_dist(a: Point, b: Point) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
 /// The four corners of a rect (top-left, top-right, bottom-right,
