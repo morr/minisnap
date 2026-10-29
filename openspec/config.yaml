@@ -1,0 +1,38 @@
+schema: spec-driven
+
+context: |
+  Language: russian
+  All artifacts must be written in russian.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Project: minisnap — macOS utility for capturing screenshots via global hotkeys,
+  a lightweight analog of Monosnap (region / window / full-screen capture,
+  annotation, copy to clipboard / save / drag-out).
+  Target platform: macOS (developed and tested on macOS 15+, Apple Silicon).
+  Status: greenfield — no source code yet; the tech stack is chosen by the first
+  change proposals. Global hotkeys and screen capture permissions (Screen
+  Recording / Accessibility in System Settings) must be considered in specs
+  where relevant.
+  Code, identifiers and commits are in English.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
