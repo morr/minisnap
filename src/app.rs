@@ -22,6 +22,9 @@ use objc2_foundation::{
 use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 
 use crate::config::Config;
+use crate::editor::session;
+use crate::editor::OpenShot;
+use crate::editor_window::EditorWindow;
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
 use crate::overlay::{Overlay, OverlayOutcome};
 use crate::prefs;
@@ -45,7 +48,11 @@ enum MainJob {
         result: Result<crate::capture::T0Capture, String>,
         screen_frame: CGRect,
         scale: f64,
+        /// Open the editor window after the usual output.
+        edit: bool,
     },
+    /// A finished capture produced a shot file to open in the editor.
+    OpenEditor { path: std::path::PathBuf },
 }
 
 struct AppIvars {
@@ -68,6 +75,9 @@ struct AppIvars {
     // Created lazily on the first Preferences click; kept afterwards so
     // reopening focuses the existing window.
     prefs: RefCell<Option<prefs::PrefsWindow>>,
+    // Created lazily on the first editor-relevant capture; kept afterwards
+    // so every shot reuses the same window (no second editor window).
+    editor: RefCell<Option<EditorWindow>>,
     // The hotkey row currently recording a new combination, if any.
     recording: Cell<Option<isize>>,
     // Permanent local key-event monitor that serves the recorder while
@@ -126,6 +136,25 @@ define_class!(
             }
         }
 
+        /// Deferred from the editor opening so the activation happens after
+        /// the menu/hotkey path finishes — ordering a window key from inside
+        /// those paths does not stick (same scheme as the prefs window).
+        #[unsafe(method(editorWindowToFront:))]
+        fn editor_window_to_front(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let app = NSApplication::sharedApplication(mtm);
+            app.activate();
+            app.activateIgnoringOtherApps(true);
+            if let Some(editor) = self.ivars().editor.borrow().as_ref() {
+                editor.window.makeKeyAndOrderFront(None);
+                eprintln!(
+                    "editor window: active={} key={}",
+                    app.isActive(),
+                    editor.window.isKeyWindow()
+                );
+            }
+        }
+
         #[unsafe(method(prefsRowClicked:))]
         fn prefs_row_clicked(&self, sender: Option<&AnyObject>) {
             let Some(sender) = sender else { return };
@@ -160,13 +189,15 @@ define_class!(
                         result,
                         screen_frame,
                         scale,
-                    }) => self.capture_ready(result, screen_frame, scale),
+                        edit,
+                    }) => self.capture_ready(result, screen_frame, scale, edit),
+                    Some(MainJob::OpenEditor { path }) => self.open_editor(path),
                     None => break,
                 }
             }
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
-                    HotkeyAction::Capture => self.start_capture(),
+                    HotkeyAction::Capture => self.start_capture(false),
                     HotkeyAction::OpenLatest => self.open_latest(),
                 }
             }
@@ -280,6 +311,7 @@ impl AppController {
             jobs_rx: RefCell::new(jobs_rx),
             overlay: RefCell::new(overlay),
             prefs: RefCell::new(None),
+            editor: RefCell::new(None),
             recording: Cell::new(None),
             monitor: RefCell::new(None),
             permission_dialog_visible: Cell::new(false),
@@ -541,9 +573,42 @@ impl AppController {
         crate::output::open_latest(&dir);
     }
 
+    /// Open (or focus) the editor window on a shot file. Created lazily and
+    /// reused: every shot replaces the content of the same window.
+    fn open_editor(&self, path: std::path::PathBuf) {
+        let mtm = MainThreadMarker::from(self);
+        let sessions_root = session::default_root();
+        let Some(shot) = OpenShot::open(path, &sessions_root) else {
+            eprintln!("editor: cannot open shot");
+            return;
+        };
+        {
+            let mut slot = self.ivars().editor.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(EditorWindow::new(mtm));
+            }
+            slot.as_ref().expect("editor window").show_shot(shot);
+        }
+        // Ordering the window key must wait until the tray menu or hotkey
+        // path stops tracking; a one-shot timer fires on the next pass.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                0.0,
+                self,
+                sel!(editorWindowToFront:),
+                None,
+                false,
+            )
+        };
+        unsafe {
+            NSRunLoop::currentRunLoop().addTimer_forMode(&timer, &NSDefaultRunLoopMode);
+        }
+    }
+
     /// Start the frozen-area capture: pick the display under the cursor and
-    /// log the T0 data (overlay and screenshot come next).
-    fn start_capture(&self) {
+    /// log the T0 data (overlay and screenshot come next). With `edit`, the
+    /// shot opens in the editor window after the usual output.
+    fn start_capture(&self, edit: bool) {
         // No permission — no capture: explain instead (7.2). The preflight
         // here also re-checks after the user granted the permission in
         // System Settings without a relaunch.
@@ -588,6 +653,7 @@ impl AppController {
                     result,
                     screen_frame,
                     scale,
+                    edit,
                 });
             });
         });
@@ -599,6 +665,7 @@ impl AppController {
         result: Result<crate::capture::T0Capture, String>,
         screen_frame: CGRect,
         scale: f64,
+        edit: bool,
     ) {
         let Ok(t0) = result else {
             if let Err(e) = &result {
@@ -615,6 +682,7 @@ impl AppController {
             let config = self.ivars().config.borrow();
             (config.save_dir.clone(), config.retention)
         };
+        let jobs_tx = self.ivars().jobs_tx.clone();
         overlay.show(
             t0,
             screen_frame,
@@ -629,7 +697,12 @@ impl AppController {
                         eprintln!("output: pasteboard: {e}");
                     }
                     match crate::output::save_to_file(&image, &save_dir, retention) {
-                        Ok(path) => eprintln!("output: saved {}", path.display()),
+                        Ok(path) => {
+                            eprintln!("output: saved {}", path.display());
+                            if edit {
+                                let _ = jobs_tx.send(MainJob::OpenEditor { path });
+                            }
+                        }
                         Err(e) => eprintln!("output: save: {e}"),
                     }
                 }
