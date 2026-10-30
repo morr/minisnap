@@ -18,15 +18,3 @@ tasks) and is implemented task by task from that change's `tasks.md`.
 - During apply, work strictly from the change's task list; if a task needs
   work beyond what its spec describes, surface it instead of silently
   widening the change.
-
-## Commits
-
-One task = one commit. After finishing a task:
-
-1. Mark its checkbox `- [x]` in the change's `tasks.md`.
-2. `git add` the task's files together with `tasks.md` (the checkbox update
-   belongs to the same commit) and commit immediately — no batching several
-   tasks into one commit.
-3. Follow the project git skill (`.zcode/skills/git`) for message style:
-   plain prose, imperative mood, lowercase first word, no Conventional
-   Commits prefixes.
