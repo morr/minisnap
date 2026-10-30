@@ -1650,14 +1650,19 @@ impl EditorView {
         let content_size = NSScreen::mainScreen(mtm)
             .map(|screen| screen.visibleFrame().size)
             .map(|visible| {
-                fit_size(iw as f64, ih as f64, visible.width, visible.height - TOOLBAR_HEIGHT)
+                fit_size(
+                    iw as f64,
+                    ih as f64,
+                    visible.width,
+                    visible.height - 2.0 * TOOLBAR_HEIGHT,
+                )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
         // The refit never shrinks below the toolbar's minimum width.
         let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
             width,
-            content_size.height + TOOLBAR_HEIGHT,
+            content_size.height + 2.0 * TOOLBAR_HEIGHT,
         ));
         window.center();
         self.redraw();
@@ -1959,7 +1964,7 @@ impl EditorWindow {
                 NSWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_HEIGHT),
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + 2.0 * TOOLBAR_HEIGHT),
                 ),
                 NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
@@ -1974,11 +1979,13 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // Toolbar: ◄/► leafing on the left, then tool buttons, the color
-        // swatch with a preset popover, and the stroke-width slider.
-        let toolbar = NSStackView::new(mtm);
-        toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        toolbar.setSpacing(6.0);
+        // Toolbar: the ◄/► leafing strip stays at the top left; the
+        // editing toolbar sits at the bottom, Monosnap-style — color
+        // swatch with a preset popover, stroke-width slider, then the
+        // tools in Monosnap order.
+        let pages = NSStackView::new(mtm);
+        pages.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        pages.setSpacing(6.0);
         for (tag, symbol) in [
             (PAGE_PREV_TAG, "chevron.left"),
             (PAGE_NEXT_TAG, "chevron.right"),
@@ -1989,22 +1996,11 @@ impl EditorWindow {
                 button.setTarget(Some(&view));
                 button.setAction(Some(sel!(pageClicked:)));
             }
-            toolbar.addArrangedSubview(&button);
+            pages.addArrangedSubview(&button);
         }
-        let mut tool_buttons = Vec::new();
-        for tool in Tool::all() {
-            let button = match tool {
-                Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
-                other => symbol_button(mtm, other.symbol(), other.tag()),
-            };
-            // SAFETY: target is this canvas view, alive for the process.
-            unsafe {
-                button.setTarget(Some(&view));
-                button.setAction(Some(sel!(toolClicked:)));
-            }
-            toolbar.addArrangedSubview(&button);
-            tool_buttons.push((tool.tag(), button));
-        }
+        let toolbar = NSStackView::new(mtm);
+        toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        toolbar.setSpacing(6.0);
         let color_button = symbol_button(mtm, "paintpalette", -1);
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
@@ -2026,30 +2022,53 @@ impl EditorWindow {
         slider.setFocusRingType(NSFocusRingType::None);
         slider.setRefusesFirstResponder(true);
         toolbar.addArrangedSubview(&slider);
+        let mut tool_buttons = Vec::new();
+        for tool in Tool::all() {
+            let button = match tool {
+                Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
+                other => symbol_button(mtm, other.symbol(), other.tag()),
+            };
+            // SAFETY: target is this canvas view, alive for the process.
+            unsafe {
+                button.setTarget(Some(&view));
+                button.setAction(Some(sel!(toolClicked:)));
+            }
+            toolbar.addArrangedSubview(&button);
+            tool_buttons.push((tool.tag(), button));
+        }
 
-        // Layout: toolbar strip at the top, canvas below it. The flexible
-        // min-Y margin keeps the toolbar pinned to the top edge when the
-        // window resizes; the canvas keeps its rigid 40-pt top gap and
-        // grows into the freed space.
+        // Layout: ◄/► strip pinned to the top, editing toolbar pinned to
+        // the bottom, canvas filling the space between. The flexible
+        // max-Y margin keeps the bottom bar down when the window grows;
+        // the canvas grows into the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The window cannot shrink below the toolbar: its full fitting
-        // width plus the side margins. The initial size respects it too.
+        // The window cannot shrink below the editing toolbar: its full
+        // fitting width plus the side margins.
         let min_width = toolbar.fittingSize().width + 16.0;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        toolbar.setFrame(CGRect::new(
+        pages.setFrame(CGRect::new(
             CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT),
+            CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
+        ));
+        pages.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        content.addSubview(&pages);
+        toolbar.setFrame(CGRect::new(
+            CGPoint::new(8.0, 0.0),
             CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
         ));
         toolbar.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewMinYMargin,
+                | NSAutoresizingMaskOptions::ViewMaxYMargin,
         );
         content.addSubview(&toolbar);
-        let canvas_height = size.height - TOOLBAR_HEIGHT;
+        let canvas_height = size.height - 2.0 * TOOLBAR_HEIGHT;
         view.setFrame(CGRect::new(
-            CGPoint::ZERO,
+            CGPoint::new(0.0, TOOLBAR_HEIGHT),
             CGSize::new(size.width, canvas_height),
         ));
         view.setAutoresizingMask(
