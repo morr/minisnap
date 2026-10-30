@@ -92,10 +92,11 @@ fn hit_end(a: Point, b: Point, point: Point) -> Option<Endpoint> {
     }
 }
 
-/// The bounding box of a text block drawn at `origin` (top-left corner).
+/// The bounding box of a text block drawn at `origin` (top-left corner);
+/// multi-line blocks span their widest line and the stacked height.
 pub fn text_bounds(origin: Point, text: &str, size: f64) -> Option<Rect> {
-    let m = text::measure(text, size)?;
-    Some(Rect::new(origin.x, origin.y, m.width, m.height()))
+    let m = text::measure_block(text, size)?;
+    Some(Rect::new(origin.x, origin.y, m.width, m.height))
 }
 
 /// Distance from `point` to the closest point of segment `a`–`b`.
@@ -240,6 +241,31 @@ mod tests {
         assert_eq!(hit_element(&el, inside), Some(Hit::Body(3)));
         let outside = pt(5.0 + bounds.width + 30.0, 80.0 + bounds.height / 2.0);
         assert_eq!(hit_element(&el, outside), None);
+    }
+
+    #[test]
+    fn multiline_text_spans_every_line() {
+        let el = Element {
+            id: 8,
+            kind: ElementKind::Text {
+                origin: pt(0.0, 0.0),
+                text: "W\nW\nW".into(),
+                color: [1.0, 0.0, 1.0, 1.0],
+                size: 32.0,
+            },
+        };
+        let single = text_bounds(pt(0.0, 0.0), "W", 32.0).expect("single");
+        let multi = text_bounds(pt(0.0, 0.0), "W\nW\nW", 32.0).expect("multi");
+        assert_eq!(multi.width, single.width, "same widest line");
+        assert!(
+            multi.height > single.height * 2.0,
+            "three lines stack: {} vs {}",
+            multi.height,
+            single.height
+        );
+        // The last line, well below the first, still hits the body.
+        let last_line = pt(multi.width / 2.0, multi.height - single.height / 2.0);
+        assert_eq!(hit_element(&el, last_line), Some(Hit::Body(8)));
     }
 
     #[test]

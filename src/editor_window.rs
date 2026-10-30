@@ -12,11 +12,11 @@ use objc2::{
     define_class, extern_methods, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
-    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
-    NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSPopover, NSPopoverDelegate, NSScreen, NSStackView, NSTextField,
-    NSTextFieldDelegate, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
+    NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
+    NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
+    NSPopover, NSPopoverDelegate, NSScreen, NSStackView, NSTextField, NSTextFieldDelegate,
+    NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -71,8 +71,13 @@ const PAGE_NEXT_TAG: isize = -3;
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
 enum TextTarget {
-    /// A brand-new text or callout element.
-    New { origin: Point, callout: bool },
+    /// A brand-new text or callout element; the color is frozen at the
+    /// click, so a mid-edit palette change cannot rewrite it.
+    New {
+        origin: Point,
+        callout: bool,
+        color: Rgba,
+    },
     /// An existing text/callout element being re-edited.
     Existing { id: u64 },
 }
@@ -438,14 +443,46 @@ define_class!(
         }
     }
 
-    // SAFETY: only the optional end-editing callback is implemented; the
-    // canvas view outlives the field editor it parents. The method belongs
-    // on this protocol itself: objc2's debug build rejects registering it
-    // via the sub-protocol NSTextFieldDelegate, which only inherits it.
+    // SAFETY: only the end-editing and key-command callbacks are
+    // implemented; the canvas view outlives the field editor it parents.
+    // The methods belong on this protocol itself: objc2's debug build
+    // rejects registering them via the sub-protocol NSTextFieldDelegate,
+    // which only inherits it.
     unsafe impl NSControlTextEditingDelegate for EditorView {
         #[unsafe(method(controlTextDidEndEditing:))]
         fn __control_text_did_end_editing(&self, _notification: &NSNotification) {
             self.commit_text_editor();
+        }
+
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        unsafe fn __control_text_view_do_command(
+            &self,
+            _control: &NSControl,
+            _text_view: &NSTextView,
+            command: objc2::runtime::Sel,
+        ) -> objc2::runtime::Bool {
+            // Enter commits; Shift+Enter keeps the newline; Esc cancels the
+            // input. Plain controlTextDidEndEditing stays the fallback for
+            // clicks elsewhere — on Enter in this window it does not fire.
+            if command == sel!(insertNewline:) {
+                let shift = NSApplication::sharedApplication(
+                    MainThreadMarker::new().expect("text editing on the main thread"),
+                )
+                .currentEvent()
+                .is_some_and(|event| {
+                    event.modifierFlags().contains(NSEventModifierFlags::Shift)
+                });
+                if shift {
+                    return false.into();
+                }
+                self.commit_text_editor();
+                return true.into();
+            }
+            if command == sel!(cancelOperation:) {
+                self.discard_text_editor();
+                return true.into();
+            }
+            false.into()
         }
     }
 
@@ -776,7 +813,11 @@ impl EditorView {
                     });
                 match existing {
                     Some(id) => self.begin_text_edit(TextTarget::Existing { id }),
-                    None => self.begin_text_edit(TextTarget::New { origin: point, callout }),
+                    None => self.begin_text_edit(TextTarget::New {
+                        origin: point,
+                        callout,
+                        color: ivars.color.get(),
+                    }),
                 }
                 return;
             }
@@ -1085,29 +1126,38 @@ impl EditorView {
         let bounds = self.bounds();
         let (sx, sy) = self.view_scale();
         let font_pt = (size * sy).max(9.0);
-        let width = if text.is_empty() {
-            TEXT_EDITOR_WIDTH_PT
+        let (width, height) = if text.is_empty() {
+            (TEXT_EDITOR_WIDTH_PT, font_pt * 1.6 + 6.0)
         } else {
-            let width_px = text::measure(text, size).map(|m| m.width).unwrap_or(0.0);
-            (width_px * sx).max(TEXT_EDITOR_WIDTH_PT) + 12.0
+            match text::measure_block(text, size) {
+                Some(m) => (
+                    (m.width * sx).max(TEXT_EDITOR_WIDTH_PT) + 12.0,
+                    m.height * sy + 6.0,
+                ),
+                None => (TEXT_EDITOR_WIDTH_PT, font_pt * 1.6 + 6.0),
+            }
         };
-        let height = font_pt * 1.6 + 6.0;
         let x = origin.x * sx - 3.0;
         let y_top = bounds.size.height - origin.y * sy;
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
     }
 
-    /// Open the field editor for `target`: a transparent single-line text
-    /// field over the text block. The commit happens in
-    /// `controlTextDidEndEditing` — on Enter, on a click elsewhere, or on
-    /// Esc (which reverts first, so it reads as cancel).
+    /// Open the field editor for `target`: a transparent text field over
+    /// the text block. Enter commits (via `doCommandBy`), a click elsewhere
+    /// commits through `controlTextDidEndEditing`, Esc cancels.
     fn begin_text_edit(&self, target: TextTarget) {
         let ivars = self.ivars();
+        // Never two field editors: an open one commits first.
+        self.commit_text_editor();
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let (initial, frame, color, size_px) = match target {
-            TextTarget::New { origin, callout } => {
+            TextTarget::New {
+                origin,
+                callout,
+                color,
+            } => {
                 let size = DEFAULT_TEXT_SIZE_PX;
                 let anchor = if callout {
                     Point::new(
@@ -1120,7 +1170,7 @@ impl EditorView {
                 (
                     String::new(),
                     self.text_editor_frame(anchor, "", size),
-                    ivars.color.get(),
+                    color,
                     size,
                 )
             }
@@ -1181,7 +1231,9 @@ impl EditorView {
             return;
         };
         let target = ivars.text_target.take();
-        let text = field.stringValue().to_string();
+        // Shift+Enter may insert a line separator (U+2028) instead of a
+        // newline; normalize it to the separator the renderer splits on.
+        let text = field.stringValue().to_string().replace('\u{2028}', "\n");
         // Removing the field ends editing, which re-enters this method;
         // the taken slots above make that a no-op.
         field.removeFromSuperview();
@@ -1196,7 +1248,11 @@ impl EditorView {
             return;
         };
         match target {
-            TextTarget::New { origin, callout } => {
+            TextTarget::New {
+                origin,
+                callout,
+                color,
+            } => {
                 if text.trim().is_empty() {
                     self.redraw();
                     return;
@@ -1207,14 +1263,14 @@ impl EditorView {
                         tip: origin,
                         anchor: callout_anchor(origin, &text, size),
                         text,
-                        color: ivars.color.get(),
+                        color,
                         size,
                     }
                 } else {
                     ElementKind::Text {
                         origin,
                         text,
-                        color: ivars.color.get(),
+                        color,
                         size,
                     }
                 };
@@ -1648,8 +1704,8 @@ fn point_dist(a: Point, b: Point) -> f64 {
 
 /// Top-left of a new callout's text block: above-right of the tip.
 fn callout_anchor(tip: Point, text: &str, size: f64) -> Point {
-    let height = text::measure(text, size)
-        .map(|m| m.height())
+    let height = text::measure_block(text, size)
+        .map(|m| m.height)
         .unwrap_or(size * 1.25);
     Point::new(
         tip.x + CALLOUT_TEXT_OFFSET_PX,
