@@ -492,8 +492,10 @@ impl AppController {
             "minisnap freezes the screen so you can select an area to copy or \
              save. Screen Recording access is what makes that possible.\n\n\
              Grant access in System Settings — Privacy & Security — Screen \
-             Recording. If capture still does not work afterwards, quit and \
-             reopen minisnap.",
+             Recording. If minisnap is not in the list, add it with the + \
+             button. macOS shows the permission prompt at most once a month. \
+             If capture still does not work afterwards, quit and reopen \
+             minisnap.",
         ));
         alert.setAlertStyle(NSAlertStyle::Informational);
         alert.addButtonWithTitle(&NSString::from_str("Open System Settings"));
