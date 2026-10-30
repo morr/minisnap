@@ -441,7 +441,8 @@ define_class!(
                     }
                 }
             }
-            if let Some(popover) = self.ivars().color_popover.borrow_mut().take() {
+            let popover = self.ivars().color_popover.borrow_mut().take();
+            if let Some(popover) = popover {
                 // SAFETY: plain close on a live popover.
                 unsafe { popover.performClose(None) };
             }
@@ -1416,12 +1417,16 @@ impl EditorView {
     /// and drop a pending callout with it.
     fn discard_text_editor(&self) {
         let ivars = self.ivars();
-        if let Some(field) = ivars.text_editor.borrow_mut().take() {
+        // Take every slot before removing the field: removeFromSuperview
+        // ends editing and re-enters commit_text_editor synchronously, and
+        // a borrow held across the removal would panic that re-entry.
+        let field = ivars.text_editor.borrow_mut().take();
+        ivars.text_target.take();
+        *ivars.pending_callout.borrow_mut() = None;
+        if let Some(field) = field {
             // Ends editing, which re-enters commit with both slots empty.
             field.removeFromSuperview();
         }
-        ivars.text_target.take();
-        *ivars.pending_callout.borrow_mut() = None;
     }
 
     /// The crop/resize frame rect in image pixels, including an in-flight
