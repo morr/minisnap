@@ -200,48 +200,82 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// How much darker than the picked color the arrow tail starts (the gradient
-/// runs from this shade at the tail to the full color at the tip).
-const ARROW_TAIL_SHADE: f64 = 0.55;
+/// The cross-wise gradient fill: how much the light end blends toward white
+/// and the dark end scales down the picked color (the axis runs from the
+/// upper notch of the head to the lower one — light from above, whatever
+/// the arrow's direction).
+const ARROW_LIGHT_TOWARD_WHITE: f64 = 0.25;
+const ARROW_DARK_SHADE: f64 = 0.72;
 
 /// Soft drop shadow under an arrow: offset in element space (+y is
 /// screen-down here — note the render context is Y-flipped, so the offset
 /// needs a negative y to land below), blur radius, and opacity.
-const ARROW_SHADOW_OFFSET_X: f64 = 1.0;
-const ARROW_SHADOW_OFFSET_Y: f64 = -2.0;
-const ARROW_SHADOW_BLUR: f64 = 3.0;
-const ARROW_SHADOW_ALPHA: f64 = 0.35;
+const ARROW_SHADOW_OFFSET_X: f64 = 0.5;
+const ARROW_SHADOW_OFFSET_Y: f64 = -1.0;
+const ARROW_SHADOW_BLUR: f64 = 2.0;
+const ARROW_SHADOW_ALPHA: f64 = 0.28;
+
+/// Head length and half-width at the base (the barbs), in stroke widths;
+/// the head length clamps to half the arrow length so short arrows keep a
+/// body.
+const ARROW_HEAD_LEN_W: f64 = 4.6;
+const ARROW_HALF_HEAD_W: f64 = 2.4;
+/// How deep the concave notches at the head base cut, as a fraction of the
+/// head length (the body outline stops this far short of the barb line).
+const ARROW_NOTCH_DEPTH: f64 = 0.30;
+
+/// Direction and head proportions of an arrow.
+struct ArrowFrame {
+    /// Unit vector a → b (along the arrow).
+    u: super::Point,
+    /// Unit normal of u (across the arrow).
+    n: super::Point,
+    /// Head length from the tip, in pixels.
+    head_len: f64,
+    /// Head half-width at the base, in pixels.
+    half_head: f64,
+}
+
+impl ArrowFrame {
+    fn new(a: super::Point, b: super::Point, width: f64) -> Option<ArrowFrame> {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < f64::EPSILON {
+            return None;
+        }
+        Some(ArrowFrame {
+            u: super::Point::new(dx / len, dy / len),
+            n: super::Point::new(-dy / len, dx / len),
+            head_len: (width * ARROW_HEAD_LEN_W).min(len * 0.5),
+            half_head: width * ARROW_HALF_HEAD_W,
+        })
+    }
+
+    /// The point `along` the a→b axis from `p`, offset `off` across it.
+    fn step(&self, p: super::Point, along: f64, off: f64) -> super::Point {
+        super::Point::new(
+            p.x + self.u.x * along + self.n.x * off,
+            p.y + self.u.y * along + self.n.y * off,
+        )
+    }
+}
 
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
 /// needle-thin with a rounded cap at `a` and widens along the whole length,
-/// and the head is a barbed arrowhead with a concave notch at its base on
-/// each side. One closed ring (the last point connects back to the first);
-/// empty for a degenerate zero-length arrow.
+/// and the head is a barbed arrowhead with deep concave notches at its base
+/// on each side. One closed ring (the last point connects back to the
+/// first); empty for a degenerate zero-length arrow.
 pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < f64::EPSILON {
+    let Some(frame) = ArrowFrame::new(a, b, width) else {
         return Vec::new();
-    }
-    let (ux, uy) = (dx / len, dy / len);
-    let (nx, ny) = (-uy, ux);
-    // Proportions of the stroke width; the head clamps on short arrows so
-    // it never eats the whole length.
-    let head_len = (width * 4.6).min(len * 0.5);
-    let half_head = width * 2.3;
+    };
     let half_body = width * 1.1;
     let tail_r = width * 0.32;
     // The rounded tail cap is a semicircle of radius `tail_r` behind its
     // center; the body widens linearly from `tail_r` to `half_body` up to
     // where it dips into the head.
-    let cap = super::Point::new(a.x + ux * tail_r, a.y + uy * tail_r);
-    let body_end = super::Point::new(
-        b.x - ux * head_len * 0.78,
-        b.y - uy * head_len * 0.78,
-    );
-    let step = |p: super::Point, along: f64, off: f64| {
-        super::Point::new(p.x + ux * along + nx * off, p.y + uy * along + ny * off)
-    };
+    let cap = frame.step(a, tail_r, 0.0);
+    let body_end = frame.step(b, -frame.head_len * (1.0 - ARROW_NOTCH_DEPTH), 0.0);
     let mut pts = Vec::with_capacity(16);
     // Tail cap: from the bottom edge around the back to the top edge.
     const CAP_STEPS: usize = 6;
@@ -249,32 +283,33 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
         let t =
             -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * k as f64 / CAP_STEPS as f64;
         pts.push(super::Point::new(
-            cap.x + tail_r * (nx * t.sin() - ux * t.cos()),
-            cap.y + tail_r * (ny * t.sin() - uy * t.cos()),
+            cap.x + tail_r * (frame.n.x * t.sin() - frame.u.x * t.cos()),
+            cap.y + tail_r * (frame.n.y * t.sin() - frame.u.y * t.cos()),
         ));
     }
     // Top edge of the widening body, the concave notch into the top barb,
     // the tip, and the mirrored way back.
-    pts.push(step(body_end, 0.0, half_body));
-    pts.push(step(b, -head_len, half_head));
+    pts.push(frame.step(body_end, 0.0, half_body));
+    pts.push(frame.step(b, -frame.head_len, frame.half_head));
     pts.push(b);
-    pts.push(step(b, -head_len, -half_head));
-    pts.push(step(body_end, 0.0, -half_body));
+    pts.push(frame.step(b, -frame.head_len, -frame.half_head));
+    pts.push(frame.step(body_end, 0.0, -half_body));
     pts
 }
 
-/// The arrow's fill: a linear gradient from a darkened shade of the picked
-/// color to the picked color itself.
+/// The arrow's fill: a linear gradient from a lighter shade of the picked
+/// color (blended toward white) to a darker one.
 fn arrow_gradient(color: super::Rgba) -> Option<CFRetained<CGGradient>> {
     let space = CGColorSpace::new_device_rgb()?;
+    let light = |c: f64| c + (1.0 - c) * ARROW_LIGHT_TOWARD_WHITE;
     let components = [
-        color[0] * ARROW_TAIL_SHADE,
-        color[1] * ARROW_TAIL_SHADE,
-        color[2] * ARROW_TAIL_SHADE,
+        light(color[0]),
+        light(color[1]),
+        light(color[2]),
         color[3],
-        color[0],
-        color[1],
-        color[2],
+        color[0] * ARROW_DARK_SHADE,
+        color[1] * ARROW_DARK_SHADE,
+        color[2] * ARROW_DARK_SHADE,
         color[3],
     ];
     let locations = [0.0f64, 1.0];
@@ -290,8 +325,8 @@ fn arrow_gradient(color: super::Rgba) -> Option<CFRetained<CGGradient>> {
 }
 
 /// Arrow from `a` to `b`, Monosnap-style (see `arrow_outline`): filled with
-/// a gradient from a darker tail to the picked color at the tip, over a soft
-/// drop shadow.
+/// a cross-wise gradient — lighter above, darker below — over a soft drop
+/// shadow.
 pub(crate) fn draw_arrow(
     ctx: &CGContext,
     a: super::Point,
@@ -299,10 +334,10 @@ pub(crate) fn draw_arrow(
     color: super::Rgba,
     width: f64,
 ) {
-    let outline = arrow_outline(a, b, width);
-    if outline.is_empty() {
+    let Some(frame) = ArrowFrame::new(a, b, width) else {
         return;
-    }
+    };
+    let outline = arrow_outline(a, b, width);
     let add_path = |ctx: &CGContext| {
         CGContext::begin_path(Some(ctx));
         let mut iter = outline.iter();
@@ -332,15 +367,24 @@ pub(crate) fn draw_arrow(
     CGContext::fill_path(Some(ctx));
     CGContext::restore_g_state(Some(ctx));
 
+    // Gradient pass: across the arrow, from one notch of the head to the
+    // other, the light end on whichever barb sits higher on screen.
     if let Some(gradient) = arrow_gradient(color) {
+        let barb_a = frame.step(b, -frame.head_len, frame.half_head);
+        let barb_b = frame.step(b, -frame.head_len, -frame.half_head);
+        let (top, bottom) = if (barb_a.y, barb_a.x) <= (barb_b.y, barb_b.x) {
+            (barb_a, barb_b)
+        } else {
+            (barb_b, barb_a)
+        };
         CGContext::save_g_state(Some(ctx));
         add_path(ctx);
         CGContext::clip(Some(ctx));
         CGContext::draw_linear_gradient(
             Some(ctx),
             Some(&gradient),
-            CGPoint::new(a.x, a.y),
-            CGPoint::new(b.x, b.y),
+            CGPoint::new(top.x, top.y),
+            CGPoint::new(bottom.x, bottom.y),
             CGGradientDrawingOptions::DrawsBeforeStartLocation
                 | CGGradientDrawingOptions::DrawsAfterEndLocation,
         );
@@ -465,7 +509,7 @@ mod tests {
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
         // width 6 over len 48: tail cap radius 1.92 at x≈10, body widening
-        // to half 6.6 at x=37.3, head base at x=32 with half 13.8, tip at b.
+        // to half 6.6 at x=39.2, head base at x=32 with half 14.4, tip at b.
         let is_arrow = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
             p[0] > 60 && p[2] > 60 && p[1] < 100 && (p[0] as i32 - p[2] as i32).abs() < 40
@@ -481,7 +525,7 @@ mod tests {
         assert!(is_gray(10, 29), "rounded narrow start");
         // The body is a widening wedge, not a constant-width shaft.
         assert!(is_arrow(25, 32), "body mid-way");
-        assert!(is_arrow(30, 37), "body widened toward the head");
+        assert!(is_arrow(34, 36), "body widened toward the head");
         assert!(is_gray(14, 36), "body still thin near the tail");
         assert!(is_gray(25, 26), "nothing above the thin mid-body");
         // The head is a barbed arrowhead: wide at the base, colored apex at
@@ -498,16 +542,21 @@ mod tests {
             void[1] as i32 > void[0] as i32 / 2,
             "concave notch void beside the body end: {void:?}"
         );
-        assert!(is_arrow(35, 42), "barb wing over the notch");
-        // The fill is a gradient: darker at the tail, the picked color at
-        // the tip.
-        let tail = pixel(&bytes, 64, 12, 31);
-        let tip = pixel(&bytes, 64, 50, 31);
-        assert!(tail[0] < 170 && tail[2] < 170, "tail shaded: {tail:?}");
-        assert!(tip[0] > 220 && tip[2] > 220, "tip at full color: {tip:?}");
+        assert!(is_arrow(37, 42), "barb wing over the notch");
+        // The fill is a cross-wise gradient — from one notch of the head to
+        // the other — lighter above, darker below.
+        let top = pixel(&bytes, 64, 38, 23);
+        let bottom = pixel(&bytes, 64, 38, 41);
+        assert!(top[0] > 230 && top[2] > 230, "lighter above: {top:?}");
+        assert!(top[1] > 30, "light end blends toward white: {top:?}");
+        assert!(
+            bottom[0] < 215 && top[0] - bottom[0] > 25,
+            "darker below: {bottom:?} vs {top:?}"
+        );
         // A soft shadow darkens the base just below the body silhouette
-        // (the silhouette itself ends at y≈35.6 here).
-        let below = pixel(&bytes, 64, 20, 37);
+        // (the silhouette itself ends at y≈35.5 here; the shadow peaks a
+        // hair past it).
+        let below = pixel(&bytes, 64, 20, 36);
         assert!(below[0] < 120 && below[2] < 120, "shadow below: {below:?}");
     }
 
