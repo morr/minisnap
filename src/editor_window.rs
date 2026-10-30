@@ -16,7 +16,7 @@ use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSPopoverDelegate, NSScreen, NSStackView, NSTextField, NSTextFieldDelegate,
+    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextField, NSTextFieldDelegate,
     NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowStyleMask,
 };
@@ -45,6 +45,11 @@ const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
 
 /// Default stroke width for new elements, in image pixels.
 const DEFAULT_STROKE_WIDTH: f64 = 4.0;
+
+/// Range of the stroke-width slider (and of authored widths), in image
+/// pixels.
+const STROKE_MIN: f64 = 1.0;
+const STROKE_MAX: f64 = 12.0;
 
 /// Width of the stroke-width slider in the toolbar, in points.
 const STROKE_SLIDER_WIDTH_PT: f64 = 115.0;
@@ -251,6 +256,8 @@ struct EditorIvars {
     color_button: RefCell<Option<Retained<NSButton>>>,
     /// The open color popover, if any.
     color_popover: RefCell<Option<Retained<NSPopover>>>,
+    /// The stroke-width slider (its handle mirrors the selection's width).
+    width_slider: RefCell<Option<Retained<NSSlider>>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
 }
@@ -286,6 +293,7 @@ define_class!(
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
+                width_slider: RefCell::new(None),
                 min_width: Cell::new(0.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -459,6 +467,29 @@ define_class!(
             // NSControl accessor.
             let value: f64 = unsafe { msg_send![sender, doubleValue] };
             self.ivars().stroke_width.set(value);
+            // With a stroke-bearing element selected, the slider restyles
+            // that element live (one undo step per drag, not per tick).
+            if let Some(id) = self.ivars().selection.get() {
+                let strokeable = self
+                    .ivars()
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|shot| shot.doc.element(id))
+                    .is_some_and(|el| stroke_width_of(&el.kind).is_some());
+                if strokeable {
+                    let result = self
+                        .ivars()
+                        .shot
+                        .borrow_mut()
+                        .as_mut()
+                        .map(|shot| shot.apply_width(id, value));
+                    if let Some(Err(err)) = result {
+                        eprintln!("editor: failed to restyle the element width: {err}");
+                    }
+                }
+            }
+            self.redraw();
         }
     }
 
@@ -1203,7 +1234,32 @@ impl EditorView {
 
     /// Schedule a full redraw of the canvas.
     fn redraw(&self) {
+        // The redraw follows every state change a selection can ride on
+        // (mouse-up commits, undo/redo), so it doubles as the hook that
+        // keeps the slider handle pointing at the selection's width.
+        self.sync_width_slider();
         self.setNeedsDisplayInRect(self.bounds());
+    }
+
+    /// Point the stroke-width slider — and the default width for new
+    /// elements — at the selected element's width, when the element is one
+    /// the slider styles. Selections of other kinds leave both as they are.
+    fn sync_width_slider(&self) {
+        let Some(slider) = self.ivars().width_slider.borrow().clone() else {
+            return;
+        };
+        let width = self.ivars().selection.get().and_then(|id| {
+            self.ivars()
+                .shot
+                .borrow()
+                .as_ref()
+                .and_then(|shot| shot.doc.element(id))
+                .and_then(|el| stroke_width_of(&el.kind))
+        });
+        let Some(width) = width else { return };
+        let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
+        slider.setDoubleValue(clamped);
+        self.ivars().stroke_width.set(clamped);
     }
 
     /// Scale factors from image pixels to view points.
@@ -1825,6 +1881,18 @@ fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
+/// The stroke width of an element the width slider styles; None for kinds
+/// without one (text, callout, blur).
+fn stroke_width_of(kind: &ElementKind) -> Option<f64> {
+    match kind {
+        ElementKind::Arrow { width, .. }
+        | ElementKind::Rect { width, .. }
+        | ElementKind::Line { width, .. }
+        | ElementKind::Pen { width, .. } => Some(*width),
+        _ => None,
+    }
+}
+
 /// Top-left of a new callout's text block: above the base, clamped so the
 /// whole block stays inside the frame (in image pixels).
 fn callout_anchor(base: Point, text: &str, size: f64, frame: Rect) -> Point {
@@ -2015,8 +2083,8 @@ impl EditorWindow {
         let slider = unsafe {
             objc2_app_kit::NSSlider::sliderWithValue_minValue_maxValue_target_action(
                 DEFAULT_STROKE_WIDTH,
-                1.0,
-                12.0,
+                STROKE_MIN,
+                STROKE_MAX,
                 Some(&view),
                 Some(sel!(widthChanged:)),
                 mtm,
@@ -2091,6 +2159,7 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
+        *view.ivars().width_slider.borrow_mut() = Some(slider);
         view.update_tool_highlight();
         view.update_color_swatch();
 

@@ -171,6 +171,9 @@ pub enum Command {
     EditText(u64, String),
     /// Recolor an element (blur has no color and stays as it is).
     Recolor(u64, Rgba),
+    /// Restyle the stroke width of an element (kinds without a stroke stay
+    /// as they are).
+    SetWidth(u64, f64),
     /// Cut the base frame to the rect (in the current base pixel space).
     Crop(Rect),
     /// Resample the base frame to the size.
@@ -218,6 +221,13 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
             for el in &mut state.elements {
                 if el.id == *id {
                     set_element_color(&mut el.kind, *color);
+                }
+            }
+        }
+        Command::SetWidth(id, width) => {
+            for el in &mut state.elements {
+                if el.id == *id {
+                    set_element_width(&mut el.kind, *width);
                 }
             }
         }
@@ -379,6 +389,18 @@ fn set_element_color(kind: &mut ElementKind, color: Rgba) {
     }
 }
 
+/// Restyle the stroke width of an element; kinds without a stroke (text,
+/// callout, blur) stay as they are.
+fn set_element_width(kind: &mut ElementKind, width: f64) {
+    match kind {
+        ElementKind::Arrow { width: w, .. }
+        | ElementKind::Rect { width: w, .. }
+        | ElementKind::Line { width: w, .. }
+        | ElementKind::Pen { width: w, .. } => *w = width,
+        _ => {}
+    }
+}
+
 /// The editor document: pristine base frame + replayed state + journal.
 pub struct EditorDoc {
     /// The frame every replay starts from (the shot as captured, or the
@@ -445,6 +467,20 @@ impl EditorDoc {
         self.log.push(cmd.clone());
         self.applied += 1;
         apply_cmd(&mut self.state, &cmd);
+    }
+
+    /// Apply a stroke-width change for `id`. Consecutive changes for the
+    /// same element — a slider drag emits a stream of them — replace the
+    /// previous journal entry instead of growing the journal, so one undo
+    /// reverts the whole drag.
+    pub fn apply_width(&mut self, id: u64, width: f64) {
+        let merges = self.applied == self.log.len()
+            && matches!(self.log.last(), Some(Command::SetWidth(prev, _)) if *prev == id);
+        if merges {
+            self.log.pop();
+            self.applied -= 1;
+        }
+        self.apply(Command::SetWidth(id, width));
     }
 
     /// Revert the last applied command. False when nothing to undo.
@@ -703,6 +739,56 @@ mod tests {
         }));
         doc.apply(Command::Recolor(2, [0.0, 0.0, 0.0, 1.0]));
         assert!(matches!(doc.element(2).expect("blur").kind, ElementKind::Blur { .. }));
+    }
+
+    #[test]
+    fn set_width_coalesces_and_undoes_as_one_step() {
+        let mut doc = EditorDoc::new(solid_frame(64, 64));
+        doc.apply(Command::AddElement(arrow(1, 10.0, 10.0, 40.0, 40.0)));
+        let width = |doc: &EditorDoc| match &doc.element(1).expect("arrow").kind {
+            ElementKind::Arrow { width, .. } => *width,
+            other => panic!("expected arrow, got {other:?}"),
+        };
+
+        // A slider drag's stream of events lands as one journal entry.
+        doc.apply_width(1, 6.0);
+        doc.apply_width(1, 9.0);
+        doc.apply_width(1, 5.0);
+        assert_eq!(doc.applied_log().len(), 2);
+        assert_eq!(width(&doc), 5.0);
+
+        // One undo reverts the whole drag to the authored width.
+        assert!(doc.undo());
+        assert_eq!(width(&doc), 3.0);
+        assert!(doc.redo());
+        assert_eq!(width(&doc), 5.0);
+
+        // Another element's change breaks the run; a no-stroke target (a
+        // callout's font size is not the slider's) stays untouched.
+        doc.apply(Command::AddElement(Element {
+            id: 2,
+            kind: ElementKind::Callout {
+                tip: pt(5.0, 5.0),
+                anchor: pt(20.0, 30.0),
+                text: "hi".into(),
+                color: [1.0, 0.0, 1.0, 1.0],
+                size: 14.0,
+            },
+        }));
+        doc.apply_width(2, 8.0);
+        doc.apply_width(1, 7.0);
+        assert_eq!(doc.applied_log().len(), 5);
+        match &doc.element(2).expect("callout").kind {
+            ElementKind::Callout { size, .. } => assert_eq!(*size, 14.0),
+            other => panic!("expected callout, got {other:?}"),
+        }
+
+        // Replaying the journal reproduces the restyled state exactly.
+        let mut replayed = EditorDoc::new(solid_frame(64, 64));
+        for cmd in doc.applied_log() {
+            replayed.apply(cmd.clone());
+        }
+        assert_eq!(replayed.elements(), doc.elements());
     }
 
     #[test]

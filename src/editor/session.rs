@@ -69,6 +69,13 @@ impl OpenShot {
         self.persist()
     }
 
+    /// Apply a stroke-width change (consecutive slider events coalesce in
+    /// the journal) and auto-save.
+    pub fn apply_width(&mut self, id: u64, width: f64) -> Result<(), String> {
+        self.doc.apply_width(id, width);
+        self.persist()
+    }
+
     /// Undo the last command and auto-save. False when nothing to undo.
     pub fn undo(&mut self) -> Result<bool, String> {
         if !self.doc.undo() {
@@ -245,6 +252,7 @@ mod tests {
             }),
             Command::MoveElement(1, Point::new(2.0, -1.0)),
             Command::EditText(1, "правка".into()),
+            Command::SetWidth(1, 6.5),
         ]
     }
 
