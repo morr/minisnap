@@ -1048,7 +1048,8 @@ impl EditorView {
                     return;
                 }
                 drop(shot_slot);
-                ivars.selection.set(Some(id));
+                // The fresh element stays unselected: drawing must not end
+                // in markers and a snapped slider — a click selects it.
                 self.redraw();
             }
             Drag::Move { id, start, last, moved } => {
@@ -1442,10 +1443,10 @@ impl EditorView {
                     }
                 };
                 let id = shot.doc.next_element_id();
+                // Same rule as drawn shapes: the new element stays
+                // unselected until the user clicks it.
                 if let Err(err) = shot.apply(Command::AddElement(Element { id, kind })) {
                     eprintln!("editor: failed to add the text element: {err}");
-                } else {
-                    ivars.selection.set(Some(id));
                 }
             }
             TextTarget::Existing { id } => {
