@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
     NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
     NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSPopover, NSScreen, NSStackView, NSTextField,
+    NSImageSymbolConfiguration, NSPopover, NSPopoverDelegate, NSScreen, NSStackView, NSTextField,
     NSTextFieldDelegate, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowStyleMask,
 };
@@ -129,7 +129,7 @@ struct FrameEdit {
 }
 
 /// Color presets offered by the popover; magenta is the default.
-const COLOR_PRESETS: [Rgba; 8] = [
+const COLOR_PRESETS: [Rgba; 9] = [
     [1.0, 0.0, 1.0, 1.0],  // magenta
     [1.0, 0.0, 0.0, 1.0],  // red
     [1.0, 0.5, 0.0, 1.0],  // orange
@@ -138,6 +138,7 @@ const COLOR_PRESETS: [Rgba; 8] = [
     [0.0, 0.7, 0.9, 1.0],  // cyan
     [0.1, 0.3, 1.0, 1.0],  // blue
     [0.0, 0.0, 0.0, 1.0],  // black
+    [1.0, 1.0, 1.0, 1.0],  // white
 ];
 
 /// The annotation tools, in toolbar order.
@@ -425,6 +426,17 @@ define_class!(
     // id<NSTextFieldDelegate>, so the sub-protocol conformance is what the
     // ProtocolObject cast in the field editor needs.
     unsafe impl NSTextFieldDelegate for EditorView {}
+
+    // SAFETY: only the did-close callback is implemented; the canvas view
+    // outlives the popover it anchors.
+    unsafe impl NSPopoverDelegate for EditorView {
+        #[unsafe(method(popoverDidClose:))]
+        fn __popover_did_close(&self, _notification: &NSNotification) {
+            // Forget the closed popover so the next click on the swatch
+            // button opens a fresh one.
+            *self.ivars().color_popover.borrow_mut() = None;
+        }
+    }
 );
 
 impl EditorView {
@@ -1503,12 +1515,16 @@ impl EditorView {
 
     /// Open (or close) the color preset popover under the swatch button.
     fn toggle_color_popover(&self, sender: Option<&AnyObject>) {
-        let mut slot = self.ivars().color_popover.borrow_mut();
-        if let Some(open) = slot.as_ref() {
-            // SAFETY: plain close on a live popover.
-            unsafe { open.performClose(None) };
-            *slot = None;
-            return;
+        // Take the slot first: performClose re-enters popoverDidClose,
+        // which borrows the same cell. A stale closed popover (closed
+        // outside this toggle) is simply replaced below.
+        let open = self.ivars().color_popover.borrow_mut().take();
+        if let Some(popover) = open.as_ref() {
+            if popover.isShown() {
+                // SAFETY: plain close on a live, shown popover.
+                unsafe { popover.performClose(None) };
+                return;
+            }
         }
         let Some(anchor) = sender else { return };
         let Some(anchor_button) = anchor.downcast_ref::<NSButton>() else {
@@ -1517,11 +1533,23 @@ impl EditorView {
         let mtm = MainThreadMarker::new().expect("popover on main thread");
         // SAFETY: plain init on a freshly allocated popover.
         let popover: Retained<NSPopover> = unsafe { msg_send![NSPopover::alloc(mtm), init] };
-        popover.setBehavior(objc2_app_kit::NSPopoverBehavior::Transient);
+        // Closes only where the code closes it (a preset pick or a second
+        // click on the swatch button), so the toggle stays deterministic.
+        popover.setBehavior(objc2_app_kit::NSPopoverBehavior::ApplicationDefined);
+        // SAFETY: the delegate is this canvas view, alive for the process.
+        unsafe { popover.setDelegate(Some(ProtocolObject::from_ref(self))) };
 
         let content = NSStackView::new(mtm);
         content.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         content.setSpacing(6.0);
+        // Edge insets keep the preset outlines inside the popover: without
+        // them the border of the first and last swatch is clipped.
+        content.setEdgeInsets(objc2_foundation::NSEdgeInsets {
+            top: 8.0,
+            left: 8.0,
+            bottom: 8.0,
+            right: 8.0,
+        });
         for (index, color) in COLOR_PRESETS.iter().enumerate() {
             let [r, g, b, a] = *color;
             let ns_color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
@@ -1540,6 +1568,10 @@ impl EditorView {
                 // SAFETY: plain CGColor bridge of a live color.
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
                 layer.setCornerRadius(8.0);
+                // A visible outline: light presets (white) would blend into
+                // the popover background.
+                layer.setBorderWidth(1.0);
+                layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
             }
             button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(18.0, 18.0)));
             button.setTag(index as isize);
@@ -1563,7 +1595,7 @@ impl EditorView {
                 NSRectEdge::MinY,
             );
         }
-        *slot = Some(popover);
+        *self.ivars().color_popover.borrow_mut() = Some(popover);
     }
 }
 
