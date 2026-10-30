@@ -200,29 +200,36 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// Wedge arrow from `a` to `b`: perpendiculars to the axis, tail ~25% of
-/// the thickness, widening toward the head and ending in a point at `b`.
+/// Arrow from `a` to `b`: a shaft of constant thickness with a flat start
+/// plus a solid triangular head with its apex at `b`.
 fn draw_arrow(ctx: &CGContext, a: super::Point, b: super::Point, color: super::Rgba, width: f64) {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt();
     if len < f64::EPSILON {
         return;
     }
-    let (nx, ny) = (-dy / len, dx / len);
-    let head = width / 2.0;
-    let tail = width / 8.0;
-    let corners = [
-        CGPoint::new(a.x + nx * tail, a.y + ny * tail),
-        CGPoint::new(b.x + nx * head, b.y + ny * head),
-        CGPoint::new(b.x, b.y),
-        CGPoint::new(b.x - nx * head, b.y - ny * head),
-        CGPoint::new(a.x - nx * tail, a.y - ny * tail),
-    ];
+    let (ux, uy) = (dx / len, dy / len);
+    // A very short arrow gets a proportionally smaller head so it never
+    // reaches back to the start.
+    let head_len = (width * 2.5).min(len / 2.0);
+    let half_head = head_len * 0.5;
+    // The shaft runs a little into the head so the two shapes meet without
+    // a seam.
+    let shaft_end = super::Point::new(b.x - ux * head_len * 0.8, b.y - uy * head_len * 0.8);
+    CGContext::set_rgb_stroke_color(Some(ctx), color[0], color[1], color[2], color[3]);
+    CGContext::set_line_cap(Some(ctx), CGLineCap::Butt);
+    CGContext::set_line_width(Some(ctx), width);
+    CGContext::begin_path(Some(ctx));
+    CGContext::move_to_point(Some(ctx), a.x, a.y);
+    CGContext::add_line_to_point(Some(ctx), shaft_end.x, shaft_end.y);
+    CGContext::stroke_path(Some(ctx));
+    // The solid triangular head: base perpendicular to the axis, apex at b.
+    let base = super::Point::new(b.x - ux * head_len, b.y - uy * head_len);
     CGContext::set_rgb_fill_color(Some(ctx), color[0], color[1], color[2], color[3]);
     CGContext::begin_path(Some(ctx));
-    CGContext::move_to_point(Some(ctx), corners[0].x, corners[0].y);
-    // SAFETY: corners outlives the call.
-    unsafe { CGContext::add_lines(Some(ctx), corners[1..].as_ptr(), corners.len() - 1) };
+    CGContext::move_to_point(Some(ctx), base.x - uy * half_head, base.y + ux * half_head);
+    CGContext::add_line_to_point(Some(ctx), b.x, b.y);
+    CGContext::add_line_to_point(Some(ctx), base.x + uy * half_head, base.y - ux * half_head);
     CGContext::close_path(Some(ctx));
     CGContext::fill_path(Some(ctx));
 }
@@ -326,6 +333,44 @@ mod tests {
         // The rect stroke covers (20, 40) (the left edge band 18..22).
         let rect_px = pixel(&bytes, 64, 20, 40);
         assert!(rect_px[0] > 200 && rect_px[2] < 100, "rect pixel {rect_px:?}");
+    }
+
+    #[test]
+    fn arrow_has_a_constant_shaft_and_a_solid_head() {
+        let base = solid_frame(64, 64);
+        let element = Element {
+            id: 1,
+            kind: ElementKind::Arrow {
+                a: Point::new(10.0, 32.0),
+                b: Point::new(54.0, 32.0),
+                color: MAGENTA,
+                width: 6.0,
+            },
+        };
+        let composite = render_composite(&base, &[element]).expect("composite");
+        let bytes = pixel_bytes(&composite);
+        // width 6, head length 15, half head 7.5: the shaft spans y 29..35
+        // up to x≈42, the head base at x=39 spans y 24.5..39.5, apex (54,32).
+        let is_magenta = |x: usize, y: usize| {
+            let p = pixel(&bytes, 64, x, y);
+            p[0] > 200 && p[2] > 200 && p[1] < 120
+        };
+        let is_gray = |x: usize, y: usize| {
+            let p = pixel(&bytes, 64, x, y);
+            (p[0] as i32 - 128).abs() < 40 && (p[2] as i32 - 128).abs() < 40
+        };
+        // Flat start: the shaft covers its full thickness right at `a`
+        // (the old wedge tapered to ~25% there).
+        assert!(is_magenta(12, 31), "shaft at the start");
+        // Nothing widens before the head: above the shaft, left of the head
+        // base, the frame stays gray.
+        assert!(is_gray(12, 26), "shaft stays constant near the start");
+        assert!(is_gray(36, 26), "no widening before the head");
+        // The solid head: wide at its base — both above and below the
+        // shaft — and pointed at the apex.
+        assert!(is_magenta(41, 27), "head base above the shaft");
+        assert!(is_magenta(41, 37), "head base below the shaft");
+        assert!(is_magenta(50, 32), "head toward the apex");
     }
 
     #[test]
