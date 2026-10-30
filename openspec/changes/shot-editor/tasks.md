@@ -54,7 +54,7 @@
 
 ## 6. Интеграционная проверка
 
-- [ ] 6.1 `cargo test` зелёный; прогнать вручную сценарии дельт (shot-editor, global-hotkeys, capture-output, tray-app, preferences) на Retina; собрать release `.app` и проверить запуск из бандла
+- [x] 6.1 `cargo test` зелёный; прогнать вручную сценарии дельт (shot-editor, global-hotkeys, capture-output, tray-app, preferences) на Retina; собрать release `.app` и проверить запуск из бандла
 
 ## Workflow follow-up
 
