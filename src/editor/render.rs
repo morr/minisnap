@@ -200,8 +200,9 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// Arrow from `a` to `b`: a shaft of constant thickness with a flat start
-/// plus a solid triangular head with its apex at `b`.
+/// Arrow from `a` to `b`, Monosnap-style: a flat trapezoid flare at the
+/// tail narrowing into a constant-thickness shaft, and a solid triangular
+/// head with its apex at `b`. Drawn as one filled polygon.
 pub(crate) fn draw_arrow(
     ctx: &CGContext,
     a: super::Point,
@@ -215,27 +216,47 @@ pub(crate) fn draw_arrow(
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
-    // A very short arrow gets a proportionally smaller head so it never
-    // reaches back to the start.
-    let head_len = (width * 2.5).min(len / 2.0);
-    let half_head = head_len * 0.5;
-    // The shaft runs a little into the head so the two shapes meet without
-    // a seam.
-    let shaft_end = super::Point::new(b.x - ux * head_len * 0.8, b.y - uy * head_len * 0.8);
-    CGContext::set_rgb_stroke_color(Some(ctx), color[0], color[1], color[2], color[3]);
-    CGContext::set_line_cap(Some(ctx), CGLineCap::Butt);
-    CGContext::set_line_width(Some(ctx), width);
-    CGContext::begin_path(Some(ctx));
-    CGContext::move_to_point(Some(ctx), a.x, a.y);
-    CGContext::add_line_to_point(Some(ctx), shaft_end.x, shaft_end.y);
-    CGContext::stroke_path(Some(ctx));
-    // The solid triangular head: base perpendicular to the axis, apex at b.
-    let base = super::Point::new(b.x - ux * head_len, b.y - uy * head_len);
+    let (nx, ny) = (-uy, ux);
+    // Proportions of the stroke width, clamped for short arrows so the
+    // flare and the head never eat the whole length.
+    let head_len = (width * 5.0).min(len * 0.45);
+    let flange_len = (width * 2.0).min(len * 0.15);
+    let half_shaft = width / 2.0;
+    let half_flange = width * 1.1;
+    let half_head = width * 2.25;
+    let head_base = super::Point::new(b.x - ux * head_len, b.y - uy * head_len);
+    let flare_end = super::Point::new(a.x + ux * flange_len, a.y + uy * flange_len);
+    let pts = [
+        // Tail: the flat back edge spans the flare, then the outline
+        // narrows into the shaft.
+        CGPoint::new(a.x + nx * half_flange, a.y + ny * half_flange),
+        CGPoint::new(
+            flare_end.x + nx * half_shaft,
+            flare_end.y + ny * half_shaft,
+        ),
+        CGPoint::new(
+            head_base.x + nx * half_shaft,
+            head_base.y + ny * half_shaft,
+        ),
+        // Head: wide base, apex at b.
+        CGPoint::new(head_base.x + nx * half_head, head_base.y + ny * half_head),
+        CGPoint::new(b.x, b.y),
+        CGPoint::new(head_base.x - nx * half_head, head_base.y - ny * half_head),
+        CGPoint::new(
+            head_base.x - nx * half_shaft,
+            head_base.y - ny * half_shaft,
+        ),
+        CGPoint::new(
+            flare_end.x - nx * half_shaft,
+            flare_end.y - ny * half_shaft,
+        ),
+        CGPoint::new(a.x - nx * half_flange, a.y - ny * half_flange),
+    ];
     CGContext::set_rgb_fill_color(Some(ctx), color[0], color[1], color[2], color[3]);
     CGContext::begin_path(Some(ctx));
-    CGContext::move_to_point(Some(ctx), base.x - uy * half_head, base.y + ux * half_head);
-    CGContext::add_line_to_point(Some(ctx), b.x, b.y);
-    CGContext::add_line_to_point(Some(ctx), base.x + uy * half_head, base.y - ux * half_head);
+    CGContext::move_to_point(Some(ctx), pts[0].x, pts[0].y);
+    // SAFETY: pts outlives the call.
+    unsafe { CGContext::add_lines(Some(ctx), pts[1..].as_ptr(), pts.len() - 1) };
     CGContext::close_path(Some(ctx));
     CGContext::fill_path(Some(ctx));
 }
@@ -342,21 +363,21 @@ mod tests {
     }
 
     #[test]
-    fn arrow_has_a_constant_shaft_and_a_solid_head() {
+    fn arrow_matches_the_monosnap_shape() {
         let base = solid_frame(64, 64);
         let element = Element {
             id: 1,
             kind: ElementKind::Arrow {
-                a: Point::new(10.0, 32.0),
-                b: Point::new(54.0, 32.0),
+                a: Point::new(8.0, 32.0),
+                b: Point::new(56.0, 32.0),
                 color: MAGENTA,
                 width: 6.0,
             },
         };
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
-        // width 6, head length 15, half head 7.5: the shaft spans y 29..35
-        // up to x≈42, the head base at x=39 spans y 24.5..39.5, apex (54,32).
+        // width 6 over len 48: tail flare around x 8..15, shaft half 3,
+        // head base at x=34.4 with half 13.5, apex at b.
         let is_magenta = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
             p[0] > 200 && p[2] > 200 && p[1] < 120
@@ -365,18 +386,18 @@ mod tests {
             let p = pixel(&bytes, 64, x, y);
             (p[0] as i32 - 128).abs() < 40 && (p[2] as i32 - 128).abs() < 40
         };
-        // Flat start: the shaft covers its full thickness right at `a`
-        // (the old wedge tapered to ~25% there).
-        assert!(is_magenta(12, 31), "shaft at the start");
-        // Nothing widens before the head: above the shaft, left of the head
-        // base, the frame stays gray.
-        assert!(is_gray(12, 26), "shaft stays constant near the start");
-        assert!(is_gray(36, 26), "no widening before the head");
-        // The solid head: wide at its base — both above and below the
-        // shaft — and pointed at the apex.
-        assert!(is_magenta(41, 27), "head base above the shaft");
-        assert!(is_magenta(41, 37), "head base below the shaft");
-        assert!(is_magenta(50, 32), "head toward the apex");
+        // The tail is a flat trapezoid flare around the start.
+        assert!(is_magenta(12, 28), "tail flare above the axis");
+        assert!(is_magenta(14, 32), "tail neck on the axis");
+        // The flare narrows into a constant-thickness shaft.
+        assert!(is_magenta(25, 32), "shaft");
+        assert!(is_gray(25, 27), "shaft stays thin mid-way");
+        // The head is a solid triangle: wide base above and below the
+        // shaft, colored apex at b, nothing beyond its silhouette.
+        assert!(is_magenta(38, 24), "head above the axis");
+        assert!(is_magenta(38, 40), "head below the axis");
+        assert!(is_magenta(53, 32), "head apex");
+        assert!(is_gray(38, 18), "nothing beyond the head");
     }
 
     #[test]
