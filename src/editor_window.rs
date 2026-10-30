@@ -402,15 +402,20 @@ define_class!(
     }
 
     // SAFETY: only the optional end-editing callback is implemented; the
-    // canvas view outlives the field editor it parents.
-    unsafe impl NSControlTextEditingDelegate for EditorView {}
-
-    unsafe impl NSTextFieldDelegate for EditorView {
+    // canvas view outlives the field editor it parents. The method belongs
+    // on this protocol itself: objc2's debug build rejects registering it
+    // via the sub-protocol NSTextFieldDelegate, which only inherits it.
+    unsafe impl NSControlTextEditingDelegate for EditorView {
         #[unsafe(method(controlTextDidEndEditing:))]
         fn __control_text_did_end_editing(&self, _notification: &NSNotification) {
             self.commit_text_editor();
         }
     }
+
+    // SAFETY: empty — NSTextField's delegate property is typed
+    // id<NSTextFieldDelegate>, so the sub-protocol conformance is what the
+    // ProtocolObject cast in the field editor needs.
+    unsafe impl NSTextFieldDelegate for EditorView {}
 );
 
 impl EditorView {
@@ -1756,4 +1761,18 @@ fn fit_size(w: f64, h: f64, max_w: f64, max_h: f64) -> CGSize {
     }
     let scale = 1.0_f64.min(max_w / w).min(max_h / h);
     CGSize::new(w * scale, h * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::ClassType;
+
+    #[test]
+    fn class_registration_succeeds() {
+        // objc2 debug builds verify protocol overrides during class
+        // registration, which is exactly what panicked when the
+        // end-editing callback sat on the sub-protocol.
+        let _ = EditorView::class();
+    }
 }
