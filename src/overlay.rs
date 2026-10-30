@@ -165,6 +165,10 @@ struct OverlayIvars {
     loupe_grid: Retained<CAShapeLayer>,
     /// Crosshair through the loupe's center (cursor-pixel) cell.
     loupe_cross: Retained<CAShapeLayer>,
+    /// Two-tone frame over the loupe edge: a white outline ring under a
+    /// thin black core ring, so the boundary reads on any content.
+    loupe_frame_light: Retained<CAShapeLayer>,
+    loupe_frame_dark: Retained<CAShapeLayer>,
     /// Full-screen guide lines through the cursor (idle only): a white
     /// outline layer under a thin black core layer, Monosnap-style. The pair
     /// reads on any background and never flickers, unlike content-sampled
@@ -187,9 +191,10 @@ struct OverlayIvars {
 const DIM_ALPHA: f64 = 0.4;
 
 /// Loupe magnification: on-screen points per logical (UI) pixel.
-const LOUPE_ZOOM_PT: f64 = 10.0;
-/// Loupe sample side, in logical pixels (the loupe is square).
-const LOUPE_SAMPLE_PX: f64 = 14.0;
+const LOUPE_ZOOM_PT: f64 = 7.0;
+/// Loupe sample side, in logical pixels (the loupe is square). 20 × 7pt
+/// keeps the loupe's on-screen size at 140pt while showing more pixels.
+const LOUPE_SAMPLE_PX: f64 = 20.0;
 /// Brightness (0..255 per channel) above which content counts as light.
 /// Used by the sampler tests; production guides are constant two-tone.
 #[allow(dead_code)]
@@ -200,6 +205,11 @@ const AXIS_OUTLINE_W_PT: f64 = 1.5;
 const AXIS_CORE_W_PT: f64 = 0.75;
 /// Loupe side, in points.
 const LOUPE_SIZE_PT: f64 = LOUPE_SAMPLE_PX * LOUPE_ZOOM_PT;
+/// Loupe frame rings, in points: a white outline ring with a black core
+/// ring on top — the same two-tone scheme as the axis guides — so the
+/// loupe edge reads on light and dark content alike.
+const LOUPE_FRAME_OUTLINE_W_PT: f64 = 3.0;
+const LOUPE_FRAME_CORE_W_PT: f64 = 1.5;
 /// Gap between the cursor and the loupe corner.
 const LOUPE_GAP_PT: f64 = 18.0;
 /// Height of the HUD readout bar under the loupe, in points. The text layer
@@ -252,6 +262,8 @@ define_class!(
                 loupe: CALayer::new(),
                 loupe_grid: CAShapeLayer::new(),
                 loupe_cross: CAShapeLayer::new(),
+                loupe_frame_light: CAShapeLayer::new(),
+                loupe_frame_dark: CAShapeLayer::new(),
                 axis_v_dark: CAShapeLayer::new(),
                 axis_v_light: CAShapeLayer::new(),
                 axis_h_dark: CAShapeLayer::new(),
@@ -481,9 +493,6 @@ impl OverlayView {
 
         let loupe = &ivars.loupe;
         loupe.setMasksToBounds(true);
-        loupe.setBorderWidth(1.0);
-        let border = NSColor::whiteColor().colorWithAlphaComponent(0.9);
-        loupe.setBorderColor(Some(&border.CGColor()));
         loupe.setContentsScale(ivars.scale.get());
         // Magnified source pixels must stay sharp squares.
         loupe.setMagnificationFilter(unsafe { kCAFilterNearest });
@@ -538,6 +547,60 @@ impl OverlayView {
         cross.setLineWidth(1.0);
         cross.setContentsScale(ivars.scale.get());
         loupe.addSublayer(cross);
+
+        // Two-tone frame over the loupe edge, on top of the grid and the
+        // crosshair: the white outline reads on dark content, the black
+        // core on light. The band sits fully inside the clipped bounds.
+        let frame_inset = LOUPE_FRAME_OUTLINE_W_PT / 2.0;
+        let frame_path = CGMutablePath::new();
+        // SAFETY: plain C path builders with a null transform.
+        unsafe {
+            CGMutablePath::move_to_point(
+                Some(&frame_path),
+                std::ptr::null(),
+                frame_inset,
+                frame_inset,
+            );
+            CGMutablePath::add_line_to_point(
+                Some(&frame_path),
+                std::ptr::null(),
+                LOUPE_SIZE_PT - frame_inset,
+                frame_inset,
+            );
+            CGMutablePath::add_line_to_point(
+                Some(&frame_path),
+                std::ptr::null(),
+                LOUPE_SIZE_PT - frame_inset,
+                LOUPE_SIZE_PT - frame_inset,
+            );
+            CGMutablePath::add_line_to_point(
+                Some(&frame_path),
+                std::ptr::null(),
+                frame_inset,
+                LOUPE_SIZE_PT - frame_inset,
+            );
+            CGMutablePath::close_subpath(Some(&frame_path));
+        }
+        let frame_ref: &CGPath = &frame_path;
+        let white = NSColor::whiteColor().colorWithAlphaComponent(0.9).CGColor();
+        let black = NSColor::blackColor().colorWithAlphaComponent(0.9).CGColor();
+        for (ring, color, width) in [
+            (&ivars.loupe_frame_light, &white, LOUPE_FRAME_OUTLINE_W_PT),
+            (&ivars.loupe_frame_dark, &black, LOUPE_FRAME_CORE_W_PT),
+        ] {
+            ring.setFrame(CGRect::new(
+                CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
+            ));
+            ring.setPath(Some(frame_ref));
+            ring.setStrokeColor(Some(color));
+            ring.setLineWidth(width);
+            // A closed rect path would otherwise fill with the default
+            // opaque black.
+            ring.setFillColor(None);
+            ring.setContentsScale(ivars.scale.get());
+            loupe.addSublayer(ring);
+        }
 
         // Guides: white outline first, black cores on top of it.
         let outline = NSColor::whiteColor().colorWithAlphaComponent(0.9).CGColor();
