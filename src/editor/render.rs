@@ -219,18 +219,18 @@ const ARROW_SHADOW_ALPHA: f64 = 0.28;
 /// the head length clamps to half the arrow length so short arrows keep a
 /// body.
 const ARROW_HEAD_LEN_W: f64 = 4.6;
-const ARROW_HALF_HEAD_W: f64 = 2.6;
-/// How far past the barb line the notch shoulder sits, as a fraction of
-/// the head length. The shoulder landing just behind the barbs keeps the
-/// outline sweep monotone (no zigzag fill artifacts) and the notch a
-/// steep, deep concave cut — which is what makes the wing tips wide.
-const ARROW_SHOULDER_PAST: f64 = 0.05;
-/// How far the flat chamfer at each wing tip cuts along the two edges
-/// meeting at the barb, in stroke widths — the tip ends in a short flat
-/// edge instead of a point.
-const ARROW_BARB_CUT_W: f64 = 0.5;
-/// Corner-rounding radius of the notch ends — the chamfered wing tips and
-/// the roots where the notches meet the body — in stroke widths.
+const ARROW_HALF_HEAD_W: f64 = 2.4;
+/// Where the notch shoulder sits along the head, as a fraction of the head
+/// length from the tip (in front of the barb line, leaving a notch pocket
+/// between the head and the body).
+const ARROW_NOTCH_AT: f64 = 0.70;
+/// How far the notch control point bows out between the body edge and the
+/// barb, 0..1. 0.5 leaves the notch edge tangent to the perpendicular at
+/// the barb — the wing tips open wide (~60°) — while the pocket stays as
+/// deep as the straight edge's.
+const ARROW_NOTCH_BOW: f64 = 0.5;
+/// Corner-rounding radius of the notch ends — the wing tips and the pocket
+/// apexes — in stroke widths.
 const ARROW_NOTCH_ROUND_W: f64 = 0.30;
 
 /// Direction and head proportions of an arrow.
@@ -270,10 +270,11 @@ impl ArrowFrame {
 }
 
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
-/// needle-thin with a rounded cap at `a` and widens along the whole length,
-/// and the head is a barbed arrowhead whose wings end in wide flat-chamfered
-/// tips between steep concave notches. One closed ring (the last point
-/// connects back to the first); empty for a degenerate zero-length arrow.
+/// needle-thin with a rounded cap at `a` and widens along the whole length;
+/// the head is a barbed arrowhead whose wings end in wide flat-chamfered
+/// tips, with notch pockets between the wings and the body. One closed
+/// ring (the last point connects back to the first); empty for a
+/// degenerate zero-length arrow.
 pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
     let Some(frame) = ArrowFrame::new(a, b, width) else {
         return Vec::new();
@@ -285,19 +286,27 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
     // center; the body widens linearly from `tail_r` to `half_body` up to
     // the notch shoulder.
     let cap = frame.step(a, tail_r, 0.0);
-    let shoulder = frame.step(b, -frame.head_len * (1.0 + ARROW_SHOULDER_PAST), 0.0);
-    // The notch cuts from the shoulder out to the barb; the barb itself is
-    // replaced by a flat chamfer between points cut `cut` along each edge.
-    let cut = ARROW_BARB_CUT_W * width;
+    // One side's notch: a concave quadratic from the shoulder out to the
+    // barb, bowed so it leaves the barb perpendicular to the axis (wide
+    // wing tips) and flattens into the pocket toward the shoulder.
     let wing = |sign: f64| {
-        let shoulder = frame.step(shoulder, 0.0, half_body * sign);
+        let shoulder = frame.step(b, -frame.head_len * ARROW_NOTCH_AT, half_body * sign);
         let barb = frame.step(b, -frame.head_len, frame.half_head * sign);
-        let cut = cut
-            .min(0.45 * pt_dist(shoulder, barb))
-            .min(0.45 * pt_dist(barb, b));
-        let on_notch = toward(shoulder, barb, cut);
-        let on_head = toward(barb, b, cut);
-        vec![(shoulder, Some(round_r)), (on_notch, Some(round_r)), (on_head, Some(round_r))]
+        let out = half_body + ARROW_NOTCH_BOW * (frame.half_head - half_body);
+        let elbow = frame.step(b, -frame.head_len, out * sign);
+        let bez = |t: f64| {
+            let (a2, b2, c2) = ((1.0 - t).powi(2), 2.0 * t * (1.0 - t), t * t);
+            super::Point::new(
+                a2 * shoulder.x + b2 * elbow.x + c2 * barb.x,
+                a2 * shoulder.y + b2 * elbow.y + c2 * barb.y,
+            )
+        };
+        vec![
+            (shoulder, Some(round_r)),
+            (bez(0.35), None),
+            (bez(0.65), None),
+            (barb, Some(round_r)),
+        ]
     };
     // (point, corner radius) pairs: the cap arc points and the tip stay
     // sharp, the notch ends round.
@@ -321,16 +330,6 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
     let lower = wing(-1.0);
     ring.extend(lower.into_iter().rev());
     round_corners(&ring)
-}
-
-/// The point `dist` along the segment `from` → `to`.
-fn toward(from: super::Point, to: super::Point, dist: f64) -> super::Point {
-    let len = pt_dist(from, to);
-    if len <= f64::EPSILON {
-        return to;
-    }
-    let t = (dist / len).clamp(0.0, 1.0);
-    super::Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
 }
 
 /// Round every corner carrying a radius: the vertex is replaced by a short
@@ -588,7 +587,7 @@ mod tests {
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
         // width 6 over len 48: tail cap radius 1.92 at x≈10, body widening
-        // to half 6.6 at the shoulder x≈30.8, barbs at x=32 with half 15.6,
+        // to half 6.6 at the shoulder x≈39.2, barbs at x=32 with half 14.4,
         // tip at b.
         let is_arrow = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
@@ -607,21 +606,21 @@ mod tests {
         assert!(is_arrow(25, 32), "body mid-way");
         assert!(is_arrow(30, 36), "body widened toward the head");
         assert!(is_gray(14, 36), "body still thin near the tail");
-        assert!(is_gray(25, 25), "nothing above the thin mid-body");
-        // The head is a chevron: wide at the barbs, colored apex at b, and
-        // a steep concave notch cut sweeping from each wide, chamfered wing
-        // tip down to the narrow body (only the soft shadow darkens the
-        // cut, so the pixel stays neutral gray, green tracking red).
+        assert!(is_gray(25, 26), "nothing above the thin mid-body");
+        // The head is a barbed arrowhead: wide at the barbs, colored apex at
+        // b, and a curved notch pocket between each wing and the body (only
+        // the soft shadow darkens the pocket, so the pixel stays neutral
+        // gray, green tracking red).
         assert!(is_arrow(38, 24), "head above the axis");
         assert!(is_arrow(38, 40), "head below the axis");
         assert!(is_arrow(53, 32), "head apex");
         assert!(is_gray(38, 16), "nothing beyond the head");
-        let cut = pixel(&bytes, 64, 30, 41);
+        let pocket = pixel(&bytes, 64, 35, 40);
         assert!(
-            cut[1] as i32 > cut[0] as i32 / 2,
-            "concave notch cut beside the body: {cut:?}"
+            pocket[1] as i32 > pocket[0] as i32 / 2,
+            "curved notch pocket beside the body: {pocket:?}"
         );
-        assert!(is_arrow(33, 43), "wide chamfered wing tip");
+        assert!(is_arrow(35, 43), "wide wing over the pocket");
         // The fill is a cross-wise gradient — from one notch of the head to
         // the other — lighter above, darker below.
         let top = pixel(&bytes, 64, 38, 23);
@@ -633,9 +632,9 @@ mod tests {
             "darker below: {bottom:?} vs {top:?}"
         );
         // A soft shadow darkens the base just below the body silhouette
-        // (the silhouette itself ends at y≈36.2 here; the shadow peaks a
+        // (the silhouette itself ends at y≈35.5 here; the shadow peaks a
         // hair past it).
-        let below = pixel(&bytes, 64, 20, 37);
+        let below = pixel(&bytes, 64, 20, 36);
         assert!(below[0] < 120 && below[2] < 120, "shadow below: {below:?}");
     }
 
