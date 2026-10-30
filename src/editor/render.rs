@@ -230,8 +230,9 @@ const ARROW_NOTCH_AT: f64 = 0.70;
 /// deep as the straight edge's.
 const ARROW_NOTCH_BOW: f64 = 0.5;
 /// Corner-rounding radius of the notch ends — the wing tips and the pocket
-/// apexes — in stroke widths.
-const ARROW_NOTCH_ROUND_W: f64 = 0.30;
+/// apexes — in stroke widths. The wing tips read like the rounded tail
+/// cap, a touch narrower.
+const ARROW_NOTCH_ROUND_W: f64 = 0.40;
 
 /// Direction and head proportions of an arrow.
 struct ArrowFrame {
@@ -304,7 +305,7 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
         vec![
             (shoulder, Some(round_r)),
             (bez(0.35), None),
-            (bez(0.65), None),
+            (bez(0.55), None),
             (barb, Some(round_r)),
         ]
     };
@@ -334,8 +335,9 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
 
 /// Round every corner carrying a radius: the vertex is replaced by a short
 /// quadratic arc tangent to both adjacent edges, clamped so an arc never
-/// reaches past the middle of either of its edges (two arcs on neighboring
-/// corners never overlap). Sharp vertices (None) pass through.
+/// reaches past 70% of either of its edges. Radius-carrying vertices must
+/// be separated by at least one plain vertex — then two arcs never meet on
+/// a shared edge. Sharp vertices (None) pass through.
 fn round_corners(ring: &[(super::Point, Option<f64>)]) -> Vec<super::Point> {
     const ARC_STEPS: usize = 4;
     let n = ring.len();
@@ -348,7 +350,7 @@ fn round_corners(ring: &[(super::Point, Option<f64>)]) -> Vec<super::Point> {
             continue;
         };
         let (d_prev, d_next) = (pt_dist(p, prev), pt_dist(p, next));
-        let r = radius.min(d_prev * 0.45).min(d_next * 0.45);
+        let r = radius.min(d_prev * 0.7).min(d_next * 0.7);
         if r <= f64::EPSILON {
             out.push(p);
             continue;
