@@ -393,12 +393,36 @@ define_class!(
             // SAFETY: the sender is the clicked preset NSButton.
             let tag: isize = unsafe { msg_send![sender, tag] };
             let index = tag.clamp(0, COLOR_PRESETS.len() as isize - 1) as usize;
-            self.ivars().color.set(COLOR_PRESETS[index]);
+            let color = COLOR_PRESETS[index];
+            self.ivars().color.set(color);
             self.update_color_swatch();
+            // A picked preset recolors the selected element (blur, which has
+            // no color, is skipped so undo never holds a no-op step).
+            if let Some(id) = self.ivars().selection.get() {
+                let recolorable = self
+                    .ivars()
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|shot| shot.doc.element(id))
+                    .is_some_and(|el| !matches!(el.kind, ElementKind::Blur { .. }));
+                if recolorable {
+                    let result = self
+                        .ivars()
+                        .shot
+                        .borrow_mut()
+                        .as_mut()
+                        .map(|shot| shot.apply(Command::Recolor(id, color)));
+                    if let Some(Err(err)) = result {
+                        eprintln!("editor: failed to recolor the element: {err}");
+                    }
+                }
+            }
             if let Some(popover) = self.ivars().color_popover.borrow_mut().take() {
                 // SAFETY: plain close on a live popover.
                 unsafe { popover.performClose(None) };
             }
+            self.redraw();
         }
 
         #[unsafe(method(widthChanged:))]

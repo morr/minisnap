@@ -169,6 +169,8 @@ pub enum Command {
     MovePoint(u64, Endpoint, Point),
     /// Replace the text of a text/callout element.
     EditText(u64, String),
+    /// Recolor an element (blur has no color and stays as it is).
+    Recolor(u64, Rgba),
     /// Cut the base frame to the rect (in the current base pixel space).
     Crop(Rect),
     /// Resample the base frame to the size.
@@ -209,6 +211,13 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
                         ElementKind::Callout { text: t, .. } => *t = text.clone(),
                         _ => {}
                     }
+                }
+            }
+        }
+        Command::Recolor(id, color) => {
+            for el in &mut state.elements {
+                if el.id == *id {
+                    set_element_color(&mut el.kind, *color);
                 }
             }
         }
@@ -354,6 +363,19 @@ pub(crate) fn set_endpoint(kind: &mut ElementKind, end: Endpoint, point: Point) 
             Endpoint::B => *anchor = point,
         },
         _ => {}
+    }
+}
+
+/// Recolor an element; kinds without a color (blur) stay as they are.
+fn set_element_color(kind: &mut ElementKind, color: Rgba) {
+    match kind {
+        ElementKind::Arrow { color: c, .. }
+        | ElementKind::Rect { color: c, .. }
+        | ElementKind::Line { color: c, .. }
+        | ElementKind::Pen { color: c, .. }
+        | ElementKind::Text { color: c, .. }
+        | ElementKind::Callout { color: c, .. } => *c = color,
+        ElementKind::Blur { .. } => {}
     }
 }
 
@@ -644,6 +666,43 @@ mod tests {
             }
             other => panic!("expected callout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recolor_replays_and_undoes() {
+        let mut doc = EditorDoc::new(solid_frame(64, 64));
+        doc.apply(Command::AddElement(arrow(1, 10.0, 10.0, 40.0, 40.0)));
+        let color = |doc: &EditorDoc, id: u64| {
+            doc.element(id).and_then(|el| match &el.kind {
+                ElementKind::Arrow { color, .. } => Some(*color),
+                _ => None,
+            })
+        };
+        assert_eq!(color(&doc, 1), Some([1.0, 0.0, 1.0, 1.0]));
+
+        doc.apply(Command::Recolor(1, [0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(color(&doc, 1), Some([0.0, 0.0, 0.0, 1.0]));
+
+        // Replaying the journal reproduces the recolored state exactly.
+        let mut replayed = EditorDoc::new(solid_frame(64, 64));
+        for cmd in doc.applied_log() {
+            replayed.apply(cmd.clone());
+        }
+        assert_eq!(replayed.elements(), doc.elements());
+
+        // Undo brings the original color back.
+        assert!(doc.undo());
+        assert_eq!(color(&doc, 1), Some([1.0, 0.0, 1.0, 1.0]));
+
+        // A recolor of a blur (no color) is a safe no-op.
+        doc.apply(Command::AddElement(Element {
+            id: 2,
+            kind: ElementKind::Blur {
+                rect: Rect::new(0.0, 0.0, 5.0, 5.0),
+            },
+        }));
+        doc.apply(Command::Recolor(2, [0.0, 0.0, 0.0, 1.0]));
+        assert!(matches!(doc.element(2).expect("blur").kind, ElementKind::Blur { .. }));
     }
 
     #[test]
