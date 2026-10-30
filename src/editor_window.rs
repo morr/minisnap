@@ -46,6 +46,9 @@ const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
 /// Default stroke width for new elements, in image pixels.
 const DEFAULT_STROKE_WIDTH: f64 = 4.0;
 
+/// Width of the stroke-width slider in the toolbar, in points.
+const STROKE_SLIDER_WIDTH_PT: f64 = 115.0;
+
 /// A drag shorter than this (in image pixels) is a plain click, not a
 /// drawn element.
 const MIN_DRAG_PX: f64 = 4.0;
@@ -2021,6 +2024,12 @@ impl EditorWindow {
         };
         slider.setFocusRingType(NSFocusRingType::None);
         slider.setRefusesFirstResponder(true);
+        // The convenience constructor leaves the slider a sliver wide; the
+        // width control needs room to drag precisely.
+        slider.setFrame(CGRect::new(
+            CGPoint::ZERO,
+            CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
+        ));
         toolbar.addArrangedSubview(&slider);
         let mut tool_buttons = Vec::new();
         for tool in Tool::all() {
