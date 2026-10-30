@@ -299,6 +299,12 @@ define_class!(
                         window.close();
                     }
                 }
+                // ⌘Q closes the viewer; the app stays in the tray.
+                12 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
+                    if let Some(window) = self.window() {
+                        window.close();
+                    }
+                }
                 // Return and keypad enter apply the frame.
                 36 | 76 => self.commit_frame_edit(),
                 // ⌘C copies the composite (no markers, no chrome).
@@ -1702,14 +1708,20 @@ impl EditorWindow {
         };
         toolbar.addArrangedSubview(&slider);
 
-        // Layout: toolbar strip at the top, canvas below it.
+        // Layout: toolbar strip at the top, canvas below it. The flexible
+        // min-Y margin keeps the toolbar pinned to the top edge when the
+        // window resizes; the canvas keeps its rigid 40-pt top gap and
+        // grows into the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
         toolbar.setFrame(CGRect::new(
             CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT),
             CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
         ));
-        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        toolbar.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
         content.addSubview(&toolbar);
         let canvas_height = size.height - TOOLBAR_HEIGHT;
         view.setFrame(CGRect::new(

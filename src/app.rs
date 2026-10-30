@@ -316,7 +316,9 @@ impl AppController {
                 NSMenuItem::alloc(mtm),
                 &NSString::from_str("Quit"),
                 Some(sel!(quit:)),
-                &NSString::from_str(""),
+                // The menu-open shortcut; the global behavior stays with
+                // the focused app (⌘Q in the editor window closes it).
+                &NSString::from_str("q"),
             )
         };
         menu.addItem(&quit_item);
