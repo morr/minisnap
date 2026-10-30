@@ -1,0 +1,5 @@
+# Sign binaries before cargo runs them (cargo run, cargo test) so the
+# Screen Recording grant follows the stable dev identity instead of the
+# per-build ad-hoc signature. See scripts/codesign-run.sh.
+[target.aarch64-apple-darwin]
+runner = "scripts/codesign-run.sh"
