@@ -36,6 +36,10 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 5. `open_editor` → `session::OpenShot::open(path, default_root())` → единственное переиспользуемое `EditorWindow::show_shot(shot)`.
 6. Правки: `OpenShot::apply`/`apply_width`/`undo`/`redo` → `render::render_composite` → `output::encode_png_atomic` (файл снимка) + журнал сессии в tmp.
 
+## Сквозные конвенции
+
+Кратко: весь AppKit в главном потоке, единственный фоновый поток — захват T0 (результат по `mpsc` в тик); три системы координат (AppKit-пункты, SCKit-пункты, пиксели изображения) переводятся только через `capture::geometry`; `CGImage` неизменяем, редактор всегда перерисовывает композит с нуля; свои objc2-классы — `MainThreadOnly` с SAFETY-комментариями у каждого `unsafe`; заморозка T0 — один снимок, всё дальнейшее читает только его. Подробности — [references/conventions.md](references/conventions.md).
+
 ## Домены и скилы
 
 | Скил | Домен | Модули | Спеки |
