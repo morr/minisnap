@@ -219,13 +219,19 @@ const ARROW_SHADOW_ALPHA: f64 = 0.28;
 /// the head length clamps to half the arrow length so short arrows keep a
 /// body.
 const ARROW_HEAD_LEN_W: f64 = 4.6;
-const ARROW_HALF_HEAD_W: f64 = 2.4;
-/// How deep the concave notches at the head base cut, as a fraction of the
-/// head length (the body outline stops this far short of the barb line).
-const ARROW_NOTCH_DEPTH: f64 = 0.30;
-/// Corner-rounding radius of the notch ends — the barb tips and the roots
-/// where the notches meet the body — in stroke widths.
-const ARROW_NOTCH_ROUND_W: f64 = 0.35;
+const ARROW_HALF_HEAD_W: f64 = 2.6;
+/// How far past the barb line the notch shoulder sits, as a fraction of
+/// the head length. The shoulder landing just behind the barbs keeps the
+/// outline sweep monotone (no zigzag fill artifacts) and the notch a
+/// steep, deep concave cut — which is what makes the wing tips wide.
+const ARROW_SHOULDER_PAST: f64 = 0.05;
+/// How far the flat chamfer at each wing tip cuts along the two edges
+/// meeting at the barb, in stroke widths — the tip ends in a short flat
+/// edge instead of a point.
+const ARROW_BARB_CUT_W: f64 = 0.5;
+/// Corner-rounding radius of the notch ends — the chamfered wing tips and
+/// the roots where the notches meet the body — in stroke widths.
+const ARROW_NOTCH_ROUND_W: f64 = 0.30;
 
 /// Direction and head proportions of an arrow.
 struct ArrowFrame {
@@ -265,8 +271,8 @@ impl ArrowFrame {
 
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
 /// needle-thin with a rounded cap at `a` and widens along the whole length,
-/// and the head is a barbed arrowhead with deep concave notches at its base
-/// on each side, their ends rounded. One closed ring (the last point
+/// and the head is a barbed arrowhead whose wings end in wide flat-chamfered
+/// tips between steep concave notches. One closed ring (the last point
 /// connects back to the first); empty for a degenerate zero-length arrow.
 pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
     let Some(frame) = ArrowFrame::new(a, b, width) else {
@@ -274,15 +280,28 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
     };
     let half_body = width * 1.1;
     let tail_r = width * 0.32;
-    let notch_r = width * ARROW_NOTCH_ROUND_W;
+    let round_r = width * ARROW_NOTCH_ROUND_W;
     // The rounded tail cap is a semicircle of radius `tail_r` behind its
     // center; the body widens linearly from `tail_r` to `half_body` up to
-    // where it dips into the head.
+    // the notch shoulder.
     let cap = frame.step(a, tail_r, 0.0);
-    let body_end = frame.step(b, -frame.head_len * (1.0 - ARROW_NOTCH_DEPTH), 0.0);
+    let shoulder = frame.step(b, -frame.head_len * (1.0 + ARROW_SHOULDER_PAST), 0.0);
+    // The notch cuts from the shoulder out to the barb; the barb itself is
+    // replaced by a flat chamfer between points cut `cut` along each edge.
+    let cut = ARROW_BARB_CUT_W * width;
+    let wing = |sign: f64| {
+        let shoulder = frame.step(shoulder, 0.0, half_body * sign);
+        let barb = frame.step(b, -frame.head_len, frame.half_head * sign);
+        let cut = cut
+            .min(0.45 * pt_dist(shoulder, barb))
+            .min(0.45 * pt_dist(barb, b));
+        let on_notch = toward(shoulder, barb, cut);
+        let on_head = toward(barb, b, cut);
+        vec![(shoulder, Some(round_r)), (on_notch, Some(round_r)), (on_head, Some(round_r))]
+    };
     // (point, corner radius) pairs: the cap arc points and the tip stay
     // sharp, the notch ends round.
-    let mut ring: Vec<(super::Point, Option<f64>)> = Vec::with_capacity(16);
+    let mut ring: Vec<(super::Point, Option<f64>)> = Vec::with_capacity(20);
     const CAP_STEPS: usize = 6;
     for k in 0..=CAP_STEPS {
         let t =
@@ -295,14 +314,23 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
             None,
         ));
     }
-    // Top edge of the widening body, the concave notch into the top barb,
-    // the tip, and the mirrored way back.
-    ring.push((frame.step(body_end, 0.0, half_body), Some(notch_r)));
-    ring.push((frame.step(b, -frame.head_len, frame.half_head), Some(notch_r)));
+    // One side's notch and wing, the tip, then the mirrored side walked
+    // back from the head toward the tail.
+    ring.extend(wing(1.0));
     ring.push((b, None));
-    ring.push((frame.step(b, -frame.head_len, -frame.half_head), Some(notch_r)));
-    ring.push((frame.step(body_end, 0.0, -half_body), Some(notch_r)));
+    let lower = wing(-1.0);
+    ring.extend(lower.into_iter().rev());
     round_corners(&ring)
+}
+
+/// The point `dist` along the segment `from` → `to`.
+fn toward(from: super::Point, to: super::Point, dist: f64) -> super::Point {
+    let len = pt_dist(from, to);
+    if len <= f64::EPSILON {
+        return to;
+    }
+    let t = (dist / len).clamp(0.0, 1.0);
+    super::Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
 }
 
 /// Round every corner carrying a radius: the vertex is replaced by a short
@@ -560,7 +588,8 @@ mod tests {
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
         // width 6 over len 48: tail cap radius 1.92 at x≈10, body widening
-        // to half 6.6 at x=39.2, head base at x=32 with half 14.4, tip at b.
+        // to half 6.6 at the shoulder x≈30.8, barbs at x=32 with half 15.6,
+        // tip at b.
         let is_arrow = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
             p[0] > 60 && p[2] > 60 && p[1] < 100 && (p[0] as i32 - p[2] as i32).abs() < 40
@@ -576,24 +605,23 @@ mod tests {
         assert!(is_gray(10, 29), "rounded narrow start");
         // The body is a widening wedge, not a constant-width shaft.
         assert!(is_arrow(25, 32), "body mid-way");
-        assert!(is_arrow(34, 36), "body widened toward the head");
+        assert!(is_arrow(30, 36), "body widened toward the head");
         assert!(is_gray(14, 36), "body still thin near the tail");
-        assert!(is_gray(25, 26), "nothing above the thin mid-body");
-        // The head is a barbed arrowhead: wide at the base, colored apex at
-        // b, and a concave notch void between the barbs and the body. The
-        // body's soft shadow darkens the void, but no magenta fill lands
-        // there: the pixel stays neutral gray (green tracks red), unlike
-        // the wing beside it.
+        assert!(is_gray(25, 25), "nothing above the thin mid-body");
+        // The head is a chevron: wide at the barbs, colored apex at b, and
+        // a steep concave notch cut sweeping from each wide, chamfered wing
+        // tip down to the narrow body (only the soft shadow darkens the
+        // cut, so the pixel stays neutral gray, green tracking red).
         assert!(is_arrow(38, 24), "head above the axis");
         assert!(is_arrow(38, 40), "head below the axis");
         assert!(is_arrow(53, 32), "head apex");
-        assert!(is_gray(38, 18), "nothing beyond the head");
-        let void = pixel(&bytes, 64, 35, 40);
+        assert!(is_gray(38, 16), "nothing beyond the head");
+        let cut = pixel(&bytes, 64, 30, 41);
         assert!(
-            void[1] as i32 > void[0] as i32 / 2,
-            "concave notch void beside the body end: {void:?}"
+            cut[1] as i32 > cut[0] as i32 / 2,
+            "concave notch cut beside the body: {cut:?}"
         );
-        assert!(is_arrow(37, 42), "barb wing over the notch");
+        assert!(is_arrow(33, 43), "wide chamfered wing tip");
         // The fill is a cross-wise gradient — from one notch of the head to
         // the other — lighter above, darker below.
         let top = pixel(&bytes, 64, 38, 23);
@@ -605,9 +633,9 @@ mod tests {
             "darker below: {bottom:?} vs {top:?}"
         );
         // A soft shadow darkens the base just below the body silhouette
-        // (the silhouette itself ends at y≈35.5 here; the shadow peaks a
+        // (the silhouette itself ends at y≈36.2 here; the shadow peaks a
         // hair past it).
-        let below = pixel(&bytes, 64, 20, 36);
+        let below = pixel(&bytes, 64, 20, 37);
         assert!(below[0] < 120 && below[2] < 120, "shadow below: {below:?}");
     }
 
