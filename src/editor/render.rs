@@ -202,7 +202,13 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
 
 /// Arrow from `a` to `b`: a shaft of constant thickness with a flat start
 /// plus a solid triangular head with its apex at `b`.
-fn draw_arrow(ctx: &CGContext, a: super::Point, b: super::Point, color: super::Rgba, width: f64) {
+pub(crate) fn draw_arrow(
+    ctx: &CGContext,
+    a: super::Point,
+    b: super::Point,
+    color: super::Rgba,
+    width: f64,
+) {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt();
     if len < f64::EPSILON {

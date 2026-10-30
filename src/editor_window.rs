@@ -9,7 +9,8 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
-    define_class, extern_methods, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
+    define_class, extern_methods, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker,
+    MainThreadOnly,
 };
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
@@ -20,10 +21,10 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGImage, CGContext};
+use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSString, NSNotification, NSRectEdge};
 
-use crate::editor::hit_test::{Hit, top_hit};
+use crate::editor::hit_test::{Hit, text_bounds, top_hit};
 use crate::editor::text;
 use crate::editor::{
     render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint, OpenShot, Point,
@@ -133,6 +134,17 @@ struct FrameEdit {
     rect: Rect,
 }
 
+/// A callout whose arrow is drawn but whose text is still being entered:
+/// the arrow previews on the canvas and the element is committed (or
+/// dropped) together with the text.
+struct PendingCallout {
+    /// The arrow's start (the text block goes beside it).
+    base: Point,
+    tip: Point,
+    color: Rgba,
+    size: f64,
+}
+
 /// Color presets offered by the popover; magenta is the default.
 const COLOR_PRESETS: [Rgba; 9] = [
     [1.0, 0.0, 1.0, 1.0],  // magenta
@@ -223,6 +235,8 @@ struct EditorIvars {
     text_target: Cell<Option<TextTarget>>,
     /// The active crop/resize frame, if the tool is up.
     frame_edit: RefCell<Option<FrameEdit>>,
+    /// The callout awaiting its text (arrow drawn, editor open).
+    pending_callout: RefCell<Option<PendingCallout>>,
     /// The frame mode's size label and OK button subviews.
     frame_label: RefCell<Option<Retained<NSTextField>>>,
     frame_ok: RefCell<Option<Retained<NSButton>>>,
@@ -262,6 +276,7 @@ define_class!(
                 text_editor: RefCell::new(None),
                 text_target: Cell::new(None),
                 frame_edit: RefCell::new(None),
+                pending_callout: RefCell::new(None),
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
@@ -645,6 +660,21 @@ impl EditorView {
             };
             render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&draw_preview));
         }
+        // The pending callout (arrow drawn, text being entered) previews on
+        // top until the text commits or the input is cancelled.
+        if let Some(pending) = ivars.pending_callout.borrow().as_ref() {
+            let pending_el = Element {
+                id: 0,
+                kind: ElementKind::Callout {
+                    tip: pending.tip,
+                    anchor: pending.base,
+                    text: String::new(),
+                    color: pending.color,
+                    size: pending.size,
+                },
+            };
+            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&pending_el));
+        }
         CGContext::restore_g_state(Some(&cg));
 
         // Selection markers on top, in screen points so they stay constant
@@ -766,7 +796,8 @@ impl EditorView {
         let ivars = self.ivars();
         // Finish any in-flight text edit before interpreting the click.
         self.commit_text_editor();
-        let draft_kind: Option<ElementKind> = match ivars.tool.get() {
+        let tool = ivars.tool.get();
+        let draft_kind: Option<ElementKind> = match tool {
             Some(Tool::Arrow) => Some(ElementKind::Arrow {
                 a: point,
                 b: point,
@@ -792,35 +823,17 @@ impl EditorView {
             Some(Tool::Blur) => Some(ElementKind::Blur {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
             }),
-            // Text and callout take the click, not a drag: open (or
-            // re-open) the field editor.
-            Some(Tool::Text) | Some(Tool::Callout) => {
-                let callout = ivars.tool.get() == Some(Tool::Callout);
-                // A click on an existing text/callout re-edits it in place.
-                let existing = ivars
-                    .shot
-                    .borrow()
-                    .as_ref()
-                    .and_then(|shot| top_hit(shot.doc.elements(), point))
-                    .and_then(|hit| match hit {
-                        Hit::Body(id) => Some(id),
-                        Hit::End(..) => None,
-                    })
-                    .filter(|id| {
-                        ivars.shot.borrow().as_ref().and_then(|shot| shot.doc.element(*id)).is_some_and(
-                            |el| matches!(el.kind, ElementKind::Text { .. } | ElementKind::Callout { .. }),
-                        )
-                    });
-                match existing {
-                    Some(id) => self.begin_text_edit(TextTarget::Existing { id }),
-                    None => self.begin_text_edit(TextTarget::New {
-                        origin: point,
-                        callout,
-                        color: ivars.color.get(),
-                    }),
-                }
-                return;
-            }
+            // The callout draws its arrow by drag, from the base to the
+            // tip; the text follows in the second phase, at mouse-up.
+            Some(Tool::Callout) => Some(ElementKind::Callout {
+                tip: point,
+                anchor: point,
+                text: String::new(),
+                color: ivars.color.get(),
+                size: DEFAULT_TEXT_SIZE_PX,
+            }),
+            // The text tool starts editing on the click (below).
+            Some(Tool::Text) => None,
             // Crop/resize drag the frame's handles; the click never draws
             // or selects elements. The crop frame also drags from any
             // point (moving whole); the resize frame does not move.
@@ -852,8 +865,9 @@ impl EditorView {
             // No tool picked: the click only selects or deselects.
             None => None,
         };
-        // A hit on an existing element decides between moving it and
-        // dragging one of its ends; the empty frame draws a new element.
+        // A hit on an existing element decides between moving it, dragging
+        // one of its ends, and editing its text; the empty frame draws a
+        // new element (or starts a text).
         let hit = ivars
             .shot
             .borrow()
@@ -870,6 +884,21 @@ impl EditorView {
                 }
             }
             Some(Hit::Body(id)) => {
+                // A click on editable text edits it in place; a click on a
+                // callout's arrow moves the whole callout (text follows).
+                if self.hit_edits_text(id, point) {
+                    self.begin_text_edit(TextTarget::Existing { id });
+                    return;
+                }
+                if tool == Some(Tool::Text) && !self.id_is_textlike(id) {
+                    // The text tool starts a new text over any other element.
+                    self.begin_text_edit(TextTarget::New {
+                        origin: point,
+                        callout: false,
+                        color: ivars.color.get(),
+                    });
+                    return;
+                }
                 ivars.selection.set(Some(id));
                 Drag::Move {
                     id,
@@ -880,12 +909,20 @@ impl EditorView {
             }
             _ => {
                 // Drawing on the empty frame starts from a clean selection;
-                // a plain click here is the deselect rule. Without a tool
-                // the click just deselects.
+                // a plain click here is the deselect rule. The text tool
+                // opens its editor instead, the callout needs a drag.
                 ivars.selection.set(None);
-                match draft_kind {
-                    Some(kind) => Drag::Draw(kind),
-                    None => {
+                match (tool, draft_kind) {
+                    (Some(Tool::Text), _) => {
+                        self.begin_text_edit(TextTarget::New {
+                            origin: point,
+                            callout: false,
+                            color: ivars.color.get(),
+                        });
+                        return;
+                    }
+                    (_, Some(kind)) => Drag::Draw(kind),
+                    _ => {
                         self.redraw();
                         return;
                     }
@@ -894,6 +931,39 @@ impl EditorView {
         };
         *ivars.drag.borrow_mut() = Some(drag);
         self.redraw();
+    }
+
+    /// Whether a Body hit at `point` is a click on editable text: a
+    /// callout's text block (any tool) or a text element (text tools only).
+    fn hit_edits_text(&self, id: u64, point: Point) -> bool {
+        let ivars = self.ivars();
+        let kind = ivars
+            .shot
+            .borrow()
+            .as_ref()
+            .and_then(|shot| shot.doc.element(id))
+            .map(|el| el.kind.clone());
+        match kind {
+            Some(ElementKind::Callout { anchor, text, size, .. }) => {
+                text_bounds(anchor, &text, size).is_some_and(|b| b.contains(point))
+            }
+            Some(ElementKind::Text { .. }) => {
+                matches!(ivars.tool.get(), Some(Tool::Text) | Some(Tool::Callout))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the element is a text or callout element.
+    fn id_is_textlike(&self, id: u64) -> bool {
+        self.ivars()
+            .shot
+            .borrow()
+            .as_ref()
+            .and_then(|shot| shot.doc.element(id))
+            .is_some_and(|el| {
+                matches!(el.kind, ElementKind::Text { .. } | ElementKind::Callout { .. })
+            })
     }
 
     fn handle_mouse_dragged(&self, event: &NSEvent) {
@@ -912,6 +982,23 @@ impl EditorView {
                     // Plain click: the draft is discarded and the selection
                     // was already cleared at mouse-down.
                     self.redraw();
+                    return;
+                }
+                // A callout splits into two phases: the drawn arrow stays
+                // up as a pending preview while the text is entered at its
+                // base; the element lands (or is dropped) with the text.
+                if let ElementKind::Callout { anchor, tip, color, size, text: _ } = kind {
+                    *ivars.pending_callout.borrow_mut() = Some(PendingCallout {
+                        base: anchor,
+                        tip,
+                        color,
+                        size,
+                    });
+                    self.begin_text_edit(TextTarget::New {
+                        origin: anchor,
+                        callout: true,
+                        color,
+                    });
                     return;
                 }
                 let mut shot_slot = ivars.shot.borrow_mut();
@@ -980,6 +1067,9 @@ impl EditorView {
             match drag {
                 Drag::Draw(kind) => match kind {
                     ElementKind::Arrow { b, .. } | ElementKind::Line { b, .. } => *b = point,
+                    // The callout's tip follows the cursor; the anchor (its
+                    // base) stays at the drag start.
+                    ElementKind::Callout { tip, .. } => *tip = point,
                     // The drag start stays the origin; the size may go
                     // negative and is standardized at draw/commit time.
                     ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
@@ -1100,6 +1190,9 @@ impl EditorView {
                 (Some(first), Some(last)) => point_dist(*first, *last) >= MIN_DRAG_PX,
                 _ => false,
             },
+            ElementKind::Callout { anchor, tip, .. } => {
+                point_dist(*anchor, *tip) >= MIN_DRAG_PX
+            }
             _ => false,
         }
     }
@@ -1254,14 +1347,28 @@ impl EditorView {
                 color,
             } => {
                 if text.trim().is_empty() {
+                    // An empty commit (and a cancelled input) drops a
+                    // pending callout and adds nothing.
+                    *ivars.pending_callout.borrow_mut() = None;
                     self.redraw();
                     return;
                 }
                 let size = DEFAULT_TEXT_SIZE_PX;
                 let kind = if callout {
+                    let (tip, base) = match ivars.pending_callout.borrow_mut().take() {
+                        Some(pending) => (pending.tip, pending.base),
+                        None => (origin, origin),
+                    };
+                    let base_image = shot.doc.base();
+                    let frame = Rect::new(
+                        0.0,
+                        0.0,
+                        CGImage::width(Some(base_image)) as f64,
+                        CGImage::height(Some(base_image)) as f64,
+                    );
                     ElementKind::Callout {
-                        tip: origin,
-                        anchor: callout_anchor(origin, &text, size),
+                        tip,
+                        anchor: callout_anchor(base, &text, size, frame),
                         text,
                         color,
                         size,
@@ -1305,7 +1412,8 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Drop the open field editor without committing (a new shot arrived).
+    /// Drop the open field editor without committing (a new shot arrived)
+    /// and drop a pending callout with it.
     fn discard_text_editor(&self) {
         let ivars = self.ivars();
         if let Some(field) = ivars.text_editor.borrow_mut().take() {
@@ -1313,6 +1421,7 @@ impl EditorView {
             field.removeFromSuperview();
         }
         ivars.text_target.take();
+        *ivars.pending_callout.borrow_mut() = None;
     }
 
     /// The crop/resize frame rect in image pixels, including an in-flight
@@ -1634,8 +1743,8 @@ impl EditorView {
         // Closes only where the code closes it (a preset pick or a second
         // click on the swatch button), so the toggle stays deterministic.
         popover.setBehavior(objc2_app_kit::NSPopoverBehavior::ApplicationDefined);
-        // SAFETY: the delegate is this canvas view, alive for the process.
-        unsafe { popover.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        // The delegate is this canvas view, alive for the process.
+        popover.setDelegate(Some(ProtocolObject::from_ref(self)));
 
         let content = NSStackView::new(mtm);
         content.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
@@ -1685,14 +1794,11 @@ impl EditorView {
         let content_view: &NSView = &content;
         controller.setView(content_view);
         popover.setContentViewController(Some(&controller));
-        // SAFETY: plain popover presentation with valid rect/view.
-        unsafe {
-            popover.showRelativeToRect_ofView_preferredEdge(
-                anchor_button.bounds(),
-                &anchor_button,
-                NSRectEdge::MinY,
-            );
-        }
+        popover.showRelativeToRect_ofView_preferredEdge(
+            anchor_button.bounds(),
+            &anchor_button,
+            NSRectEdge::MinY,
+        );
         *self.ivars().color_popover.borrow_mut() = Some(popover);
     }
 }
@@ -1702,14 +1808,18 @@ fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
-/// Top-left of a new callout's text block: above-right of the tip.
-fn callout_anchor(tip: Point, text: &str, size: f64) -> Point {
-    let height = text::measure_block(text, size)
-        .map(|m| m.height)
-        .unwrap_or(size * 1.25);
+/// Top-left of a new callout's text block: above the base, clamped so the
+/// whole block stays inside the frame (in image pixels).
+fn callout_anchor(base: Point, text: &str, size: f64, frame: Rect) -> Point {
+    let (w, h) = text::measure_block(text, size)
+        .map(|m| (m.width, m.height))
+        .unwrap_or((size * 4.0, size * 1.25));
+    let margin = 4.0;
+    let max_x = (frame.max_x() - w - margin).max(margin);
+    let max_y = (frame.max_y() - h - margin).max(margin);
     Point::new(
-        tip.x + CALLOUT_TEXT_OFFSET_PX,
-        (tip.y - height - 6.0).max(0.0),
+        (base.x - w / 2.0).clamp(margin, max_x),
+        (base.y - h - 6.0).clamp(margin, max_y),
     )
 }
 
@@ -1766,6 +1876,11 @@ fn rect_corners(rect: Rect) -> [Point; 4] {
 
 /// An SF Symbol toolbar button with an empty title, tagged with the tool.
 fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NSButton> {
+    icon_button(mtm, symbol_image(symbol), tag)
+}
+
+/// The SF Symbol image at the shared icon size.
+fn symbol_image(symbol: &str) -> Retained<NSImage> {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(symbol),
         Some(&NSString::from_str(symbol)),
@@ -1776,9 +1891,15 @@ fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NS
         // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
         unsafe { NSFontWeightRegular },
     );
-    let image = image
+    image
         .imageWithSymbolConfiguration(&config)
-        .expect("configured symbol");
+        .expect("configured symbol")
+}
+
+/// A toolbar button showing `image` as a template (tinted like the SF
+/// Symbols), with an empty title and the given tag.
+fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> Retained<NSButton> {
+    image.setTemplate(true);
     // SAFETY: class convenience constructor, no external invariants.
     let button = unsafe {
         NSButton::buttonWithTitle_image_target_action(
@@ -1791,6 +1912,30 @@ fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NS
     };
     button.setTag(tag);
     button
+}
+
+/// The custom callout icon: a text block plus an arrow — the two shapes
+/// the tool draws (the SF Symbols set has no such glyph).
+fn callout_icon() -> Retained<NSImage> {
+    // A 2x bitmap shown at 15 pt; the context's Y-up space puts the text
+    // bars on top and the arrow at the bottom-right.
+    let ctx = render::bitmap_context(30, 30).expect("icon context");
+    CGContext::set_rgb_fill_color(Some(&ctx), 0.0, 0.0, 0.0, 1.0);
+    for (y, len) in [(24.0, 12.0), (19.0, 8.0), (14.0, 10.0)] {
+        CGContext::fill_rect(
+            Some(&ctx),
+            CGRect::new(CGPoint::new(4.0, y), CGSize::new(len, 2.2)),
+        );
+    }
+    render::draw_arrow(
+        &ctx,
+        Point::new(15.0, 3.0),
+        Point::new(26.0, 13.0),
+        [0.0, 0.0, 0.0, 1.0],
+        2.6,
+    );
+    let image = CGBitmapContextCreateImage(Some(&ctx)).expect("icon image");
+    NSImage::initWithCGImage_size(NSImage::alloc(), &image, CGSize::new(15.0, 15.0))
 }
 
 impl EditorWindow {
@@ -1836,7 +1981,10 @@ impl EditorWindow {
         }
         let mut tool_buttons = Vec::new();
         for tool in Tool::all() {
-            let button = symbol_button(mtm, tool.symbol(), tool.tag());
+            let button = match tool {
+                Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
+                other => symbol_button(mtm, other.symbol(), other.tag()),
+            };
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
                 button.setTarget(Some(&view));
