@@ -1749,7 +1749,7 @@ impl EditorView {
                     iw as f64,
                     ih as f64,
                     visible.width,
-                    visible.height - 2.0 * TOOLBAR_HEIGHT,
+                    visible.height - TOOLBAR_HEIGHT,
                 )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
@@ -1757,7 +1757,7 @@ impl EditorView {
         let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
             width,
-            content_size.height + 2.0 * TOOLBAR_HEIGHT,
+            content_size.height + TOOLBAR_HEIGHT,
         ));
         window.center();
         self.redraw();
@@ -2067,7 +2067,7 @@ impl EditorWindow {
                 KeyableWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + 2.0 * TOOLBAR_HEIGHT),
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_HEIGHT),
                 ),
                 NSWindowStyleMask::Borderless,
                 NSBackingStoreType::Buffered,
@@ -2087,25 +2087,10 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // Toolbar: the ◄/► leafing strip stays at the top left; the
-        // editing toolbar sits at the bottom, Monosnap-style — color
-        // swatch with a preset popover, stroke-width slider, then the
-        // tools in Monosnap order.
-        let pages = NSStackView::new(mtm);
-        pages.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        pages.setSpacing(6.0);
-        for (tag, symbol) in [
-            (PAGE_PREV_TAG, "chevron.left"),
-            (PAGE_NEXT_TAG, "chevron.right"),
-        ] {
-            let button = symbol_button(mtm, symbol, tag);
-            // SAFETY: target is this canvas view, alive for the process.
-            unsafe {
-                button.setTarget(Some(&view));
-                button.setAction(Some(sel!(pageClicked:)));
-            }
-            pages.addArrangedSubview(&button);
-        }
+        // Toolbar: the editing toolbar sits at the bottom, Monosnap-style —
+        // color swatch with a preset popover, stroke-width slider, then the
+        // tools in Monosnap order; the ◄/► leafing buttons trail at the end
+        // until the floating panel takes them in.
         let toolbar = NSStackView::new(mtm);
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(6.0);
@@ -2150,11 +2135,23 @@ impl EditorWindow {
             toolbar.addArrangedSubview(&button);
             tool_buttons.push((tool.tag(), button));
         }
+        for (tag, symbol) in [
+            (PAGE_PREV_TAG, "chevron.left"),
+            (PAGE_NEXT_TAG, "chevron.right"),
+        ] {
+            let button = symbol_button(mtm, symbol, tag);
+            // SAFETY: target is this canvas view, alive for the process.
+            unsafe {
+                button.setTarget(Some(&view));
+                button.setAction(Some(sel!(pageClicked:)));
+            }
+            toolbar.addArrangedSubview(&button);
+        }
 
-        // Layout: ◄/► strip pinned to the top, editing toolbar pinned to
-        // the bottom, canvas filling the space between. The flexible
-        // max-Y margin keeps the bottom bar down when the window grows;
-        // the canvas grows into the freed space.
+        // Layout: the editing toolbar pinned to the bottom, the canvas
+        // filling everything above it. The flexible max-Y margin keeps the
+        // bottom bar down when the window grows; the canvas grows into the
+        // freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
         // The container clips its subviews to the rounded window shape.
@@ -2168,15 +2165,6 @@ impl EditorWindow {
         let min_width = toolbar.fittingSize().width + 16.0;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        pages.setFrame(CGRect::new(
-            CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT),
-            CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
-        ));
-        pages.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewMinYMargin,
-        );
-        content.addSubview(&pages);
         toolbar.setFrame(CGRect::new(
             CGPoint::new(8.0, 0.0),
             CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
@@ -2186,7 +2174,7 @@ impl EditorWindow {
                 | NSAutoresizingMaskOptions::ViewMaxYMargin,
         );
         content.addSubview(&toolbar);
-        let canvas_height = size.height - 2.0 * TOOLBAR_HEIGHT;
+        let canvas_height = size.height - TOOLBAR_HEIGHT;
         view.setFrame(CGRect::new(
             CGPoint::new(0.0, TOOLBAR_HEIGHT),
             CGSize::new(size.width, canvas_height),
