@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{
     define_class, extern_methods, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker,
     MainThreadOnly,
@@ -17,7 +17,7 @@ use objc2_app_kit::{
     NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
     NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
     NSImageSymbolConfiguration, NSLineBreakMode, NSPopover, NSPopoverDelegate, NSScreen,
-    NSSlider, NSStackView, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSStackView, NSTextField, NSTextFieldDelegate, NSTextView,
     NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
     NSViewController, NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
 };
@@ -68,7 +68,13 @@ const STROKE_MIN: f64 = 1.0;
 const STROKE_MAX: f64 = 12.0;
 
 /// Width of the stroke-width slider in the toolbar, in points.
-const STROKE_SLIDER_WIDTH_PT: f64 = 115.0;
+const STROKE_SLIDER_WIDTH_PT: f64 = 90.0;
+
+/// Knob radius of the custom stroke-width slider, in points.
+const SLIDER_KNOB_RADIUS: f64 = 6.5;
+
+/// Height of the custom stroke-width slider's track, in points.
+const SLIDER_TRACK_HEIGHT: f64 = 3.0;
 
 /// A drag shorter than this (in image pixels) is a plain click, not a
 /// drawn element.
@@ -315,6 +321,224 @@ impl ToolbarPanel {
     }
 }
 
+/// Ivars of the custom stroke-width slider.
+struct WidthSliderIvars {
+    value: Cell<f64>,
+    target: RefCell<Option<Retained<AnyObject>>>,
+    action: Cell<Option<Sel>>,
+}
+
+define_class!(
+    /// The custom-drawn stroke-width slider: a thin track, an accent fill
+    /// and a white round knob. The contract mirrors the `NSSlider` it
+    /// replaced — `doubleValue` is what the editor's `widthChanged:` reads
+    /// and `setDoubleValue:` is what syncs the knob with the selection —
+    /// but it draws itself and reports every drag step (the width edits
+    /// collapse into one undo step anyway).
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = WidthSliderIvars]
+    struct WidthSliderView;
+
+    unsafe impl NSObjectProtocol for WidthSliderView {}
+
+    impl WidthSliderView {
+        #[unsafe(method_id(initWithFrame:))]
+        unsafe fn __init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self> {
+            let this = this.set_ivars(WidthSliderIvars {
+                value: Cell::new(DEFAULT_STROKE_WIDTH),
+                target: RefCell::new(None),
+                action: Cell::new(None),
+            });
+            // SAFETY: NSView's designated initializer with plain ivars set.
+            unsafe { msg_send![super(this), initWithFrame: frame_rect] }
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn __accepts_first_responder(&self) -> bool {
+            // Keys stay with the canvas, like every other toolbar control.
+            false
+        }
+
+        #[unsafe(method(doubleValue))]
+        fn __double_value(&self) -> f64 {
+            self.ivars().value.get()
+        }
+
+        #[unsafe(method(setDoubleValue:))]
+        fn __set_double_value(&self, value: f64) {
+            self.set_value(value.clamp(STROKE_MIN, STROKE_MAX));
+        }
+
+        #[unsafe(method(setTarget:))]
+        unsafe fn __set_target(&self, target: Option<&AnyObject>) {
+            *self.ivars().target.borrow_mut() = target.and_then(|target| {
+                // SAFETY: the target outlives the slider's use of it — the
+                // editor view owns both ends of the pair.
+                unsafe { Retained::retain((target as *const AnyObject).cast_mut()) }
+            });
+        }
+
+        #[unsafe(method(setAction:))]
+        unsafe fn __set_action(&self, action: Option<Sel>) {
+            self.ivars().action.set(action);
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn __draw_rect(&self, _dirty_rect: CGRect) {
+            self.draw();
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn __mouse_dragged(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn __mouse_up(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+    }
+);
+
+impl WidthSliderView {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        unsafe fn init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self>;
+
+        #[unsafe(method(setTarget:))]
+        unsafe fn set_target(&self, target: Option<&AnyObject>);
+
+        #[unsafe(method(setAction:))]
+        unsafe fn set_action(&self, action: Option<Sel>);
+
+        #[unsafe(method(setDoubleValue:))]
+        fn set_double_value(&self, value: f64);
+    );
+
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: designated initializer with plain ivars set.
+        unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
+    }
+
+    /// Center X of the knob for the current value, in view points.
+    fn knob_x(&self, width: f64) -> f64 {
+        let frac = ((self.ivars().value.get() - STROKE_MIN) / (STROKE_MAX - STROKE_MIN))
+            .clamp(0.0, 1.0);
+        SLIDER_KNOB_RADIUS + (width - 2.0 * SLIDER_KNOB_RADIUS) * frac
+    }
+
+    /// Store the value, redraw, and report the change through the
+    /// target/action pair (the `widthChanged:` editor handler).
+    fn set_value(&self, value: f64) {
+        let old = self.ivars().value.get();
+        self.ivars().value.set(value);
+        if value == old {
+            return;
+        }
+        self.setNeedsDisplayInRect(self.bounds());
+        self.send_action();
+    }
+
+    /// Track the drag (or a plain click) to the event's X position.
+    fn drag_to(&self, event: &NSEvent) {
+        let bounds = self.bounds();
+        if bounds.size.width < 2.0 * SLIDER_KNOB_RADIUS {
+            return;
+        }
+        let local = self.convertPoint_fromView(event.locationInWindow(), None);
+        let frac = ((local.x - SLIDER_KNOB_RADIUS)
+            / (bounds.size.width - 2.0 * SLIDER_KNOB_RADIUS))
+        .clamp(0.0, 1.0);
+        self.set_value(STROKE_MIN + (STROKE_MAX - STROKE_MIN) * frac);
+    }
+
+    /// Fire the target/action pair like a control would.
+    fn send_action(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let action = self.ivars().action.get();
+        let target = self.ivars().target.borrow().clone();
+        if let Some(action) = action {
+            // SAFETY: main-thread target/action pair; the action takes the
+            // slider as its sender.
+            unsafe {
+                NSApplication::sharedApplication(mtm).sendAction_to_from(
+                    action,
+                    target.as_deref(),
+                    Some(self),
+                );
+            }
+        }
+    }
+
+    /// The track, the accent fill up to the knob, and the white knob.
+    fn draw(&self) {
+        let Some(context) = NSGraphicsContext::currentContext() else {
+            return;
+        };
+        let cg = context.CGContext();
+        let bounds = self.bounds();
+        let (w, h) = (bounds.size.width, bounds.size.height);
+        if w < 2.0 * SLIDER_KNOB_RADIUS {
+            return;
+        }
+        let knob_x = self.knob_x(w);
+        let track_y = h / 2.0 - SLIDER_TRACK_HEIGHT / 2.0;
+        // The recessed track behind the fill.
+        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, 0.22);
+        CGContext::fill_rect(
+            Some(&cg),
+            CGRect::new(
+                CGPoint::new(SLIDER_KNOB_RADIUS, track_y),
+                CGSize::new(w - 2.0 * SLIDER_KNOB_RADIUS, SLIDER_TRACK_HEIGHT),
+            ),
+        );
+        // The accent fill from the left end to the knob center.
+        let filled = knob_x - SLIDER_KNOB_RADIUS;
+        if filled > 0.0 {
+            let accent: Retained<NSColor> = NSColor::controlAccentColor();
+            let accent_cg = accent.CGColor();
+            CGContext::set_fill_color_with_color(Some(&cg), Some(&accent_cg));
+            CGContext::fill_rect(
+                Some(&cg),
+                CGRect::new(
+                    CGPoint::new(SLIDER_KNOB_RADIUS, track_y),
+                    CGSize::new(filled, SLIDER_TRACK_HEIGHT),
+                ),
+            );
+        }
+        // The knob: a white disc with a soft shadow.
+        let knob = CGRect::new(
+            CGPoint::new(knob_x - SLIDER_KNOB_RADIUS, h / 2.0 - SLIDER_KNOB_RADIUS),
+            CGSize::new(2.0 * SLIDER_KNOB_RADIUS, 2.0 * SLIDER_KNOB_RADIUS),
+        );
+        let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+        let shadow_cg = shadow.CGColor();
+        CGContext::set_shadow_with_color(
+            Some(&cg),
+            CGSize::new(0.0, 1.0),
+            2.0,
+            Some(&shadow_cg),
+        );
+        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, 1.0);
+        CGContext::fill_ellipse_in_rect(Some(&cg), knob);
+        CGContext::set_shadow_with_color(Some(&cg), CGSize::ZERO, 0.0, None);
+    }
+}
+
 pub struct EditorWindow {
     pub window: Retained<KeyableWindow>,
     view: Retained<EditorView>,
@@ -355,8 +579,8 @@ struct EditorIvars {
     color_button: RefCell<Option<Retained<NSButton>>>,
     /// The open color popover, if any.
     color_popover: RefCell<Option<Retained<NSPopover>>>,
-    /// The stroke-width slider (its handle mirrors the selection's width).
-    width_slider: RefCell<Option<Retained<NSSlider>>>,
+    /// The stroke-width slider (its knob mirrors the selection's width).
+    width_slider: RefCell<Option<Retained<WidthSliderView>>>,
     /// The floating toolbar panel (hover hit-testing target).
     toolbar_panel: RefCell<Option<Retained<ToolbarPanel>>>,
     /// The smallest content width that fits the whole toolbar.
@@ -1377,7 +1601,7 @@ impl EditorView {
         });
         let Some(width) = width else { return };
         let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
-        slider.setDoubleValue(clamped);
+        slider.set_double_value(clamped);
         self.ivars().stroke_width.set(clamped);
     }
 
@@ -2322,21 +2546,15 @@ impl EditorWindow {
             color_button.setAction(Some(sel!(colorClicked:)));
         }
         toolbar.addArrangedSubview(&color_button);
-        // SAFETY: class convenience constructor for the slider.
-        let slider = unsafe {
-            objc2_app_kit::NSSlider::sliderWithValue_minValue_maxValue_target_action(
-                DEFAULT_STROKE_WIDTH,
-                STROKE_MIN,
-                STROKE_MAX,
-                Some(&view),
-                Some(sel!(widthChanged:)),
-                mtm,
-            )
-        };
-        slider.setFocusRingType(NSFocusRingType::None);
-        slider.setRefusesFirstResponder(true);
-        // The convenience constructor leaves the slider a sliver wide; the
-        // width control needs room to drag precisely.
+        // The custom stroke-width slider: track, accent fill, round knob.
+        let slider = WidthSliderView::new(mtm);
+        // SAFETY: target is this canvas view, alive for the process; the
+        // action reads `doubleValue` off the sender.
+        unsafe {
+            slider.set_target(Some(&*view));
+            slider.set_action(Some(sel!(widthChanged:)));
+        }
+        // The width control needs room to drag precisely.
         slider.setFrame(CGRect::new(
             CGPoint::ZERO,
             CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
