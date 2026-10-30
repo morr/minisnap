@@ -13,13 +13,16 @@ use objc2::{
     MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
-    NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
-    NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSLineBreakMode, NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
-    NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
+    NSAppearance, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton,
+    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
+    NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
+    NSImageSymbolConfiguration, NSLineBreakMode, NSPopover, NSPopoverDelegate, NSScreen,
+    NSSlider, NSStackView, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
+    NSViewController, NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
 };
+use objc2_app_kit::NSAppearanceCustomization;
+use objc2_app_kit::NSAppearanceNameDarkAqua;
 use objc2_app_kit::NSLayoutConstraintOrientation;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -89,6 +92,20 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
+
+/// Toolbar tag of the color-swatch button: its layer background is the
+/// current color, so hover styling skips it.
+const COLOR_BUTTON_TAG: isize = -1;
+
+/// Toolbar button side, in points.
+const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(26.0, 26.0);
+
+/// Tint of an inactive toolbar symbol: near-white, readable on the dark
+/// HUD panel regardless of the system appearance.
+const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+
+/// Hover background of a toolbar button: a faint white wash.
+const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
 
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
@@ -340,6 +357,8 @@ struct EditorIvars {
     color_popover: RefCell<Option<Retained<NSPopover>>>,
     /// The stroke-width slider (its handle mirrors the selection's width).
     width_slider: RefCell<Option<Retained<NSSlider>>>,
+    /// The floating toolbar panel (hover hit-testing target).
+    toolbar_panel: RefCell<Option<Retained<ToolbarPanel>>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
 }
@@ -377,6 +396,7 @@ define_class!(
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
                 width_slider: RefCell::new(None),
+                toolbar_panel: RefCell::new(None),
                 min_width: Cell::new(0.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -453,6 +473,21 @@ define_class!(
                 let rect = self.spot_cursor_rect(point);
                 self.addCursorRect_cursor(rect, &cursor);
             }
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn __mouse_entered(&self, event: &NSEvent) {
+            self.hover_at(Some(event));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn __mouse_exited(&self, _event: &NSEvent) {
+            self.hover_at(None);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn __mouse_moved(&self, event: &NSEvent) {
+            self.hover_at(Some(event));
         }
 
         #[unsafe(method(frameOkClicked:))]
@@ -1852,28 +1887,83 @@ impl EditorView {
         }
     }
 
-    /// Accent-tint the active tool's button, clear the others.
-    fn update_tool_highlight(&self) {
+    /// Restyle the toolbar button under the cursor: a faint wash on the
+    /// hovered button, nothing on the others. The active tool's button and
+    /// the color swatch own their backgrounds and are skipped.
+    fn hover_at(&self, event: Option<&NSEvent>) {
+        let hovered = event.and_then(|event| {
+            let panel = self.ivars().toolbar_panel.borrow().clone()?;
+            let point = panel.convertPoint_fromView(event.locationInWindow(), None);
+            let hit = panel.hitTest(point)?;
+            hit.downcast_ref::<NSButton>()
+                .map(|button| button.tag() as isize)
+        });
         let active = self.ivars().tool.get().map(|tool| tool.tag());
+        // The active tool's accent background reads as a highlight already.
+        let hovered = if hovered.is_some() && hovered == active {
+            None
+        } else {
+            hovered
+        };
+        let hover = NSColor::colorWithSRGBRed_green_blue_alpha(
+            HOVER_BG[0],
+            HOVER_BG[1],
+            HOVER_BG[2],
+            HOVER_BG[3],
+        );
         for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if Some(*tag) == active {
-                let accent: Retained<NSColor> = NSColor::controlAccentColor();
-                button.setBezelColor(Some(&accent));
-            } else {
-                button.setBezelColor(None);
+            if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
+                continue;
+            }
+            if let Some(layer) = button.layer() {
+                let bg: Option<&NSColor> = if Some(*tag) == hovered {
+                    Some(&hover)
+                } else {
+                    None
+                };
+                layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
             }
         }
     }
 
-    /// Show the current color on the toolbar swatch.
+    /// Accent-wash the active tool's button, white-tint the others.
+    fn update_tool_highlight(&self) {
+        let active = self.ivars().tool.get().map(|tool| tool.tag());
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
+            ICON_TINT[0],
+            ICON_TINT[1],
+            ICON_TINT[2],
+            ICON_TINT[3],
+        );
+        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+            if Some(*tag) == active {
+                let bg = accent.colorWithAlphaComponent(0.25);
+                if let Some(layer) = button.layer() {
+                    layer.setBackgroundColor(Some(&bg.CGColor()));
+                }
+                button.setContentTintColor(Some(&accent));
+            } else {
+                if let Some(layer) = button.layer() {
+                    layer.setBackgroundColor(None);
+                }
+                button.setContentTintColor(Some(&icon));
+            }
+        }
+    }
+
+    /// Show the current color on the toolbar swatch circle.
     fn update_color_swatch(&self) {
         let button = self.ivars().color_button.borrow().clone();
         let Some(button) = button.as_ref() else {
             return;
         };
+        let Some(layer) = button.layer() else {
+            return;
+        };
         let [r, g, b, a] = self.ivars().color.get();
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
-        button.setBezelColor(Some(&color));
+        layer.setBackgroundColor(Some(&color.CGColor()));
     }
 
     /// Open (or close) the color preset popover under the swatch button.
@@ -1930,15 +2020,14 @@ impl EditorView {
             button.setFocusRingType(NSFocusRingType::None);
             button.setRefusesFirstResponder(true);
             if let Some(layer) = button.layer() {
-                // SAFETY: plain CGColor bridge of a live color.
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
-                layer.setCornerRadius(8.0);
+                layer.setCornerRadius(10.0);
                 // A visible outline: light presets (white) would blend into
                 // the popover background.
                 layer.setBorderWidth(1.0);
                 layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
             }
-            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(18.0, 18.0)));
+            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(20.0, 20.0)));
             button.setTag(index as isize);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
@@ -2067,8 +2156,9 @@ fn symbol_image(symbol: &str) -> Retained<NSImage> {
 }
 
 /// A toolbar button showing `image` as a template (tinted like the SF
-/// Symbols), with an empty title and the given tag. Toolbar buttons never
-/// take first responder: no focus ring, keys stay with the canvas.
+/// Symbols), with an empty title and the given tag. Bezel-less: the hover
+/// wash and the active-tool accent are layer backgrounds. Toolbar buttons
+/// never take first responder: no focus ring, keys stay with the canvas.
 fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> Retained<NSButton> {
     image.setTemplate(true);
     // SAFETY: class convenience constructor, no external invariants.
@@ -2084,6 +2174,12 @@ fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> R
     button.setTag(tag);
     button.setFocusRingType(NSFocusRingType::None);
     button.setRefusesFirstResponder(true);
+    button.setBordered(false);
+    button.setWantsLayer(true);
+    if let Some(layer) = button.layer() {
+        layer.setCornerRadius(6.0);
+    }
+    button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
     button
 }
 
@@ -2133,6 +2229,13 @@ impl EditorWindow {
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         window.setHasShadow(true);
+        // The dark HUD panel, the tints and the label all resolve against
+        // the dark appearance.
+        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
+            window.setAppearance(Some(&dark));
+        }
+        // Toolbar hover styling rides on mouse-moved events.
+        window.setAcceptsMouseMovedEvents(true);
         // The window lives in the app controller for the whole process;
         // closing only hides it, the next shot reuses it (no second window).
         // SAFETY: plain setter on the freshly created window.
@@ -2152,9 +2255,25 @@ impl EditorWindow {
             layer.setCornerRadius(WINDOW_RADIUS);
             layer.setMasksToBounds(true);
         }
+        // Hover styling: one tracking area over the panel, owned by the
+        // canvas view — it holds the button list and the active tool.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                CGRect::ZERO,
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&*view),
+                None,
+            )
+        };
+        panel.addTrackingArea(&tracking);
         let toolbar = NSStackView::new(mtm);
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(6.0);
+        let mut tool_buttons = Vec::new();
         for (tag, symbol) in [
             (PAGE_PREV_TAG, "chevron.left"),
             (PAGE_NEXT_TAG, "chevron.right"),
@@ -2166,6 +2285,7 @@ impl EditorWindow {
                 button.setAction(Some(sel!(pageClicked:)));
             }
             toolbar.addArrangedSubview(&button);
+            tool_buttons.push((tag, button));
         }
         let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -2178,7 +2298,24 @@ impl EditorWindow {
         );
         toolbar.addArrangedSubview(&file_label);
         toolbar.setCustomSpacing_afterView(14.0, &file_label);
-        let color_button = symbol_button(mtm, "paintpalette", -1);
+        // The color swatch: a circle showing the current color (no symbol);
+        // the popover with the presets opens on click.
+        // SAFETY: class convenience constructor, plain setters afterwards.
+        let color_button = unsafe {
+            NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, mtm)
+        };
+        color_button.setTag(COLOR_BUTTON_TAG);
+        color_button.setFocusRingType(NSFocusRingType::None);
+        color_button.setRefusesFirstResponder(true);
+        color_button.setBordered(false);
+        color_button.setWantsLayer(true);
+        if let Some(layer) = color_button.layer() {
+            layer.setCornerRadius(10.0);
+            // A hairline outline keeps light presets visible on the panel.
+            layer.setBorderWidth(1.0);
+            layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
+        }
+        color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(20.0, 20.0)));
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
             color_button.setTarget(Some(&view));
@@ -2205,7 +2342,6 @@ impl EditorWindow {
             CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
         ));
         toolbar.addArrangedSubview(&slider);
-        let mut tool_buttons = Vec::new();
         for tool in Tool::all() {
             let button = match tool {
                 Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
@@ -2274,6 +2410,7 @@ impl EditorWindow {
         *view.ivars().color_button.borrow_mut() = Some(color_button);
         *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
+        *view.ivars().toolbar_panel.borrow_mut() = Some(panel);
         view.update_tool_highlight();
         view.update_color_swatch();
 

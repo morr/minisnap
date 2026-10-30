@@ -52,6 +52,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSText",
     "NSButton",
     "NSStackView",
+    "NSAppearance",
     "NSColor",
     "NSFont",
     "NSFontDescriptor",
