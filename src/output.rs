@@ -74,15 +74,16 @@ fn timestamp_components(unix_secs: i64, utc_offset_secs: i64) -> (i64, u32, u32,
     )
 }
 
-/// `MiniSnap YYYY-MM-DD HH-MM-SS` in local time.
+/// `MiniSnap_YYYY-MM-DD_HH-MM-SS` in local time. Underscores, never spaces:
+/// the default name must stay gap-free.
 fn shot_base_name(unix_secs: i64, utc_offset_secs: i64) -> String {
     let (y, mo, d, h, mi, s) = timestamp_components(unix_secs, utc_offset_secs);
-    format!("MiniSnap {y:04}-{mo:02}-{d:02} {h:02}-{mi:02}-{s:02}")
+    format!("MiniSnap_{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}")
 }
 
 /// First unused `MiniSnap …png` path for the given local time. Same-second
-/// collisions get a Finder-style ` (2)`, ` (3)`… suffix; a nanosecond
-/// fallback guarantees the name is free even after 999 shots in one second.
+/// collisions get a `_2`, `_3`… suffix; a nanosecond fallback guarantees the
+/// name is free even after 999 shots in one second.
 fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64) -> PathBuf {
     let base = shot_base_name(unix_secs, utc_offset_secs);
     let first = dir.join(format!("{base}.png"));
@@ -90,7 +91,7 @@ fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64) -> PathBuf
         return first;
     }
     for n in 2..1000u32 {
-        let candidate = dir.join(format!("{base} ({n}).png"));
+        let candidate = dir.join(format!("{base}_{n}.png"));
         if !candidate.exists() {
             return candidate;
         }
@@ -99,7 +100,7 @@ fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64) -> PathBuf
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    dir.join(format!("{base} ({nanos}).png"))
+    dir.join(format!("{base}_{nanos}.png"))
 }
 
 /// System time zone offset from UTC, in seconds.
@@ -133,10 +134,12 @@ pub(crate) fn encode_png_atomic(image: &CGImage, path: &Path) -> Result<(), Stri
 }
 
 /// Does this file name match the app's own shot pattern —
-/// `MiniSnap …png`, with an optional ` (n)` before the extension?
-/// Foreign files in the folder never match and are never touched.
+/// `MiniSnap …png`, with an optional `_2`, `_3`… before the extension?
+/// The space-separated prefix is the pre-underscore naming; it stays matched
+/// so retention keeps cleaning shots saved by older builds. Foreign files in
+/// the folder never match and are never touched.
 fn is_shot_file_name(name: &str) -> bool {
-    name.starts_with("MiniSnap ") && name.ends_with(".png")
+    (name.starts_with("MiniSnap_") || name.starts_with("MiniSnap ")) && name.ends_with(".png")
 }
 
 /// All shot files in `dir`, oldest first (by modification time, name as
@@ -174,7 +177,7 @@ pub fn enforce_retention(dir: &Path, limit: u32) {
     }
 }
 
-/// Save the shot silently as `dir/MiniSnap YYYY-MM-DD HH-MM-SS.png`, creating
+/// Save the shot silently as `dir/MiniSnap_YYYY-MM-DD_HH-MM-SS.png`, creating
 /// `dir` (and parents) on demand, numbering same-second collisions and
 /// enforcing the retention limit. Returns the file path.
 pub fn save_to_file(image: &CGImage, dir: &Path, retention: u32) -> Result<PathBuf, String> {
@@ -308,7 +311,18 @@ mod tests {
     #[test]
     fn base_name_matches_spec_pattern() {
         // 2026-10-29 12:34:56 UTC rendered with a +3h offset.
-        assert_eq!(shot_base_name(1793277296, 3 * 3600), "MiniSnap 2026-10-29 15-34-56");
+        assert_eq!(shot_base_name(1793277296, 3 * 3600), "MiniSnap_2026-10-29_15-34-56");
+    }
+
+    #[test]
+    fn shot_file_name_matches_current_and_legacy_patterns() {
+        assert!(is_shot_file_name("MiniSnap_2026-10-29_15-34-56.png"));
+        assert!(is_shot_file_name("MiniSnap_2026-10-29_15-34-56_2.png"));
+        // Space-separated names are the pre-underscore legacy pattern.
+        assert!(is_shot_file_name("MiniSnap 2026-10-29 15-34-56.png"));
+        assert!(!is_shot_file_name("MiniSnap notes.txt"));
+        assert!(!is_shot_file_name("minisnap_lower.png"));
+        assert!(!is_shot_file_name("holiday photo.png"));
     }
 
     #[test]
@@ -323,11 +337,11 @@ mod tests {
         fs::write(&first, b"x").unwrap();
 
         let second = unique_shot_path(&dir, 1793277296, 0);
-        assert_eq!(second, dir.join(format!("{base} (2).png")));
+        assert_eq!(second, dir.join(format!("{base}_2.png")));
         fs::write(&second, b"x").unwrap();
 
         let third = unique_shot_path(&dir, 1793277296, 0);
-        assert_eq!(third, dir.join(format!("{base} (3).png")));
+        assert_eq!(third, dir.join(format!("{base}_3.png")));
 
         // A different second is unaffected by the collisions.
         let other = unique_shot_path(&dir, 1793277296 + 1, 0);
@@ -350,7 +364,7 @@ mod tests {
         // Second save in the same second gets the collision number.
         let second = save_to_file(&frame, &nested, 100).expect("save again");
         assert_ne!(path, second);
-        assert!(second.to_string_lossy().contains(" (2)"));
+        assert!(second.to_string_lossy().ends_with("_2.png"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -368,7 +382,7 @@ mod tests {
         let mut names = Vec::new();
         for i in 0..101u32 {
             let name = format!(
-                "MiniSnap 2026-01-01 {:02}-{:02}-{:02}.png",
+                "MiniSnap_2026-01-01_{:02}-{:02}-{:02}.png",
                 i / 3600,
                 (i / 60) % 60,
                 i % 60

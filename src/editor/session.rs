@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn round_trips_original_and_journal() {
         let root = tmp_root("roundtrip");
-        let shot = Path::new("MiniSnap 2026-10-29 12-00-00.png");
+        let shot = Path::new("MiniSnap_2026-10-29_12-00-00.png");
         let frame = solid_frame(32, 32);
         let commands = sample_commands();
         save(&root, shot, &frame, &commands).expect("save");
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn missing_session_reads_as_no_history() {
         let root = tmp_root("missing");
-        let shot = Path::new("MiniSnap 2026-10-29 12-00-01.png");
+        let shot = Path::new("MiniSnap_2026-10-29_12-00-01.png");
         assert!(load(&root, shot).is_none());
         // A corrupted journal also degrades to "no history" instead of
         // poisoning the editor.
@@ -280,14 +280,14 @@ mod tests {
         use crate::editor::{Element, ElementKind};
 
         let root = tmp_root("openshot");
-        let shot = root.join("MiniSnap 2026-10-29 12-00-00.png");
+        let shot = root.join("MiniSnap_2026-10-29_12-00-00.png");
         let frame = solid_frame(32, 32);
         crate::output::encode_png(&frame, &shot).expect("write the shot file");
 
         // First open: no session, the file itself is the original.
         let mut open = OpenShot::open(shot.clone(), &root).expect("open");
         assert!(!open.doc.can_undo());
-        assert_eq!(open.file_name(), "MiniSnap 2026-10-29 12-00-00.png");
+        assert_eq!(open.file_name(), "MiniSnap_2026-10-29_12-00-00.png");
 
         // One edit: the file on disk updates immediately.
         open.apply(Command::AddElement(Element {
@@ -328,16 +328,16 @@ mod tests {
         // Sequential creation with a small pause: strictly increasing dir
         // mtimes (std cannot set a directory's mtime directly).
         for i in 0..(MAX_SESSIONS + extra) {
-            fs::create_dir_all(root.join(format!("MiniSnap 2026-10-29 12-{i:02}-00"))).unwrap();
+            fs::create_dir_all(root.join(format!("MiniSnap_2026-10-29_12-{i:02}-00"))).unwrap();
             std::thread::sleep(Duration::from_millis(2));
         }
         enforce_retention(&root, MAX_SESSIONS);
         let left = fs::read_dir(&root).unwrap().count();
         assert_eq!(left, MAX_SESSIONS);
-        assert!(!root.join("MiniSnap 2026-10-29 12-00-00").exists(), "oldest gone");
-        assert!(!root.join("MiniSnap 2026-10-29 12-01-00").exists(), "second oldest gone");
+        assert!(!root.join("MiniSnap_2026-10-29_12-00-00").exists(), "oldest gone");
+        assert!(!root.join("MiniSnap_2026-10-29_12-01-00").exists(), "second oldest gone");
         assert!(root
-            .join(format!("MiniSnap 2026-10-29 12-{:02}-00", MAX_SESSIONS + extra - 1))
+            .join(format!("MiniSnap_2026-10-29_12-{:02}-00", MAX_SESSIONS + extra - 1))
             .exists(), "newest kept");
     }
 }
