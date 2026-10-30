@@ -16,10 +16,11 @@ use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextField, NSTextFieldDelegate,
-    NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
-    NSWindowStyleMask,
+    NSLineBreakMode, NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
+    NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
 };
+use objc2_app_kit::NSLayoutConstraintOrientation;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSString, NSNotification, NSRectEdge};
@@ -41,8 +42,16 @@ const WINDOW_RADIUS: f64 = 12.0;
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
 
-/// Toolbar strip height, in points.
-const TOOLBAR_HEIGHT: f64 = 40.0;
+/// Floating toolbar panel height, in points.
+const TOOLBAR_HEIGHT: f64 = 44.0;
+
+/// Margin between the floating toolbar panel and the window edges, in
+/// points.
+const TOOLBAR_MARGIN: f64 = 10.0;
+
+/// The bottom strip the toolbar reserves: the panel plus its margin. The
+/// canvas fills everything above it.
+const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT + TOOLBAR_MARGIN;
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -243,7 +252,7 @@ define_class!(
 
 impl KeyableWindow {
     extern_methods!(
-        #[unsafe(method_id(initWithContentRect:styleMask:backing:defer:))]
+        #[unsafe(method(initWithContentRect:styleMask:backing:defer:))]
         unsafe fn init_with_content_rect(
             this: objc2::rc::Allocated<Self>,
             content_rect: CGRect,
@@ -252,6 +261,41 @@ impl KeyableWindow {
             defer: bool,
         ) -> Retained<Self>;
     );
+}
+
+define_class!(
+    /// The floating toolbar panel: a vibrancy pill that drags the window
+    /// when a click lands on its free surface. Controls consume their own
+    /// clicks, so they never reach this handler.
+    #[unsafe(super(NSVisualEffectView))]
+    #[thread_kind = MainThreadOnly]
+    struct ToolbarPanel;
+
+    unsafe impl NSObjectProtocol for ToolbarPanel {}
+
+    impl ToolbarPanel {
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                window.performWindowDragWithEvent(event);
+            }
+        }
+    }
+);
+
+impl ToolbarPanel {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        unsafe fn init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self>;
+    );
+
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: designated initializer with no ivars.
+        unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
+    }
 }
 
 pub struct EditorWindow {
@@ -285,6 +329,9 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
+    /// The file-name label in the toolbar (the borderless window has no
+    /// system title).
+    file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -325,6 +372,7 @@ define_class!(
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
+                file_label: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -1749,7 +1797,7 @@ impl EditorView {
                     iw as f64,
                     ih as f64,
                     visible.width,
-                    visible.height - TOOLBAR_HEIGHT,
+                    visible.height - TOOLBAR_RESERVED,
                 )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
@@ -1757,19 +1805,24 @@ impl EditorView {
         let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
             width,
-            content_size.height + TOOLBAR_HEIGHT,
+            content_size.height + TOOLBAR_RESERVED,
         ));
         window.center();
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: size and full redraw.
+    /// Show (or replace) the shot in the window: file-name label, size,
+    /// full redraw.
     fn display_shot(&self, shot: OpenShot) {
+        let file_name = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
         self.discard_text_editor();
         self.exit_frame_edit();
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().selection.set(None);
+        if let Some(label) = self.ivars().file_label.borrow().as_ref() {
+            label.setStringValue(&NSString::from_str(&file_name));
+        }
         self.refit_window();
     }
 
@@ -2067,7 +2120,7 @@ impl EditorWindow {
                 KeyableWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_HEIGHT),
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
                 ),
                 NSWindowStyleMask::Borderless,
                 NSBackingStoreType::Buffered,
@@ -2087,13 +2140,44 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // Toolbar: the editing toolbar sits at the bottom, Monosnap-style —
-        // color swatch with a preset popover, stroke-width slider, then the
-        // tools in Monosnap order; the ◄/► leafing buttons trail at the end
-        // until the floating panel takes them in.
+        // The floating toolbar panel at the bottom, Monosnap-style: a
+        // rounded vibrancy pill carrying the ◄/► leafing buttons, the file
+        // name (the borderless window has no system title), the color
+        // swatch with its preset popover, the stroke-width slider and the
+        // tools in Monosnap order.
+        let panel = ToolbarPanel::new(mtm);
+        panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        panel.setWantsLayer(true);
+        if let Some(layer) = panel.layer() {
+            layer.setCornerRadius(WINDOW_RADIUS);
+            layer.setMasksToBounds(true);
+        }
         let toolbar = NSStackView::new(mtm);
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(6.0);
+        for (tag, symbol) in [
+            (PAGE_PREV_TAG, "chevron.left"),
+            (PAGE_NEXT_TAG, "chevron.right"),
+        ] {
+            let button = symbol_button(mtm, symbol, tag);
+            // SAFETY: target is this canvas view, alive for the process.
+            unsafe {
+                button.setTarget(Some(&view));
+                button.setAction(Some(sel!(pageClicked:)));
+            }
+            toolbar.addArrangedSubview(&button);
+        }
+        let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        // Long file names truncate instead of stretching the window's
+        // minimum width.
+        file_label.setContentCompressionResistancePriority_forOrientation(
+            250.0,
+            NSLayoutConstraintOrientation::Horizontal,
+        );
+        toolbar.addArrangedSubview(&file_label);
+        toolbar.setCustomSpacing_afterView(14.0, &file_label);
         let color_button = symbol_button(mtm, "paintpalette", -1);
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
@@ -2135,18 +2219,6 @@ impl EditorWindow {
             toolbar.addArrangedSubview(&button);
             tool_buttons.push((tool.tag(), button));
         }
-        for (tag, symbol) in [
-            (PAGE_PREV_TAG, "chevron.left"),
-            (PAGE_NEXT_TAG, "chevron.right"),
-        ] {
-            let button = symbol_button(mtm, symbol, tag);
-            // SAFETY: target is this canvas view, alive for the process.
-            unsafe {
-                button.setTarget(Some(&view));
-                button.setAction(Some(sel!(pageClicked:)));
-            }
-            toolbar.addArrangedSubview(&button);
-        }
 
         // Layout: the editing toolbar pinned to the bottom, the canvas
         // filling everything above it. The flexible max-Y margin keeps the
@@ -2160,23 +2232,33 @@ impl EditorWindow {
             layer.setCornerRadius(WINDOW_RADIUS);
             layer.setMasksToBounds(true);
         }
-        // The window cannot shrink below the editing toolbar: its full
-        // fitting width plus the side margins.
-        let min_width = toolbar.fittingSize().width + 16.0;
+        // The window cannot shrink below the floating panel: the stack's
+        // fitting width plus the stack insets and the panel's window
+        // margins.
+        let min_width = toolbar.fittingSize().width + 24.0 + 2.0 * TOOLBAR_MARGIN;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        toolbar.setFrame(CGRect::new(
-            CGPoint::new(8.0, 0.0),
-            CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
+        panel.setFrame(CGRect::new(
+            CGPoint::new(TOOLBAR_MARGIN, TOOLBAR_MARGIN),
+            CGSize::new(size.width - 2.0 * TOOLBAR_MARGIN, TOOLBAR_HEIGHT),
         ));
-        toolbar.setAutoresizingMask(
+        panel.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewMaxYMargin,
         );
-        content.addSubview(&toolbar);
-        let canvas_height = size.height - TOOLBAR_HEIGHT;
+        content.addSubview(&panel);
+        toolbar.setFrame(CGRect::new(
+            CGPoint::new(12.0, 4.0),
+            CGSize::new(size.width - 2.0 * TOOLBAR_MARGIN - 24.0, TOOLBAR_HEIGHT - 8.0),
+        ));
+        toolbar.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        panel.addSubview(&toolbar);
+        let canvas_height = size.height - TOOLBAR_RESERVED;
         view.setFrame(CGRect::new(
-            CGPoint::new(0.0, TOOLBAR_HEIGHT),
+            CGPoint::new(0.0, TOOLBAR_RESERVED),
             CGSize::new(size.width, canvas_height),
         ));
         view.setAutoresizingMask(
@@ -2190,6 +2272,7 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
+        *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
         view.update_tool_highlight();
         view.update_color_swatch();
