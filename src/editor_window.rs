@@ -229,6 +229,8 @@ struct EditorIvars {
     color_button: RefCell<Option<Retained<NSButton>>>,
     /// The open color popover, if any.
     color_popover: RefCell<Option<Retained<NSPopover>>>,
+    /// The smallest content width that fits the whole toolbar.
+    min_width: Cell<f64>,
 }
 
 define_class!(
@@ -261,6 +263,7 @@ define_class!(
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
+                min_width: Cell::new(0.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -1365,6 +1368,12 @@ impl EditorView {
         let top_y = bounds.size.height - rect.y * sy;
         let below = bottom_y - FRAME_OK_SIZE.height - 6.0;
         let strip_y = if below >= 2.0 { below } else { top_y + 6.0 };
+        // A frame hugging the canvas top would otherwise push the strip
+        // above the canvas (into the toolbar): keep it on the canvas.
+        let strip_y = strip_y.clamp(
+            2.0,
+            (bounds.size.height - FRAME_OK_SIZE.height - 2.0).max(2.0),
+        );
         if let Some(ok) = ivars.frame_ok.borrow().as_ref() {
             let x = (rect.max_x() * sx - FRAME_OK_SIZE.width)
                 .clamp(0.0, (bounds.size.width - FRAME_OK_SIZE.width).max(0.0));
@@ -1376,7 +1385,7 @@ impl EditorView {
         if let Some(label) = ivars.frame_label.borrow().as_ref() {
             let text = format!("{} × {}", rect.width.round(), rect.height.round());
             label.setStringValue(&NSString::from_str(&text));
-            let label_w = 160.0;
+            let label_w = 160.0_f64.min(bounds.size.width.max(0.0));
             let x = (rect.x * sx).clamp(0.0, (bounds.size.width - label_w).max(0.0));
             label.setFrame(CGRect::new(
                 CGPoint::new(x, strip_y),
@@ -1472,8 +1481,10 @@ impl EditorView {
                 fit_size(iw as f64, ih as f64, visible.width, visible.height - TOOLBAR_HEIGHT)
             })
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
+        // The refit never shrinks below the toolbar's minimum width.
+        let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
-            content_size.width,
+            width,
             content_size.height + TOOLBAR_HEIGHT,
         ));
         window.center();
@@ -1804,6 +1815,11 @@ impl EditorWindow {
         // grows into the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
+        // The window cannot shrink below the toolbar: its full fitting
+        // width plus the side margins. The initial size respects it too.
+        let min_width = toolbar.fittingSize().width + 16.0;
+        window.setContentMinSize(CGSize::new(min_width, 0.0));
+        view.ivars().min_width.set(min_width);
         toolbar.setFrame(CGRect::new(
             CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT),
             CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
