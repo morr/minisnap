@@ -1094,12 +1094,14 @@ impl EditorView {
             CGContext::fill_rect(Some(cg), r);
         }
         // Frame border.
-        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 0.9);
         CGContext::set_line_width(Some(cg), 1.5);
         CGContext::stroke_rect(Some(cg), CGRect::new(CGPoint::new(vx, y0), CGSize::new(vw, vh)));
         // Handle dots: white fill with the accent ring. A dot sitting on
         // the window edge is pressed inward just enough to stay fully
         // visible; its hit zone stays at the true spot.
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
             let cx = (point.x * sx).clamp(r, (bounds.size.width - r).max(r));
@@ -1108,10 +1110,18 @@ impl EditorView {
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
             );
+            // A soft shadow keeps the dots readable over light frames.
+            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+            let shadow_cg = shadow.CGColor();
+            CGContext::set_shadow_with_color(
+                Some(cg),
+                CGSize::new(0.0, 1.0),
+                2.0,
+                Some(&shadow_cg),
+            );
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker);
-            let accent: Retained<NSColor> = NSColor::controlAccentColor();
-            let accent_cg = accent.CGColor();
+            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
             CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
             CGContext::set_line_width(Some(cg), 1.5);
             CGContext::stroke_ellipse_in_rect(Some(cg), marker);
@@ -1160,8 +1170,18 @@ impl EditorView {
             let r = MARKER_RADIUS_PT;
             let marker_rect =
                 CGRect::new(CGPoint::new(p.x - r, p.y - r), CGSize::new(2.0 * r, 2.0 * r));
+            // A soft shadow keeps the markers readable over light frames.
+            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+            let shadow_cg = shadow.CGColor();
+            CGContext::set_shadow_with_color(
+                Some(cg),
+                CGSize::new(0.0, 1.0),
+                2.0,
+                Some(&shadow_cg),
+            );
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker_rect);
+            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
             CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
             CGContext::set_line_width(Some(cg), 1.5);
             CGContext::stroke_ellipse_in_rect(Some(cg), marker_rect);
@@ -1922,6 +1942,14 @@ impl EditorView {
         }
         ok.setFocusRingType(NSFocusRingType::None);
         ok.setRefusesFirstResponder(true);
+        // An accent plate instead of the default bezel; the title renders
+        // white on it in the window's dark appearance.
+        ok.setBordered(false);
+        ok.setWantsLayer(true);
+        if let Some(layer) = ok.layer() {
+            layer.setCornerRadius(6.0);
+            layer.setBackgroundColor(Some(&NSColor::controlAccentColor().CGColor()));
+        }
         self.addSubview(&ok);
         *ivars.frame_label.borrow_mut() = Some(label);
         *ivars.frame_ok.borrow_mut() = Some(ok);
