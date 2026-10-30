@@ -9,10 +9,13 @@ context: |
   a lightweight analog of Monosnap (region / window / full-screen capture,
   annotation, copy to clipboard / save / drag-out).
   Target platform: macOS (developed and tested on macOS 15+, Apple Silicon).
-  Status: greenfield — no source code yet; the tech stack is chosen by the first
-  change proposals. Global hotkeys and screen capture permissions (Screen
-  Recording / Accessibility in System Settings) must be considered in specs
-  where relevant.
+  Status: core implemented (~9k lines of Rust in src/): tray app, frozen-area
+  capture via ScreenCaptureKit, clipboard/file output, shot editor with
+  annotation tools. Stack: Rust + objc2 (AppKit, ScreenCaptureKit,
+  CoreGraphics, CoreText), global-hotkey, serde/toml. Domain skills in
+  .zcode/skills/ map the codebase for agents (see AGENTS.md).
+  Global hotkeys and screen capture permissions (Screen Recording /
+  Accessibility in System Settings) must be considered in specs where relevant.
   Code, identifiers and commits are in English.
 
 # Per-artifact rules (optional)
