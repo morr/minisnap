@@ -1,23 +1,41 @@
 #!/bin/bash
-# Cargo runner (see .cargo/config.toml): re-sign the binary cargo is about
-# to launch with the same stable identity as a release .app would have, so
-# the TCC Screen Recording grant keyed to that identity covers dev builds
-# too. Ad-hoc signatures (cargo's default) are keyed to the exact binary
-# and would re-prompt after every rebuild. Override with
-# MINISNAP_CODESIGN_IDENTITY (empty string forces ad-hoc / no signing).
+# Cargo runner (see .cargo/config.toml): run dev binaries inside a signed
+# .app bundle so the TCC Screen Recording grant keyed to the stable
+# identity follows cargo run. A bare binary is not the granted client: TCC
+# attributes it to the responsible process (the terminal), the preflight
+# reports "not granted" and the system prompt targets the terminal, not
+# minisnap. A binary inside a bundle with the same bundle id and signing
+# identity matches the grant's designated requirement regardless of where
+# the bundle lives, so the runner keeps a scratch bundle next to the
+# binary, refreshed on every run.
+#
+# Test harness binaries (minisnap-<hash>) and runs without a stable
+# identity (MINISNAP_CODESIGN_IDENTITY= forces ad-hoc) pass through
+# untouched — no bundle, no signing.
+set -euo pipefail
+
+BIN="$1"
+if [ "$(basename "$BIN")" != "minisnap" ]; then
+	exec "$@"
+fi
+
 IDENTITY="${MINISNAP_CODESIGN_IDENTITY-}"
 if [ -z "$IDENTITY" ]; then
 	IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null |
 		awk -F'"' '/^[[:space:]]*[0-9]+\) [0-9A-Fa-f]+ / {print $2; exit}') || true
 fi
-if [ -n "$IDENTITY" ]; then
-	# The bundle id of a release .app: the identifier goes into the
-	# designated requirement, and TCC matches Screen Recording grants by
-	# that requirement — without it a dev binary is a different client
-	# than the granted app and never sees the grant.
-	if ! codesign --force --sign "$IDENTITY" --identifier app.minisnap.minisnap "$1" >/dev/null 2>&1
-	then
-		echo "codesign-run: signing failed; TCC may not recognize this binary" >&2
-	fi
+if [ -z "$IDENTITY" ]; then
+	exec "$@"
 fi
-exec "$@"
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+APP_DIR="$(dirname "$BIN")/minisnap.app"
+mkdir -p "$APP_DIR/Contents/MacOS"
+cp "$ROOT/scripts/Info.plist" "$APP_DIR/Contents/Info.plist"
+# Remove before copy: replacing a running executable's file in place fails.
+rm -f "$APP_DIR/Contents/MacOS/minisnap"
+cp "$BIN" "$APP_DIR/Contents/MacOS/minisnap"
+if ! codesign --force --sign "$IDENTITY" "$APP_DIR" >/dev/null 2>&1; then
+	echo "codesign-run: signing failed; TCC may not recognize this binary" >&2
+fi
+exec "$APP_DIR/Contents/MacOS/minisnap" "${@:2}"
