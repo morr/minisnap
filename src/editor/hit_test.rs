@@ -36,8 +36,10 @@ pub fn hit_element(element: &Element, point: Point) -> Option<Hit> {
             if let Some(end) = hit_end(*a, *b, point) {
                 return Some(Hit::End(element.id, end));
             }
-            near_segment(point, *a, *b, *width / 2.0 + TOLERANCE)
-                .then_some(Hit::Body(element.id))
+            // The exact drawn silhouette (wedge body + barbed head), with a
+            // tolerance band so the needle-thin tail stays clickable.
+            let outline = super::render::arrow_outline(*a, *b, *width);
+            near_ring(point, &outline, TOLERANCE).then_some(Hit::Body(element.id))
         }
         ElementKind::Line { a, b, width, .. } => {
             if let Some(end) = hit_end(*a, *b, point) {
@@ -114,6 +116,28 @@ fn dist_to_segment(point: Point, a: Point, b: Point) -> f64 {
 
 fn near_segment(point: Point, a: Point, b: Point, reach: f64) -> bool {
     dist_to_segment(point, a, b) <= reach
+}
+
+/// Whether `point` lies inside the closed ring, or within `tol` of its
+/// outline (the closing edge back to the first point included).
+fn near_ring(point: Point, ring: &[Point], tol: f64) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    // Even-odd ray cast for containment.
+    let mut inside = false;
+    for (i, &cur) in ring.iter().enumerate() {
+        let prev = if i == 0 { ring[ring.len() - 1] } else { ring[i - 1] };
+        if (cur.y > point.y) != (prev.y > point.y)
+            && point.x < prev.x + (point.y - prev.y) * (cur.x - prev.x) / (cur.y - prev.y)
+        {
+            inside = !inside;
+        }
+    }
+    let last = ring[ring.len() - 1];
+    inside
+        || ring.windows(2).any(|w| dist_to_segment(point, w[0], w[1]) <= tol)
+        || dist_to_segment(point, last, ring[0]) <= tol
 }
 
 fn dist(a: Point, b: Point) -> f64 {
@@ -209,6 +233,15 @@ mod tests {
         assert_eq!(hit_element(&el, pt(58.0, 13.0)), Some(Hit::End(1, Endpoint::B)));
         // Near the tail.
         assert_eq!(hit_element(&el, pt(12.0, 8.0)), Some(Hit::End(1, Endpoint::A)));
+    }
+
+    #[test]
+    fn arrow_barbed_head_is_a_body_hit() {
+        let el = arrow();
+        // width 4 over len 50: barbs at x≈42 spanning ±9.2 — a click on the
+        // wide head, outside the old width/2 axis band, still selects.
+        assert_eq!(hit_element(&el, pt(44.0, 15.0)), Some(Hit::Body(1)));
+        assert_eq!(hit_element(&el, pt(40.0, -8.0)), None, "beyond the head");
     }
 
     #[test]

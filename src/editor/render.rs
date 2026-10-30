@@ -4,8 +4,8 @@
 
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGInterpolationQuality,
-    CGLineCap, CGLineJoin, CGContext,
+    CGBitmapContextCreateImage, CGColor, CGColorSpace, CGGradient, CGGradientDrawingOptions,
+    CGImage, CGImageAlphaInfo, CGInterpolationQuality, CGLineCap, CGLineJoin, CGContext,
 };
 
 use super::{Element, ElementKind, Rect};
@@ -200,9 +200,98 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// Arrow from `a` to `b`, Monosnap-style: a flat trapezoid flare at the
-/// tail narrowing into a constant-thickness shaft, and a solid triangular
-/// head with its apex at `b`. Drawn as one filled polygon.
+/// How much darker than the picked color the arrow tail starts (the gradient
+/// runs from this shade at the tail to the full color at the tip).
+const ARROW_TAIL_SHADE: f64 = 0.55;
+
+/// Soft drop shadow under an arrow: offset in element space (+y is
+/// screen-down here — note the render context is Y-flipped, so the offset
+/// needs a negative y to land below), blur radius, and opacity.
+const ARROW_SHADOW_OFFSET_X: f64 = 1.0;
+const ARROW_SHADOW_OFFSET_Y: f64 = -2.0;
+const ARROW_SHADOW_BLUR: f64 = 3.0;
+const ARROW_SHADOW_ALPHA: f64 = 0.35;
+
+/// The arrow silhouette, Monosnap-style: the body is a wedge that starts
+/// needle-thin with a rounded cap at `a` and widens along the whole length,
+/// and the head is a barbed arrowhead with a concave notch at its base on
+/// each side. One closed ring (the last point connects back to the first);
+/// empty for a degenerate zero-length arrow.
+pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < f64::EPSILON {
+        return Vec::new();
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (nx, ny) = (-uy, ux);
+    // Proportions of the stroke width; the head clamps on short arrows so
+    // it never eats the whole length.
+    let head_len = (width * 4.6).min(len * 0.5);
+    let half_head = width * 2.3;
+    let half_body = width * 1.1;
+    let tail_r = width * 0.32;
+    // The rounded tail cap is a semicircle of radius `tail_r` behind its
+    // center; the body widens linearly from `tail_r` to `half_body` up to
+    // where it dips into the head.
+    let cap = super::Point::new(a.x + ux * tail_r, a.y + uy * tail_r);
+    let body_end = super::Point::new(
+        b.x - ux * head_len * 0.78,
+        b.y - uy * head_len * 0.78,
+    );
+    let step = |p: super::Point, along: f64, off: f64| {
+        super::Point::new(p.x + ux * along + nx * off, p.y + uy * along + ny * off)
+    };
+    let mut pts = Vec::with_capacity(16);
+    // Tail cap: from the bottom edge around the back to the top edge.
+    const CAP_STEPS: usize = 6;
+    for k in 0..=CAP_STEPS {
+        let t =
+            -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * k as f64 / CAP_STEPS as f64;
+        pts.push(super::Point::new(
+            cap.x + tail_r * (nx * t.sin() - ux * t.cos()),
+            cap.y + tail_r * (ny * t.sin() - uy * t.cos()),
+        ));
+    }
+    // Top edge of the widening body, the concave notch into the top barb,
+    // the tip, and the mirrored way back.
+    pts.push(step(body_end, 0.0, half_body));
+    pts.push(step(b, -head_len, half_head));
+    pts.push(b);
+    pts.push(step(b, -head_len, -half_head));
+    pts.push(step(body_end, 0.0, -half_body));
+    pts
+}
+
+/// The arrow's fill: a linear gradient from a darkened shade of the picked
+/// color to the picked color itself.
+fn arrow_gradient(color: super::Rgba) -> Option<CFRetained<CGGradient>> {
+    let space = CGColorSpace::new_device_rgb()?;
+    let components = [
+        color[0] * ARROW_TAIL_SHADE,
+        color[1] * ARROW_TAIL_SHADE,
+        color[2] * ARROW_TAIL_SHADE,
+        color[3],
+        color[0],
+        color[1],
+        color[2],
+        color[3],
+    ];
+    let locations = [0.0f64, 1.0];
+    // SAFETY: both slices hold exactly the two stops the constructor reads.
+    unsafe {
+        CGGradient::with_color_components(
+            Some(&space),
+            components.as_ptr(),
+            locations.as_ptr(),
+            locations.len(),
+        )
+    }
+}
+
+/// Arrow from `a` to `b`, Monosnap-style (see `arrow_outline`): filled with
+/// a gradient from a darker tail to the picked color at the tip, over a soft
+/// drop shadow.
 pub(crate) fn draw_arrow(
     ctx: &CGContext,
     a: super::Point,
@@ -210,55 +299,53 @@ pub(crate) fn draw_arrow(
     color: super::Rgba,
     width: f64,
 ) {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < f64::EPSILON {
+    let outline = arrow_outline(a, b, width);
+    if outline.is_empty() {
         return;
     }
-    let (ux, uy) = (dx / len, dy / len);
-    let (nx, ny) = (-uy, ux);
-    // Proportions of the stroke width, clamped for short arrows so the
-    // flare and the head never eat the whole length.
-    let head_len = (width * 5.0).min(len * 0.45);
-    let flange_len = (width * 2.0).min(len * 0.15);
-    let half_shaft = width / 2.0;
-    let half_flange = width * 1.1;
-    let half_head = width * 2.25;
-    let head_base = super::Point::new(b.x - ux * head_len, b.y - uy * head_len);
-    let flare_end = super::Point::new(a.x + ux * flange_len, a.y + uy * flange_len);
-    let pts = [
-        // Tail: the flat back edge spans the flare, then the outline
-        // narrows into the shaft.
-        CGPoint::new(a.x + nx * half_flange, a.y + ny * half_flange),
-        CGPoint::new(
-            flare_end.x + nx * half_shaft,
-            flare_end.y + ny * half_shaft,
-        ),
-        CGPoint::new(
-            head_base.x + nx * half_shaft,
-            head_base.y + ny * half_shaft,
-        ),
-        // Head: wide base, apex at b.
-        CGPoint::new(head_base.x + nx * half_head, head_base.y + ny * half_head),
-        CGPoint::new(b.x, b.y),
-        CGPoint::new(head_base.x - nx * half_head, head_base.y - ny * half_head),
-        CGPoint::new(
-            head_base.x - nx * half_shaft,
-            head_base.y - ny * half_shaft,
-        ),
-        CGPoint::new(
-            flare_end.x - nx * half_shaft,
-            flare_end.y - ny * half_shaft,
-        ),
-        CGPoint::new(a.x - nx * half_flange, a.y - ny * half_flange),
-    ];
+    let add_path = |ctx: &CGContext| {
+        CGContext::begin_path(Some(ctx));
+        let mut iter = outline.iter();
+        if let Some(first) = iter.next() {
+            CGContext::move_to_point(Some(ctx), first.x, first.y);
+            for p in iter {
+                CGContext::add_line_to_point(Some(ctx), p.x, p.y);
+            }
+        }
+        CGContext::close_path(Some(ctx));
+    };
+
+    // Silhouette pass: a solid fill casts the shadow. The gradient pass
+    // repaints the whole surface opaquely, so this fill only survives as
+    // the shadow it cast (and as the arrow itself when the gradient cannot
+    // be built).
+    CGContext::save_g_state(Some(ctx));
+    let shadow = CGColor::new_srgb(0.0, 0.0, 0.0, ARROW_SHADOW_ALPHA);
+    CGContext::set_shadow_with_color(
+        Some(ctx),
+        CGSize::new(ARROW_SHADOW_OFFSET_X, ARROW_SHADOW_OFFSET_Y),
+        ARROW_SHADOW_BLUR,
+        Some(&shadow),
+    );
     CGContext::set_rgb_fill_color(Some(ctx), color[0], color[1], color[2], color[3]);
-    CGContext::begin_path(Some(ctx));
-    CGContext::move_to_point(Some(ctx), pts[0].x, pts[0].y);
-    // SAFETY: pts outlives the call.
-    unsafe { CGContext::add_lines(Some(ctx), pts[1..].as_ptr(), pts.len() - 1) };
-    CGContext::close_path(Some(ctx));
+    add_path(ctx);
     CGContext::fill_path(Some(ctx));
+    CGContext::restore_g_state(Some(ctx));
+
+    if let Some(gradient) = arrow_gradient(color) {
+        CGContext::save_g_state(Some(ctx));
+        add_path(ctx);
+        CGContext::clip(Some(ctx));
+        CGContext::draw_linear_gradient(
+            Some(ctx),
+            Some(&gradient),
+            CGPoint::new(a.x, a.y),
+            CGPoint::new(b.x, b.y),
+            CGGradientDrawingOptions::DrawsBeforeStartLocation
+                | CGGradientDrawingOptions::DrawsAfterEndLocation,
+        );
+        CGContext::restore_g_state(Some(ctx));
+    }
 }
 
 fn stroke_polyline(ctx: &CGContext, points: &[super::Point], color: super::Rgba, width: f64) {
@@ -352,10 +439,11 @@ mod tests {
         );
 
         // The wedge arrow covers the axis midpoint, in image coordinates:
-        // (30, 10) must be magenta, not the gray base.
+        // (30, 10) must be magenta (darkened by the tail-side gradient),
+        // not the gray base.
         let bytes = pixel_bytes(&composite);
         let arrow_px = pixel(&bytes, 64, 30, 10);
-        assert!(arrow_px[0] > 200 && arrow_px[2] > 200, "arrow pixel {arrow_px:?}");
+        assert!(arrow_px[0] > 180 && arrow_px[2] > 180, "arrow pixel {arrow_px:?}");
 
         // The rect stroke covers (20, 40) (the left edge band 18..22).
         let rect_px = pixel(&bytes, 64, 20, 40);
@@ -376,28 +464,51 @@ mod tests {
         };
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
-        // width 6 over len 48: tail flare around x 8..15, shaft half 3,
-        // head base at x=34.4 with half 13.5, apex at b.
-        let is_magenta = |x: usize, y: usize| {
+        // width 6 over len 48: tail cap radius 1.92 at x≈10, body widening
+        // to half 6.6 at x=37.3, head base at x=32 with half 13.8, tip at b.
+        let is_arrow = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
-            p[0] > 200 && p[2] > 200 && p[1] < 120
+            p[0] > 60 && p[2] > 60 && p[1] < 100 && (p[0] as i32 - p[2] as i32).abs() < 40
         };
         let is_gray = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
             (p[0] as i32 - 128).abs() < 40 && (p[2] as i32 - 128).abs() < 40
         };
-        // The tail is a flat trapezoid flare around the start.
-        assert!(is_magenta(12, 28), "tail flare above the axis");
-        assert!(is_magenta(14, 32), "tail neck on the axis");
-        // The flare narrows into a constant-thickness shaft.
-        assert!(is_magenta(25, 32), "shaft");
-        assert!(is_gray(25, 27), "shaft stays thin mid-way");
-        // The head is a solid triangle: wide base above and below the
-        // shaft, colored apex at b, nothing beyond its silhouette.
-        assert!(is_magenta(38, 24), "head above the axis");
-        assert!(is_magenta(38, 40), "head below the axis");
-        assert!(is_magenta(53, 32), "head apex");
+        // The tail starts needle-thin: on-axis colored, a few pixels off it
+        // already clear (the old flat flare occupied that space).
+        assert!(is_arrow(12, 31), "tail on the axis");
+        assert!(is_gray(12, 28), "nothing beside the thin tail");
+        assert!(is_gray(10, 29), "rounded narrow start");
+        // The body is a widening wedge, not a constant-width shaft.
+        assert!(is_arrow(25, 32), "body mid-way");
+        assert!(is_arrow(30, 37), "body widened toward the head");
+        assert!(is_gray(14, 36), "body still thin near the tail");
+        assert!(is_gray(25, 26), "nothing above the thin mid-body");
+        // The head is a barbed arrowhead: wide at the base, colored apex at
+        // b, and a concave notch void between the barbs and the body. The
+        // body's soft shadow darkens the void, but no magenta fill lands
+        // there: the pixel stays neutral gray (green tracks red), unlike
+        // the wing beside it.
+        assert!(is_arrow(38, 24), "head above the axis");
+        assert!(is_arrow(38, 40), "head below the axis");
+        assert!(is_arrow(53, 32), "head apex");
         assert!(is_gray(38, 18), "nothing beyond the head");
+        let void = pixel(&bytes, 64, 35, 40);
+        assert!(
+            void[1] as i32 > void[0] as i32 / 2,
+            "concave notch void beside the body end: {void:?}"
+        );
+        assert!(is_arrow(35, 42), "barb wing over the notch");
+        // The fill is a gradient: darker at the tail, the picked color at
+        // the tip.
+        let tail = pixel(&bytes, 64, 12, 31);
+        let tip = pixel(&bytes, 64, 50, 31);
+        assert!(tail[0] < 170 && tail[2] < 170, "tail shaded: {tail:?}");
+        assert!(tip[0] > 220 && tip[2] > 220, "tip at full color: {tip:?}");
+        // A soft shadow darkens the base just below the body silhouette
+        // (the silhouette itself ends at y≈35.6 here).
+        let below = pixel(&bytes, 64, 20, 37);
+        assert!(below[0] < 120 && below[2] < 120, "shadow below: {below:?}");
     }
 
     #[test]

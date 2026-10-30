@@ -80,6 +80,7 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGContext",
     "CGBitmapContext",
     "CGPath",
+    "CGGradient",
 ] }
 objc2-core-text = { version = "0.3", features = [
     "CTFont",
