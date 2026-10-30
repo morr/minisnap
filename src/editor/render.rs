@@ -223,6 +223,9 @@ const ARROW_HALF_HEAD_W: f64 = 2.4;
 /// How deep the concave notches at the head base cut, as a fraction of the
 /// head length (the body outline stops this far short of the barb line).
 const ARROW_NOTCH_DEPTH: f64 = 0.30;
+/// Corner-rounding radius of the notch ends — the barb tips and the roots
+/// where the notches meet the body — in stroke widths.
+const ARROW_NOTCH_ROUND_W: f64 = 0.35;
 
 /// Direction and head proportions of an arrow.
 struct ArrowFrame {
@@ -263,38 +266,86 @@ impl ArrowFrame {
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
 /// needle-thin with a rounded cap at `a` and widens along the whole length,
 /// and the head is a barbed arrowhead with deep concave notches at its base
-/// on each side. One closed ring (the last point connects back to the
-/// first); empty for a degenerate zero-length arrow.
+/// on each side, their ends rounded. One closed ring (the last point
+/// connects back to the first); empty for a degenerate zero-length arrow.
 pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
     let Some(frame) = ArrowFrame::new(a, b, width) else {
         return Vec::new();
     };
     let half_body = width * 1.1;
     let tail_r = width * 0.32;
+    let notch_r = width * ARROW_NOTCH_ROUND_W;
     // The rounded tail cap is a semicircle of radius `tail_r` behind its
     // center; the body widens linearly from `tail_r` to `half_body` up to
     // where it dips into the head.
     let cap = frame.step(a, tail_r, 0.0);
     let body_end = frame.step(b, -frame.head_len * (1.0 - ARROW_NOTCH_DEPTH), 0.0);
-    let mut pts = Vec::with_capacity(16);
-    // Tail cap: from the bottom edge around the back to the top edge.
+    // (point, corner radius) pairs: the cap arc points and the tip stay
+    // sharp, the notch ends round.
+    let mut ring: Vec<(super::Point, Option<f64>)> = Vec::with_capacity(16);
     const CAP_STEPS: usize = 6;
     for k in 0..=CAP_STEPS {
         let t =
             -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * k as f64 / CAP_STEPS as f64;
-        pts.push(super::Point::new(
-            cap.x + tail_r * (frame.n.x * t.sin() - frame.u.x * t.cos()),
-            cap.y + tail_r * (frame.n.y * t.sin() - frame.u.y * t.cos()),
+        ring.push((
+            super::Point::new(
+                cap.x + tail_r * (frame.n.x * t.sin() - frame.u.x * t.cos()),
+                cap.y + tail_r * (frame.n.y * t.sin() - frame.u.y * t.cos()),
+            ),
+            None,
         ));
     }
     // Top edge of the widening body, the concave notch into the top barb,
     // the tip, and the mirrored way back.
-    pts.push(frame.step(body_end, 0.0, half_body));
-    pts.push(frame.step(b, -frame.head_len, frame.half_head));
-    pts.push(b);
-    pts.push(frame.step(b, -frame.head_len, -frame.half_head));
-    pts.push(frame.step(body_end, 0.0, -half_body));
-    pts
+    ring.push((frame.step(body_end, 0.0, half_body), Some(notch_r)));
+    ring.push((frame.step(b, -frame.head_len, frame.half_head), Some(notch_r)));
+    ring.push((b, None));
+    ring.push((frame.step(b, -frame.head_len, -frame.half_head), Some(notch_r)));
+    ring.push((frame.step(body_end, 0.0, -half_body), Some(notch_r)));
+    round_corners(&ring)
+}
+
+/// Round every corner carrying a radius: the vertex is replaced by a short
+/// quadratic arc tangent to both adjacent edges, clamped so an arc never
+/// reaches past the middle of either of its edges (two arcs on neighboring
+/// corners never overlap). Sharp vertices (None) pass through.
+fn round_corners(ring: &[(super::Point, Option<f64>)]) -> Vec<super::Point> {
+    const ARC_STEPS: usize = 4;
+    let n = ring.len();
+    let mut out = Vec::with_capacity(n * (ARC_STEPS + 1));
+    for i in 0..n {
+        let (p, radius) = ring[i];
+        let (prev, next) = (ring[(i + n - 1) % n].0, ring[(i + 1) % n].0);
+        let Some(radius) = radius else {
+            out.push(p);
+            continue;
+        };
+        let (d_prev, d_next) = (pt_dist(p, prev), pt_dist(p, next));
+        let r = radius.min(d_prev * 0.45).min(d_next * 0.45);
+        if r <= f64::EPSILON {
+            out.push(p);
+            continue;
+        }
+        let toward = |q: super::Point, d: f64| {
+            super::Point::new(p.x + (q.x - p.x) / d * r, p.y + (q.y - p.y) / d * r)
+        };
+        let (q1, q2) = (toward(prev, d_prev), toward(next, d_next));
+        out.push(q1);
+        for k in 1..ARC_STEPS {
+            let t = k as f64 / ARC_STEPS as f64;
+            let (a, b, c) = ((1.0 - t).powi(2), 2.0 * t * (1.0 - t), t * t);
+            out.push(super::Point::new(
+                a * q1.x + b * p.x + c * q2.x,
+                a * q1.y + b * p.y + c * q2.y,
+            ));
+        }
+        out.push(q2);
+    }
+    out
+}
+
+fn pt_dist(a: super::Point, b: super::Point) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
 /// The arrow's fill: a linear gradient from a lighter shade of the picked
