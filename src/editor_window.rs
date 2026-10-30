@@ -13,7 +13,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControlTextEditingDelegate,
-    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSImage,
+    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
+    NSGraphicsContext, NSImage,
     NSImageSymbolConfiguration, NSPopover, NSScreen, NSStackView, NSTextField,
     NSTextFieldDelegate, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowStyleMask,
@@ -201,8 +202,9 @@ struct EditorIvars {
     shot: RefCell<Option<OpenShot>>,
     /// Selected element id, if any.
     selection: Cell<Option<u64>>,
-    /// The active annotation tool.
-    tool: Cell<Tool>,
+    /// The active annotation tool (None when no tool is picked: clicks only
+    /// select and move elements).
+    tool: Cell<Option<Tool>>,
     /// Color for new elements.
     color: Cell<Rgba>,
     /// Stroke width for new elements, in image pixels.
@@ -245,7 +247,7 @@ define_class!(
             let this = this.set_ivars(EditorIvars {
                 shot: RefCell::new(None),
                 selection: Cell::new(None),
-                tool: Cell::new(Tool::Arrow),
+                tool: Cell::new(Some(Tool::Arrow)),
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
                 drag: RefCell::new(None),
@@ -360,13 +362,20 @@ define_class!(
             // NSView accessor we stamped on the button.
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some(tool) = Tool::from_tag(tag) {
-                self.ivars().tool.set(tool);
+                // Clicking the active tool again deselects it.
+                let next = if self.ivars().tool.get() == Some(tool) {
+                    None
+                } else {
+                    Some(tool)
+                };
+                self.ivars().tool.set(next);
                 self.update_tool_highlight();
                 // The crop/resize tools bring up their adjustable frame;
-                // any other tool tears it down.
-                match tool {
-                    Tool::Crop => self.enter_frame_edit(false),
-                    Tool::Resize => self.enter_frame_edit(true),
+                // anything else (including deselecting the frame tool)
+                // tears it down.
+                match next {
+                    Some(Tool::Crop) => self.enter_frame_edit(false),
+                    Some(Tool::Resize) => self.enter_frame_edit(true),
                     _ => self.exit_frame_edit(),
                 }
             }
@@ -685,36 +694,36 @@ impl EditorView {
         let ivars = self.ivars();
         // Finish any in-flight text edit before interpreting the click.
         self.commit_text_editor();
-        let draft_kind = match ivars.tool.get() {
-            Tool::Arrow => ElementKind::Arrow {
+        let draft_kind: Option<ElementKind> = match ivars.tool.get() {
+            Some(Tool::Arrow) => Some(ElementKind::Arrow {
                 a: point,
                 b: point,
                 color: ivars.color.get(),
                 width: ivars.stroke_width.get(),
-            },
-            Tool::Rect => ElementKind::Rect {
+            }),
+            Some(Tool::Rect) => Some(ElementKind::Rect {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
                 color: ivars.color.get(),
                 width: ivars.stroke_width.get(),
-            },
-            Tool::Line => ElementKind::Line {
+            }),
+            Some(Tool::Line) => Some(ElementKind::Line {
                 a: point,
                 b: point,
                 color: ivars.color.get(),
                 width: ivars.stroke_width.get(),
-            },
-            Tool::Pen => ElementKind::Pen {
+            }),
+            Some(Tool::Pen) => Some(ElementKind::Pen {
                 points: vec![point],
                 color: ivars.color.get(),
                 width: ivars.stroke_width.get(),
-            },
-            Tool::Blur => ElementKind::Blur {
+            }),
+            Some(Tool::Blur) => Some(ElementKind::Blur {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
-            },
+            }),
             // Text and callout take the click, not a drag: open (or
             // re-open) the field editor.
-            Tool::Text | Tool::Callout => {
-                let callout = ivars.tool.get() == Tool::Callout;
+            Some(Tool::Text) | Some(Tool::Callout) => {
+                let callout = ivars.tool.get() == Some(Tool::Callout);
                 // A click on an existing text/callout re-edits it in place.
                 let existing = ivars
                     .shot
@@ -738,7 +747,7 @@ impl EditorView {
             }
             // Crop/resize drag the frame's spots; the click never draws
             // or selects elements.
-            Tool::Crop | Tool::Resize => {
+            Some(Tool::Crop) | Some(Tool::Resize) => {
                 if let Some((spot, _)) = self.frame_spot_at(point) {
                     let orig = self
                         .ivars()
@@ -757,6 +766,8 @@ impl EditorView {
                 }
                 return;
             }
+            // No tool picked: the click only selects or deselects.
+            None => None,
         };
         // A hit on an existing element decides between moving it and
         // dragging one of its ends; the empty frame draws a new element.
@@ -786,9 +797,16 @@ impl EditorView {
             }
             _ => {
                 // Drawing on the empty frame starts from a clean selection;
-                // a plain click here is the deselect rule.
+                // a plain click here is the deselect rule. Without a tool
+                // the click just deselects.
                 ivars.selection.set(None);
-                Drag::Draw(draft_kind)
+                match draft_kind {
+                    Some(kind) => Drag::Draw(kind),
+                    None => {
+                        self.redraw();
+                        return;
+                    }
+                }
             }
         };
         *ivars.drag.borrow_mut() = Some(drag);
@@ -1358,16 +1376,16 @@ impl EditorView {
         if let Some(Err(err)) = result {
             eprintln!("editor: failed to apply the frame: {err}");
         }
-        ivars.tool.set(Tool::Arrow);
+        ivars.tool.set(None);
         self.update_tool_highlight();
         self.redraw();
         self.refit_window();
     }
 
-    /// Cancel the frame mode (Esc): drop the frame, return to the arrow.
+    /// Cancel the frame mode (Esc): drop the frame, deselect the tool.
     fn cancel_frame_edit(&self) {
         self.exit_frame_edit();
-        self.ivars().tool.set(Tool::Arrow);
+        self.ivars().tool.set(None);
         self.update_tool_highlight();
         self.redraw();
     }
@@ -1461,9 +1479,9 @@ impl EditorView {
 
     /// Accent-tint the active tool's button, clear the others.
     fn update_tool_highlight(&self) {
-        let active = self.ivars().tool.get().tag();
+        let active = self.ivars().tool.get().map(|tool| tool.tag());
         for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if *tag == active {
+            if Some(*tag) == active {
                 let accent: Retained<NSColor> = NSColor::controlAccentColor();
                 button.setBezelColor(Some(&accent));
             } else {
@@ -1623,7 +1641,11 @@ fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NS
         Some(&NSString::from_str(symbol)),
     )
     .expect("SF Symbol image");
-    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(15.0, 5.0);
+    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+        15.0,
+        // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
+        unsafe { NSFontWeightRegular },
+    );
     let image = image
         .imageWithSymbolConfiguration(&config)
         .expect("configured symbol");
