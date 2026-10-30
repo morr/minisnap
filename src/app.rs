@@ -219,12 +219,13 @@ define_class!(
             // Startup preflight (7.1): explain the Screen Recording
             // permission before the user wonders why capture does nothing.
             if !crate::permission::preflight_screen_capture() {
-                eprintln!("screen recording: not granted, showing the explanation dialog");
-                // Register this exact build with TCC: without a request
-                // call the build never gets a row in the Screen Recording
-                // pane, and toggling rows of older builds does nothing.
+                eprintln!("screen recording: not granted, requesting");
+                // Register this exact build with TCC and let the system
+                // prompt do the asking; a second dialog of our own would
+                // just stack on top of it. The request is what makes the
+                // build's row show up in the Screen Recording pane —
+                // without it, toggling rows of older builds does nothing.
                 crate::permission::request_screen_capture();
-                self.show_permission_dialog();
             } else {
                 eprintln!("screen recording: granted");
             }
