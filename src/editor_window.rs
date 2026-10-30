@@ -667,7 +667,7 @@ impl EditorView {
     }
 
     /// Handles of the selected element: endpoint dots and bounding-box
-    /// corners, white fill with the element's color ring.
+    /// corners, white fill with the system accent ring.
     fn draw_markers(
         &self,
         cg: &CGContext,
@@ -681,45 +681,36 @@ impl EditorView {
             return;
         };
         let to_point = |p: Point| -> CGPoint { CGPoint::new(p.x * sx, bounds.size.height - p.y * sy) };
-        let mut points: Vec<CGPoint> = Vec::new();
-        let mut ring: [f64; 4] = [1.0, 0.0, 1.0, 1.0];
-        match &element.kind {
-            ElementKind::Arrow { a, b, color, .. } | ElementKind::Line { a, b, color, .. } => {
-                points = vec![to_point(*a), to_point(*b)];
-                ring = *color;
+        let points: Vec<CGPoint> = match &element.kind {
+            ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => {
+                vec![to_point(*a), to_point(*b)]
             }
-            ElementKind::Callout { tip, anchor, color, .. } => {
-                points = vec![to_point(*tip), to_point(*anchor)];
-                ring = *color;
-            }
-            ElementKind::Rect { rect, color, .. } => {
-                points = rect_corners(*rect).map(to_point).to_vec();
-                ring = *color;
-            }
-            ElementKind::Blur { rect } => {
-                points = rect_corners(*rect).map(to_point).to_vec();
-            }
-            ElementKind::Text { origin, text, color, size } => {
-                if let Some(bbox) = crate::editor::hit_test::text_bounds(*origin, text, *size) {
-                    points = rect_corners(bbox).map(to_point).to_vec();
+            ElementKind::Callout { tip, anchor, .. } => vec![to_point(*tip), to_point(*anchor)],
+            ElementKind::Rect { rect, .. } => rect_corners(*rect).map(to_point).to_vec(),
+            ElementKind::Blur { rect } => rect_corners(*rect).map(to_point).to_vec(),
+            ElementKind::Text { origin, text, size, .. } => {
+                match crate::editor::hit_test::text_bounds(*origin, text, *size) {
+                    Some(bbox) => rect_corners(bbox).map(to_point).to_vec(),
+                    None => Vec::new(),
                 }
-                ring = *color;
             }
-            ElementKind::Pen { points: trace, color, .. } => {
+            ElementKind::Pen { points: trace, .. } => {
                 // Endpoint dots only; the trace itself is the shape.
-                if let (Some(first), Some(last)) = (trace.first(), trace.last()) {
-                    points = vec![to_point(*first), to_point(*last)];
+                match (trace.first(), trace.last()) {
+                    (Some(first), Some(last)) => vec![to_point(*first), to_point(*last)],
+                    _ => Vec::new(),
                 }
-                ring = *color;
             }
-        }
+        };
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let accent_cg = accent.CGColor();
         for p in points {
             let r = MARKER_RADIUS_PT;
             let marker_rect =
                 CGRect::new(CGPoint::new(p.x - r, p.y - r), CGSize::new(2.0 * r, 2.0 * r));
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker_rect);
-            CGContext::set_rgb_stroke_color(Some(cg), ring[0], ring[1], ring[2], ring[3]);
+            CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
             CGContext::set_line_width(Some(cg), 1.5);
             CGContext::stroke_ellipse_in_rect(Some(cg), marker_rect);
         }
@@ -1313,6 +1304,8 @@ impl EditorView {
     fn enter_frame_edit(&self, resize: bool) {
         let ivars = self.ivars();
         self.exit_frame_edit();
+        // Entering crop/resize drops the element selection.
+        ivars.selection.set(None);
         let (iw, ih) = self.image_size();
         if iw == 0 || ih == 0 {
             return;
