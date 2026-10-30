@@ -32,7 +32,11 @@ use crate::editor::{
 };
 
 /// The dark backdrop the frame sits on.
-const BACKDROP: [f64; 4] = [0.12, 0.12, 0.14, 1.0];
+const BACKDROP: [f64; 4] = [0.055, 0.055, 0.065, 1.0];
+
+/// Corner radius of the borderless editor window (and of the floating
+/// toolbar panel), in points.
+const WINDOW_RADIUS: f64 = 12.0;
 
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
@@ -219,8 +223,39 @@ impl Tool {
     }
 }
 
+define_class!(
+    /// The editor's borderless window. Borderless `NSWindow`s refuse key
+    /// status by default; the canvas lives on keyboard commands (Esc, ⌘Q,
+    /// ⌘C, ⌘Z, ←/→), so the window must accept key.
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    pub struct KeyableWindow;
+
+    unsafe impl NSObjectProtocol for KeyableWindow {}
+
+    impl KeyableWindow {
+        #[unsafe(method(canBecomeKey))]
+        fn __can_become_key(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl KeyableWindow {
+    extern_methods!(
+        #[unsafe(method_id(initWithContentRect:styleMask:backing:defer:))]
+        unsafe fn init_with_content_rect(
+            this: objc2::rc::Allocated<Self>,
+            content_rect: CGRect,
+            style: NSWindowStyleMask,
+            backing: NSBackingStoreType,
+            defer: bool,
+        ) -> Retained<Self>;
+    );
+}
+
 pub struct EditorWindow {
-    pub window: Retained<NSWindow>,
+    pub window: Retained<KeyableWindow>,
     view: Retained<EditorView>,
 }
 
@@ -1728,17 +1763,13 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: title, size, full redraw.
+    /// Show (or replace) the shot in the window: size and full redraw.
     fn display_shot(&self, shot: OpenShot) {
-        let title = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
         self.discard_text_editor();
         self.exit_frame_edit();
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().selection.set(None);
-        if let Some(window) = self.window() {
-            window.setTitle(&NSString::from_str(&title));
-        }
         self.refit_window();
     }
 
@@ -2032,18 +2063,23 @@ impl EditorWindow {
         let view = EditorView::new(mtm);
         view.set_save_dir(save_dir);
         let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
+            KeyableWindow::init_with_content_rect(
+                KeyableWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
                     CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + 2.0 * TOOLBAR_HEIGHT),
                 ),
-                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSWindowStyleMask::Borderless,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
-        window.setTitle(&NSString::from_str("minisnap"));
+        // Borderless chrome: rounded corners come from the content view's
+        // layer clip, the system shadow follows the rounded alpha mask, and
+        // the window background stays transparent under it.
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setHasShadow(true);
         // The window lives in the app controller for the whole process;
         // closing only hides it, the next shot reuses it (no second window).
         // SAFETY: plain setter on the freshly created window.
@@ -2121,6 +2157,12 @@ impl EditorWindow {
         // the canvas grows into the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
+        // The container clips its subviews to the rounded window shape.
+        content.setWantsLayer(true);
+        if let Some(layer) = content.layer() {
+            layer.setCornerRadius(WINDOW_RADIUS);
+            layer.setMasksToBounds(true);
+        }
         // The window cannot shrink below the editing toolbar: its full
         // fitting width plus the side margins.
         let min_width = toolbar.fittingSize().width + 16.0;
