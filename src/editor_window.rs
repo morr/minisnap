@@ -650,12 +650,17 @@ impl EditorView {
         CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
         CGContext::set_line_width(Some(cg), 1.5);
         CGContext::stroke_rect(Some(cg), CGRect::new(CGPoint::new(vx, y0), CGSize::new(vw, vh)));
-        // Handle dots: white fill with the accent ring.
+        // Handle dots: white fill with the accent ring. A dot sitting on
+        // the window edge is pressed inward just enough to stay fully
+        // visible; its hit zone stays at the true spot.
         for (_, point) in self.frame_spot_points() {
-            let c = CGPoint::new(point.x * sx, bounds.size.height - point.y * sy);
             let r = HANDLE_RADIUS_PT;
-            let marker =
-                CGRect::new(CGPoint::new(c.x - r, c.y - r), CGSize::new(2.0 * r, 2.0 * r));
+            let cx = (point.x * sx).clamp(r, (bounds.size.width - r).max(r));
+            let cy = (bounds.size.height - point.y * sy).clamp(r, (bounds.size.height - r).max(r));
+            let marker = CGRect::new(
+                CGPoint::new(cx - r, cy - r),
+                CGSize::new(2.0 * r, 2.0 * r),
+            );
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker);
             let accent: Retained<NSColor> = NSColor::controlAccentColor();
@@ -772,10 +777,17 @@ impl EditorView {
                 }
                 return;
             }
-            // Crop/resize drag the frame's spots; the click never draws
-            // or selects elements.
+            // Crop/resize drag the frame's handles; the click never draws
+            // or selects elements. The crop frame also drags from any
+            // point (moving whole); the resize frame does not move.
             Some(Tool::Crop) | Some(Tool::Resize) => {
-                if let Some((spot, _)) = self.frame_spot_at(point) {
+                let resize = ivars.tool.get() == Some(Tool::Resize);
+                let spot = match self.frame_spot_at(point) {
+                    Some((spot, _)) => Some(spot),
+                    None if !resize => Some(FrameSpot::Center),
+                    None => None,
+                };
+                if let Some(spot) = spot {
                     let orig = self
                         .ivars()
                         .frame_edit
@@ -1257,7 +1269,10 @@ impl EditorView {
         })
     }
 
-    /// The nine frame spots (image pixels), corners first for hit priority.
+    /// The eight frame handles (image pixels), corners first for hit
+    /// priority. There is no center handle: for crop, drags that miss the
+    /// handles move the whole frame (`FrameSpot::Center`); resize has no
+    /// move at all.
     fn frame_spot_points(&self) -> Vec<(FrameSpot, Point)> {
         let Some(r) = self.current_frame_rect() else {
             return Vec::new();
@@ -1272,7 +1287,6 @@ impl EditorView {
             (FrameSpot::E, Point::new(r.max_x(), cy)),
             (FrameSpot::S, Point::new(cx, r.max_y())),
             (FrameSpot::W, Point::new(r.x, cy)),
-            (FrameSpot::Center, Point::new(cx, cy)),
         ]
     }
 
