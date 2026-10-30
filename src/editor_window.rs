@@ -1518,6 +1518,8 @@ impl EditorView {
             ok.setTarget(Some(self));
             ok.setAction(Some(sel!(frameOkClicked:)));
         }
+        ok.setFocusRingType(NSFocusRingType::None);
+        ok.setRefusesFirstResponder(true);
         self.addSubview(&ok);
         *ivars.frame_label.borrow_mut() = Some(label);
         *ivars.frame_ok.borrow_mut() = Some(ok);
@@ -1776,6 +1778,8 @@ impl EditorView {
             };
             button.setBordered(false);
             button.setWantsLayer(true);
+            button.setFocusRingType(NSFocusRingType::None);
+            button.setRefusesFirstResponder(true);
             if let Some(layer) = button.layer() {
                 // SAFETY: plain CGColor bridge of a live color.
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
@@ -1902,7 +1906,8 @@ fn symbol_image(symbol: &str) -> Retained<NSImage> {
 }
 
 /// A toolbar button showing `image` as a template (tinted like the SF
-/// Symbols), with an empty title and the given tag.
+/// Symbols), with an empty title and the given tag. Toolbar buttons never
+/// take first responder: no focus ring, keys stay with the canvas.
 fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> Retained<NSButton> {
     image.setTemplate(true);
     // SAFETY: class convenience constructor, no external invariants.
@@ -1916,6 +1921,8 @@ fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> R
         )
     };
     button.setTag(tag);
+    button.setFocusRingType(NSFocusRingType::None);
+    button.setRefusesFirstResponder(true);
     button
 }
 
@@ -2016,6 +2023,8 @@ impl EditorWindow {
                 mtm,
             )
         };
+        slider.setFocusRingType(NSFocusRingType::None);
+        slider.setRefusesFirstResponder(true);
         toolbar.addArrangedSubview(&slider);
 
         // Layout: toolbar strip at the top, canvas below it. The flexible
@@ -2048,6 +2057,9 @@ impl EditorWindow {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         content.addSubview(&view);
+        // Keys land on the canvas; the toolbar buttons refuse first
+        // responder, so the window never opens with a focused button.
+        window.setInitialFirstResponder(Some(&view));
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
