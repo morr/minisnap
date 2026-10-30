@@ -20,4 +20,22 @@ if [ -n "$IDENTITY" ]; then
 		echo "codesign-run: signing failed; TCC may not recognize this binary" >&2
 	fi
 fi
+
+# Keep /Applications/minisnap.app in sync with the binary cargo runs: the
+# app stays launchable from Finder and the copy behind the TCC grant never
+# goes stale. Test harness binaries (minisnap-<hash>) are skipped, and an
+# ad-hoc build is not installed at all — its grant dies with the rebuild.
+APP="/Applications/minisnap.app"
+if [ "$(basename "$1")" = "minisnap" ] && [ -n "$IDENTITY" ]; then
+	ROOT=$(cd "$(dirname "$0")/.." && pwd)
+	if mkdir -p "$APP/Contents/MacOS" \
+		&& cp "$ROOT/scripts/Info.plist" "$APP/Contents/Info.plist" \
+		&& rm -f "$APP/Contents/MacOS/minisnap" \
+		&& cp "$1" "$APP/Contents/MacOS/minisnap" \
+		&& codesign --force --sign "$IDENTITY" "$APP" >/dev/null 2>&1; then
+		:
+	else
+		echo "codesign-run: cannot refresh $APP" >&2
+	fi
+fi
 exec "$@"
