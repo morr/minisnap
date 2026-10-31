@@ -320,8 +320,8 @@ define_class!(
     unsafe impl NSObjectProtocol for KeyableWindow {}
 
     impl KeyableWindow {
-        #[unsafe(method(canBecomeKey))]
-        fn __can_become_key(&self) -> bool {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn __can_become_key_window(&self) -> bool {
             true
         }
     }

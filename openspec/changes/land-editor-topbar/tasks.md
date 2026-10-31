@@ -7,7 +7,7 @@
 
 ## 2. Клавиатура редактора
 
-- [ ] 2.1 Переименовать переопределение `canBecomeKey` в `canBecomeKeyWindow` у `KeyableWindow` (`src/editor_window.rs`). Проверка: живой прогон — в логе `editor window: key=true`; Esc закрывает окно (вне рамки и ввода текста), ⌘Q закрывает, ⌘Z/⌘⇧Z/⌘C/←→/Delete работают.
+- [x] 2.1 Переименовать переопределение `canBecomeKey` в `canBecomeKeyWindow` у `KeyableWindow` (`src/editor_window.rs`). Проверка: живой прогон — в логе `editor window: key=true`; Esc закрывает окно (вне рамки и ввода текста), ⌘Q закрывает, ⌘Z/⌘⇧Z/⌘C/←→/Delete работают.
 
 ## 3. Видимость свотча и слайдера
 
