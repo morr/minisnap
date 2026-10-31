@@ -81,11 +81,27 @@ fn shot_base_name(unix_secs: i64, utc_offset_secs: i64) -> String {
     format!("MiniSnap_{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}")
 }
 
-/// First unused `MiniSnap …png` path for the given local time. Same-second
-/// collisions get a `_2`, `_3`… suffix; a nanosecond fallback guarantees the
-/// name is free even after 999 shots in one second.
-fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64) -> PathBuf {
-    let base = shot_base_name(unix_secs, utc_offset_secs);
+/// `@2x`-style density suffix for the file name, empty for a 1x capture. The
+/// macOS convention: it also tells the editor at which scale to show the
+/// shot, and survives tmp-session loss and browsing the shots folder.
+fn density_suffix(scale: f64) -> String {
+    if scale > 1.0 {
+        format!("@{}x", scale.round() as i64)
+    } else {
+        String::new()
+    }
+}
+
+/// First unused `MiniSnap …png` path for the given local time and capture
+/// scale. Same-second collisions get a `_2`, `_3`… suffix after the density
+/// suffix; a nanosecond fallback guarantees the name is free even after 999
+/// shots in one second.
+fn unique_shot_path(dir: &Path, unix_secs: i64, utc_offset_secs: i64, scale: f64) -> PathBuf {
+    let base = format!(
+        "{}{}",
+        shot_base_name(unix_secs, utc_offset_secs),
+        density_suffix(scale)
+    );
     let first = dir.join(format!("{base}.png"));
     if !first.exists() {
         return first;
@@ -177,16 +193,17 @@ pub fn enforce_retention(dir: &Path, limit: u32) {
     }
 }
 
-/// Save the shot silently as `dir/MiniSnap_YYYY-MM-DD_HH-MM-SS.png`, creating
+/// Save the shot silently as `dir/MiniSnap_YYYY-MM-DD_HH-MM-SS.png` (with an
+/// `@<n>x` density suffix when the capture scale is above 1x), creating
 /// `dir` (and parents) on demand, numbering same-second collisions and
 /// enforcing the retention limit. Returns the file path.
-pub fn save_to_file(image: &CGImage, dir: &Path, retention: u32) -> Result<PathBuf, String> {
+pub fn save_to_file(image: &CGImage, dir: &Path, retention: u32, scale: f64) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let path = unique_shot_path(dir, unix_secs, local_utc_offset_secs());
+    let path = unique_shot_path(dir, unix_secs, local_utc_offset_secs(), scale);
     encode_png(image, &path)?;
     enforce_retention(dir, retention);
     Ok(path)
@@ -326,26 +343,89 @@ mod tests {
     }
 
     #[test]
+    fn density_suffix_appears_only_above_1x() {
+        assert_eq!(density_suffix(1.0), "");
+        assert_eq!(density_suffix(0.5), "");
+        assert_eq!(density_suffix(2.0), "@2x");
+        assert_eq!(density_suffix(3.0), "@3x");
+    }
+
+    #[test]
     fn unique_path_numbers_same_second_collisions() {
         let dir = std::env::temp_dir().join(format!("minisnap-output-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let base = shot_base_name(1793277296, 0);
 
-        let first = unique_shot_path(&dir, 1793277296, 0);
+        let first = unique_shot_path(&dir, 1793277296, 0, 1.0);
         assert_eq!(first, dir.join(format!("{base}.png")));
         fs::write(&first, b"x").unwrap();
 
-        let second = unique_shot_path(&dir, 1793277296, 0);
+        let second = unique_shot_path(&dir, 1793277296, 0, 1.0);
         assert_eq!(second, dir.join(format!("{base}_2.png")));
         fs::write(&second, b"x").unwrap();
 
-        let third = unique_shot_path(&dir, 1793277296, 0);
+        let third = unique_shot_path(&dir, 1793277296, 0, 1.0);
         assert_eq!(third, dir.join(format!("{base}_3.png")));
 
         // A different second is unaffected by the collisions.
-        let other = unique_shot_path(&dir, 1793277296 + 1, 0);
+        let other = unique_shot_path(&dir, 1793277296 + 1, 0, 1.0);
         assert!(other.to_string_lossy().ends_with("12-34-57.png"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_path_suffixes_density_before_collision_number() {
+        let dir = std::env::temp_dir().join(format!("minisnap-output-dens-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 2026-10-29 12:34:56 UTC.
+        let base = "MiniSnap_2026-10-29_12-34-56";
+
+        let first = unique_shot_path(&dir, 1793277296, 0, 2.0);
+        assert_eq!(first, dir.join(format!("{base}@2x.png")));
+        fs::write(&first, b"x").unwrap();
+
+        // The collision number stays the last name component.
+        let second = unique_shot_path(&dir, 1793277296, 0, 2.0);
+        assert_eq!(second, dir.join(format!("{base}@2x_2.png")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listing_keeps_density_suffixed_names() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("minisnap-output-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for (i, name) in [
+            "MiniSnap_2026-10-29_12-34-55.png".to_string(),
+            "MiniSnap_2026-10-29_12-34-56@2x.png".to_string(),
+            "MiniSnap_2026-10-29_12-34-56@2x_2.png".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.join(&name);
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(b"png").unwrap();
+            file.set_modified(start + std::time::Duration::from_secs(i as u64))
+                .unwrap();
+            drop(file);
+        }
+
+        let shots = sorted_shots(&dir);
+        let names: Vec<String> = shots
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 3, "all three density-named shots listed");
+        assert_eq!(
+            latest_shot(&dir).unwrap().file_name().unwrap().to_string_lossy(),
+            "MiniSnap_2026-10-29_12-34-56@2x_2.png"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -355,14 +435,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let nested = dir.join("one").join("minisnap");
         let frame = synthetic_frame();
-        let path = save_to_file(&frame, &nested, 100).expect("save");
+        let path = save_to_file(&frame, &nested, 100, 1.0).expect("save");
         assert!(path.is_file(), "file written");
         assert!(path.extension().unwrap() == "png");
         // A valid PNG starts with the well-known signature.
         let bytes = fs::read(&path).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
         // Second save in the same second gets the collision number.
-        let second = save_to_file(&frame, &nested, 100).expect("save again");
+        let second = save_to_file(&frame, &nested, 100, 1.0).expect("save again");
         assert_ne!(path, second);
         assert!(second.to_string_lossy().ends_with("_2.png"));
         let _ = fs::remove_dir_all(&dir);

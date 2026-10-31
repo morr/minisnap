@@ -755,7 +755,7 @@ impl AppController {
                     if let Err(e) = crate::output::copy_to_pasteboard(&image) {
                         eprintln!("output: pasteboard: {e}");
                     }
-                    match crate::output::save_to_file(&image, &save_dir, retention) {
+                    match crate::output::save_to_file(&image, &save_dir, retention, 1.0) {
                         Ok(path) => {
                             eprintln!("output: saved {}", path.display());
                             if edit {
