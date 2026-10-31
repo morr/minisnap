@@ -400,6 +400,16 @@ impl AppController {
             None => eprintln!("prefs: cannot install the key event monitor"),
         }
 
+        // MINISNAP_DEBUG_OPEN_EDITOR=<path>: open the editor on the shot
+        // file right at startup, instead of waiting for a capture or the
+        // tray — a debug affordance for testing the editor window, the
+        // sibling of the tuner's MINISNAP_ARROW_DEBUG.
+        if let Some(path) = std::env::var_os("MINISNAP_DEBUG_OPEN_EDITOR") {
+            let _ = this.ivars().jobs_tx.send(MainJob::OpenEditor {
+                path: std::path::PathBuf::from(path),
+            });
+        }
+
         this.schedule_tick(mtm);
         this
     }
