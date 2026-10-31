@@ -2295,6 +2295,9 @@ impl EditorView {
             );
             window.setFrame_display(frame, false);
         } else {
+            // The first placement centers the window; every later refit
+            // anchors it instead.
+            window.setContentSize(CGSize::new(width, height));
             window.center();
             self.ivars().placed.set(true);
         }
