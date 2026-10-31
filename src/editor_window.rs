@@ -47,16 +47,19 @@ const WINDOW_RADIUS: f64 = 12.0;
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
 
-/// Floating toolbar panel height, in points.
+/// Toolbar strip height, in points.
 const TOOLBAR_HEIGHT: f64 = 44.0;
 
-/// Margin between the floating toolbar panel and the window edges, in
-/// points.
-const TOOLBAR_MARGIN: f64 = 10.0;
+/// The top strip the toolbar reserves: the full-height bar itself. The
+/// canvas fills everything below it.
+const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
 
-/// The bottom strip the toolbar reserves: the panel plus its margin. The
-/// canvas fills everything above it.
-const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT + TOOLBAR_MARGIN;
+/// Side padding of the toolbar stack inside the bar, in points.
+const BAR_PAD: f64 = 12.0;
+
+/// The hairline separating the toolbar strip from the canvas: white at a
+/// low alpha over the vibrancy bar.
+const BAR_HAIRLINE: [f64; 4] = [1.0, 1.0, 1.0, 0.12];
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -2699,18 +2702,16 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // The floating toolbar panel at the bottom, Monosnap-style: a
-        // rounded vibrancy pill carrying the ◄/► leafing buttons, the file
-        // name (the borderless window has no system title), the color
-        // swatch with its preset popover, the stroke-width slider and the
-        // tools in Monosnap order.
+        // The toolbar strip across the top: a full-width vibrancy bar
+        // carrying the ◄/► leafing buttons, the file name (the borderless
+        // window has no system title), the tools, the color swatch with its
+        // preset popover and the stroke-width slider.
         let panel = ToolbarPanel::new(mtm);
         panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        // No corner radius of its own: the window's content view clips the
+        // top corners, and the bar's bottom edge must stay square against
+        // the canvas.
         panel.setWantsLayer(true);
-        if let Some(layer) = panel.layer() {
-            layer.setCornerRadius(WINDOW_RADIUS);
-            layer.setMasksToBounds(true);
-        }
         // Hover styling: one tracking area over the panel, owned by the
         // canvas view — it holds the button list and the active tool.
         let tracking = unsafe {
@@ -2820,10 +2821,10 @@ impl EditorWindow {
             tool_buttons.push((tool.tag(), button));
         }
 
-        // Layout: the editing toolbar pinned to the bottom, the canvas
-        // filling everything above it. The flexible max-Y margin keeps the
-        // bottom bar down when the window grows; the canvas grows into the
-        // freed space.
+        // Layout: the toolbar strip across the top, the canvas filling
+        // everything below it. The flexible min-Y margin keeps the bar
+        // pinned to the top when the window grows; the canvas grows into
+        // the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
         // The container clips its subviews to the rounded window shape.
@@ -2832,24 +2833,43 @@ impl EditorWindow {
             layer.setCornerRadius(WINDOW_RADIUS);
             layer.setMasksToBounds(true);
         }
-        // The window cannot shrink below the floating panel: the stack's
-        // fitting width plus the stack insets and the panel's window
-        // margins.
-        let min_width = toolbar.fittingSize().width + 24.0 + 2.0 * TOOLBAR_MARGIN;
+        // The window cannot shrink below the bar: the stack's fitting
+        // width plus its side padding.
+        let min_width = toolbar.fittingSize().width + 2.0 * BAR_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
         panel.setFrame(CGRect::new(
-            CGPoint::new(TOOLBAR_MARGIN, TOOLBAR_MARGIN),
-            CGSize::new(size.width - 2.0 * TOOLBAR_MARGIN, TOOLBAR_HEIGHT),
+            CGPoint::new(0.0, size.height - TOOLBAR_HEIGHT),
+            CGSize::new(size.width, TOOLBAR_HEIGHT),
         ));
         panel.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
         content.addSubview(&panel);
+        // The hairline under the bar: one point of white at a low alpha,
+        // stretching with the bar.
+        // SAFETY: designated initializer with a plain frame.
+        let hairline = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
+        hairline.setWantsLayer(true);
+        if let Some(layer) = hairline.layer() {
+            layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                BAR_HAIRLINE[0],
+                BAR_HAIRLINE[1],
+                BAR_HAIRLINE[2],
+                BAR_HAIRLINE[3],
+            )
+            .CGColor()));
+        }
+        hairline.setFrame(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(size.width, 1.0),
+        ));
+        hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        panel.addSubview(&hairline);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(12.0, 4.0),
-            CGSize::new(size.width - 2.0 * TOOLBAR_MARGIN - 24.0, TOOLBAR_HEIGHT - 8.0),
+            CGPoint::new(BAR_PAD, 0.0),
+            CGSize::new(size.width - 2.0 * BAR_PAD, TOOLBAR_HEIGHT),
         ));
         toolbar.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -2858,7 +2878,7 @@ impl EditorWindow {
         panel.addSubview(&toolbar);
         let canvas_height = size.height - TOOLBAR_RESERVED;
         view.setFrame(CGRect::new(
-            CGPoint::new(0.0, TOOLBAR_RESERVED),
+            CGPoint::ZERO,
             CGSize::new(size.width, canvas_height),
         ));
         view.setAutoresizingMask(

@@ -2,7 +2,7 @@
 
 ## 1. Полоса сверху
 
-- [ ] 1.1 Панель — сплошная верхняя полоса: `ToolbarPanel` на всю ширину у верхнего края (`ViewWidthSizable | ViewMinYMargin`), без собственного скругления (углы скругляет контент-вью); канва — всё окно ниже полосы (`(0, 0, W, H − TOOLBAR_RESERVED)`, `ViewWidthSizable | ViewHeightSizable`); hairline 1 pt (белый 12%, `BAR_HAIRLINE`) под полосой на всю ширину; константы: `TOOLBAR_RESERVED = TOOLBAR_HEIGHT`, `BAR_PAD = 12` вместо `TOOLBAR_MARGIN`; стек `(BAR_PAD, 0, W − 2·BAR_PAD, TOOLBAR_HEIGHT)`; `refit_window`/начальная высота/`min_width` под новые константы. Проверка: `cargo test` зелёный; ручной прогон — полоса сверху на всю ширину с hairline, канва ниже, при ресайзе полоса прижата к верху и канва растёт от низа
+- [x] 1.1 Панель — сплошная верхняя полоса: `ToolbarPanel` на всю ширину у верхнего края (`ViewWidthSizable | ViewMinYMargin`), без собственного скругления (углы скругляет контент-вью); канва — всё окно ниже полосы (`(0, 0, W, H − TOOLBAR_RESERVED)`, `ViewWidthSizable | ViewHeightSizable`); hairline 1 pt (белый 12%, `BAR_HAIRLINE`) под полосой на всю ширину; константы: `TOOLBAR_RESERVED = TOOLBAR_HEIGHT`, `BAR_PAD = 12` вместо `TOOLBAR_MARGIN`; стек `(BAR_PAD, 0, W − 2·BAR_PAD, TOOLBAR_HEIGHT)`; `refit_window`/начальная высота/`min_width` под новые константы. Проверка: `cargo test` зелёный; ручной прогон — полоса сверху на всю ширину с hairline, канва ниже, при ресайзе полоса прижата к верху и канва растёт от низа
 
 ## 2. Зоны и разделители
 
