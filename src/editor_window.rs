@@ -37,9 +37,9 @@ use crate::editor::{
     OpenShot, Point, Rect, Rgba, Size,
 };
 
-/// The dark backdrop the frame sits on.
-const BACKDROP: [f64; 4] = [0.055, 0.055, 0.065, 1.0];
-
+/// Checkerboard cell of the transparent-backdrop fill, in points: the
+/// light checker image editors draw behind transparent areas.
+const CHECKER_CELL_PT: f64 = 8.0;
 /// Corner radius of the borderless editor window (and of the floating
 /// toolbar panel), in points.
 const WINDOW_RADIUS: f64 = 12.0;
@@ -678,6 +678,8 @@ struct EditorIvars {
     /// Displayed frame size, in view points: the shot at its display
     /// scale, centered in the canvas by `frame_rect`.
     frame_size: Cell<CGSize>,
+    /// Cached checkerboard pattern color for the backdrop.
+    checker: RefCell<Option<Retained<NSColor>>>,
 }
 
 define_class!(
@@ -720,6 +722,7 @@ define_class!(
                 min_width: Cell::new(0.0),
                 density: Cell::new(1.0),
                 frame_size: Cell::new(CGSize::ZERO),
+                checker: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -1155,15 +1158,14 @@ impl EditorView {
             return;
         }
 
-        // Backdrop behind the frame.
-        CGContext::set_rgb_fill_color(
-            Some(&cg),
-            BACKDROP[0],
-            BACKDROP[1],
-            BACKDROP[2],
-            BACKDROP[3],
-        );
+        // Backdrop: the light checkerboard image editors draw behind
+        // transparent areas — the frame floats on it, centered.
+        let mut cache = ivars.checker.borrow_mut();
+        let checker = cache.get_or_insert_with(checker_color);
+        // SAFETY: plain setter on a live color.
+        unsafe { checker.setFill() };
         CGContext::fill_rect(Some(&cg), bounds);
+        drop(cache);
 
         let Some(shot) = shot_guard.as_ref() else {
             return;
@@ -1173,14 +1175,21 @@ impl EditorView {
         if iw == 0 || ih == 0 {
             return;
         }
-        let (sx, sy) = (bw / iw as f64, bh / ih as f64);
+        let frame = self.frame_rect();
+        let (sx, sy) = (frame.size.width / iw as f64, frame.size.height / ih as f64);
 
         // The composite content: base frame + elements, drawn in image
-        // pixel units (`draw_elements` applies its own Y flip). A move or
-        // endpoint drag hides its element and shows a transformed preview;
-        // an element under in-place text editing is hidden entirely.
+        // pixel units (`draw_elements` applies its own Y flip) into the
+        // frame rect. A move or endpoint drag hides its element and shows
+        // a transformed preview; an element under in-place text editing is
+        // hidden entirely.
         CGContext::save_g_state(Some(&cg));
+        CGContext::translate_ctm(Some(&cg), frame.origin.x, frame.origin.y);
         CGContext::scale_ctm(Some(&cg), sx, sy);
+        CGContext::clip_to_rect(
+            Some(&cg),
+            CGRect::new(CGPoint::ZERO, CGSize::new(iw as f64, ih as f64)),
+        );
         CGContext::draw_image(
             Some(&cg),
             CGRect::new(CGPoint::ZERO, CGSize::new(iw as f64, ih as f64)),
@@ -3480,6 +3489,31 @@ impl EditorWindow {
         self.view.display_shot(shot);
         self.window.makeKeyAndOrderFront(None);
     }
+}
+
+/// The light checkerboard image editors draw behind transparent areas,
+/// as a cached pattern color: a 2x-scaled 2×2-cell tile stays crisp on
+/// retina screens.
+fn checker_color() -> Retained<NSColor> {
+    let cell = (CHECKER_CELL_PT * 2.0) as usize;
+    let tile_pt = CGSize::new(CHECKER_CELL_PT * 2.0, CHECKER_CELL_PT * 2.0);
+    let Some(ctx) = render::bitmap_context(cell * 2, cell * 2) else {
+        return NSColor::lightGrayColor();
+    };
+    CGContext::set_rgb_fill_color(Some(&ctx), 1.0, 1.0, 1.0, 1.0);
+    CGContext::fill_rect(
+        Some(&ctx),
+        CGRect::new(CGPoint::ZERO, CGSize::new((cell * 2) as f64, (cell * 2) as f64)),
+    );
+    CGContext::set_rgb_fill_color(Some(&ctx), 0.8, 0.8, 0.8, 1.0);
+    CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::ZERO, CGSize::new(cell as f64, cell as f64)));
+    CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::new(cell as f64, cell as f64), CGSize::new(cell as f64, cell as f64)));
+    let Some(image) = CGBitmapContextCreateImage(Some(&ctx)) else {
+        return NSColor::lightGrayColor();
+    };
+    // SAFETY: designated initializers on fresh allocations.
+    let tile = unsafe { NSImage::initWithCGImage_size(NSImage::alloc(), &image, tile_pt) };
+    unsafe { NSColor::colorWithPatternImage(&tile) }
 }
 
 /// Uniformly fit `(w, h)` inside `(max_w, max_h)` without upscaling.
