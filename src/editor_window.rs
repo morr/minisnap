@@ -25,6 +25,7 @@ use objc2_app_kit::{
 };
 use objc2_app_kit::NSAccessibility;
 use objc2_app_kit::NSLayoutConstraintOrientation;
+use objc2_quartz_core::CALayer;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSString, NSNotification, NSRectEdge};
@@ -47,7 +48,7 @@ const WINDOW_RADIUS: f64 = 12.0;
 const MARKER_RADIUS_PT: f64 = 4.5;
 
 /// Toolbar strip height, in points.
-const TOOLBAR_HEIGHT: f64 = 44.0;
+const TOOLBAR_HEIGHT: f64 = 33.0;
 
 /// The top strip the toolbar reserves: the full-height bar itself. The
 /// canvas fills everything below it.
@@ -121,12 +122,25 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
 
+/// Toolbar tag of the close button.
+const CLOSE_TAG: isize = -4;
+
 /// Toolbar tag of the color-swatch button: its layer background is the
 /// current color, so hover styling skips it.
 const COLOR_BUTTON_TAG: isize = -1;
 
-/// Toolbar button side, in points.
-const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(26.0, 26.0);
+/// Toolbar button side, in points: the minimum pointer target a toolbar
+/// icon button is expected to meet; the glyph stays smaller inside it, so
+/// the hover and active plates read with air around the icon.
+const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(28.0, 28.0);
+
+/// Spacing between adjacent toolbar controls, in points: enough air that
+/// the plates of neighboring buttons never read as one strip.
+const BAR_SPACING: f64 = 8.0;
+
+/// Spacing around the zone dividers and between the tool groups, in
+/// points: the wider gap that separates the toolbar's zones.
+const BAR_ZONE_SPACING: f64 = 12.0;
 
 /// Tint of an inactive toolbar symbol: near-white, readable on the dark
 /// HUD panel regardless of the system appearance.
@@ -135,10 +149,14 @@ const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
 /// Hover background of a toolbar button: a faint white wash.
 const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
 
-/// Side of a color swatch (the toolbar swatch and the palette presets), in
-/// points: the minimum pointer target a pointer-driven control is expected
-/// to meet.
-const SWATCH_SIZE: f64 = 24.0;
+/// Diameter of a color swatch's visible circle, in points: the disc sits
+/// inset in the swatch button, at the scale of the icon glyphs, so the
+/// swatch reads as one more toolbar button rather than a big dot.
+const SWATCH_DISC: f64 = 18.0;
+
+/// Side of a palette preset swatch in the color popover, in points: the
+/// minimum pointer target a pointer-driven control is expected to meet.
+const PALETTE_SWATCH_SIZE: f64 = 24.0;
 
 /// Resting outline of a color swatch: bright enough to mark the darkest
 /// presets (black, blue) against the dark HUD panel at the 3:1 boundary
@@ -789,6 +807,15 @@ define_class!(
         #[unsafe(method(frameOkClicked:))]
         fn __frame_ok_clicked(&self, _sender: Option<&AnyObject>) {
             self.commit_frame_edit();
+        }
+
+        #[unsafe(method(closeClicked:))]
+        fn __close_clicked(&self, _sender: Option<&AnyObject>) {
+            // Same path as Esc/⌘Q: closing only hides the window, the
+            // next shot reuses it.
+            if let Some(window) = self.window() {
+                window.close();
+            }
         }
 
         #[unsafe(method(pageClicked:))]
@@ -2366,13 +2393,13 @@ impl EditorView {
             // The toolbar swatch shows the current color as its fill; its
             // hover feedback is the outline.
             if let Some(button) = self.ivars().color_button.borrow().as_ref() {
-                if let Some(layer) = button.layer() {
+                if let Some(disc) = Self::swatch_disc(button) {
                     let hover_ring = if toolbar_hit == Some(COLOR_BUTTON_TAG) {
                         &ring_hover
                     } else {
                         &ring
                     };
-                    layer.setBorderColor(Some(&hover_ring.CGColor()));
+                    disc.setBorderColor(Some(&hover_ring.CGColor()));
                 }
             }
             for button in self.palette_swatch_buttons() {
@@ -2457,18 +2484,26 @@ impl EditorView {
         });
     }
 
+    /// The swatch button's color disc: the one sublayer its layer carries.
+    fn swatch_disc(button: &NSButton) -> Option<Retained<CALayer>> {
+        let layer = button.layer()?;
+        // SAFETY: plain layer-tree read, no external invariants.
+        let layers = unsafe { layer.sublayers() }?;
+        Some(layers.objectAtIndexedSubscript(0))
+    }
+
     /// Show the current color on the toolbar swatch circle.
     fn update_color_swatch(&self) {
         let button = self.ivars().color_button.borrow().clone();
         let Some(button) = button.as_ref() else {
             return;
         };
-        let Some(layer) = button.layer() else {
+        let Some(disc) = Self::swatch_disc(button) else {
             return;
         };
         let [r, g, b, a] = self.ivars().color.get();
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
-        layer.setBackgroundColor(Some(&color.CGColor()));
+        disc.setBackgroundColor(Some(&color.CGColor()));
     }
 
     /// Open (or close) the color preset popover under the swatch button.
@@ -2526,9 +2561,9 @@ impl EditorView {
             button.setRefusesFirstResponder(true);
             if let Some(layer) = button.layer() {
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
-                layer.setCornerRadius(SWATCH_SIZE / 2.0);
-                // The same bright resting outline as the toolbar swatch:
-                // dark presets stay visible on the popover background.
+                layer.setCornerRadius(PALETTE_SWATCH_SIZE / 2.0);
+                // The same bright resting outline as the toolbar swatch's
+                // disc: dark presets stay visible on the popover background.
                 layer.setBorderWidth(1.0);
                 layer.setBorderColor(Some(
                     &NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -2545,10 +2580,10 @@ impl EditorView {
             // preset to nothing, same as the toolbar swatch.
             button.setTranslatesAutoresizingMaskIntoConstraints(false);
             button.widthAnchor()
-                .constraintEqualToConstant(SWATCH_SIZE)
+                .constraintEqualToConstant(PALETTE_SWATCH_SIZE)
                 .setActive(true);
             button.heightAnchor()
-                .constraintEqualToConstant(SWATCH_SIZE)
+                .constraintEqualToConstant(PALETTE_SWATCH_SIZE)
                 .setActive(true);
             button.setTag(index as isize);
             // SAFETY: target is this canvas view, alive for the process.
@@ -2720,7 +2755,7 @@ fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
         .expect("configured symbol")
 }
 
-/// A vertical divider between the toolbar zones: a 1×22 pt view with a
+/// A vertical divider between the toolbar zones: a 1×18 pt view with a
 /// low-alpha white layer. Not a button, so the hover pass ignores it. The
 /// size rides on constraints: the toolbar stack sizes arranged views by
 /// autolayout and would collapse a frame-only view.
@@ -2741,7 +2776,7 @@ fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
         .constraintEqualToConstant(1.0)
         .setActive(true);
     view.heightAnchor()
-        .constraintEqualToConstant(22.0)
+        .constraintEqualToConstant(18.0)
         .setActive(true);
     view
 }
@@ -2775,7 +2810,7 @@ fn icon_button(
     button.setBordered(false);
     button.setWantsLayer(true);
     if let Some(layer) = button.layer() {
-        layer.setCornerRadius(6.0);
+        layer.setCornerRadius(7.0);
     }
     button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
     let name = NSString::from_str(title);
@@ -3174,8 +3209,18 @@ impl EditorWindow {
         panel.addTrackingArea(&tracking);
         let toolbar = NSStackView::new(mtm);
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        toolbar.setSpacing(6.0);
+        toolbar.setSpacing(BAR_SPACING);
         let mut tool_buttons = Vec::new();
+        // The close button leads the bar: the borderless window has no
+        // system traffic lights, the ✕ is the visible way out.
+        let close_button = symbol_button(mtm, "xmark", "Close", CLOSE_TAG);
+        // SAFETY: target is this canvas view, alive for the process.
+        unsafe {
+            close_button.setTarget(Some(&view));
+            close_button.setAction(Some(sel!(closeClicked:)));
+        }
+        toolbar.addArrangedSubview(&close_button);
+        tool_buttons.push((CLOSE_TAG, close_button));
         for (tag, symbol, title) in [
             (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
             (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
@@ -3199,12 +3244,12 @@ impl EditorWindow {
             NSLayoutConstraintOrientation::Horizontal,
         );
         toolbar.addArrangedSubview(&file_label);
-        // Zones: leafing + file name | tools | color + width, separated
-        // by 1 pt dividers with a wider gap around them.
-        toolbar.setCustomSpacing_afterView(10.0, &file_label);
+        // Zones: close + leafing + file name | color + width | tools,
+        // separated by 1 pt dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
         let leading_sep = bar_separator(mtm);
         toolbar.addArrangedSubview(&leading_sep);
-        toolbar.setCustomSpacing_afterView(10.0, &leading_sep);
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leading_sep);
         // The color swatch: a circle showing the current color (no symbol);
         // the popover with the presets opens on click.
         // SAFETY: class convenience constructor, plain setters afterwards.
@@ -3216,34 +3261,43 @@ impl EditorWindow {
         color_button.setRefusesFirstResponder(true);
         color_button.setBordered(false);
         color_button.setWantsLayer(true);
+        // The visible disc is an inset sublayer at the scale of the icon
+        // glyphs; the button itself keeps the toolbar buttons' target size,
+        // so the swatch reads as one more button. The bright outline keeps
+        // dark presets (black, blue) distinguishable from the panel at
+        // boundary contrast; on hover the outline brightens instead of the
+        // fill (the fill is the color itself).
+        let disc = CALayer::new();
+        let inset = (TOOLBAR_BUTTON_SIZE.width - SWATCH_DISC) / 2.0;
+        disc.setFrame(CGRect::new(
+            CGPoint::new(inset, inset),
+            CGSize::new(SWATCH_DISC, SWATCH_DISC),
+        ));
+        disc.setCornerRadius(SWATCH_DISC / 2.0);
+        disc.setBorderWidth(1.0);
+        disc.setBorderColor(Some(
+            &NSColor::colorWithSRGBRed_green_blue_alpha(
+                SWATCH_RING[0],
+                SWATCH_RING[1],
+                SWATCH_RING[2],
+                SWATCH_RING[3],
+            )
+            .CGColor(),
+        ));
         if let Some(layer) = color_button.layer() {
-            layer.setCornerRadius(SWATCH_SIZE / 2.0);
-            // A bright resting outline keeps dark presets (black, blue)
-            // distinguishable from the panel at boundary contrast; on hover
-            // the outline brightens instead of the fill (the fill is the
-            // color itself).
-            layer.setBorderWidth(1.0);
-            layer.setBorderColor(Some(
-                &NSColor::colorWithSRGBRed_green_blue_alpha(
-                    SWATCH_RING[0],
-                    SWATCH_RING[1],
-                    SWATCH_RING[2],
-                    SWATCH_RING[3],
-                )
-                .CGColor(),
-            ));
+            layer.addSublayer(&disc);
         }
         // The swatch has no intrinsic size (borderless button, empty
-        // title): its 24×24 size must ride on constraints, or the toolbar
+        // title): its size must ride on constraints, or the toolbar
         // stack collapses it to nothing.
         color_button.setTranslatesAutoresizingMaskIntoConstraints(false);
         color_button
             .widthAnchor()
-            .constraintEqualToConstant(SWATCH_SIZE)
+            .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.width)
             .setActive(true);
         color_button
             .heightAnchor()
-            .constraintEqualToConstant(SWATCH_SIZE)
+            .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
             .setActive(true);
         let name = NSString::from_str("Color");
         color_button.setToolTip(Some(&name));
@@ -3264,6 +3318,23 @@ impl EditorWindow {
             slider.set_target(Some(&*view));
             slider.set_action(Some(sel!(widthChanged:)));
         }
+        // The color and the width follow the file name: they dress the
+        // element being drawn before the tools start.
+        // The slider sizes itself through its intrinsicContentSize — the
+        // toolbar stack reads it for layout.
+        let slider = WidthSliderView::new(mtm);
+        // SAFETY: target is this canvas view, alive for the process; the
+        // action reads `doubleValue` off the sender.
+        unsafe {
+            slider.set_target(Some(&*view));
+            slider.set_action(Some(sel!(widthChanged:)));
+        }
+        toolbar.addArrangedSubview(&color_button);
+        toolbar.addArrangedSubview(&slider);
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &slider);
+        let trailing_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&trailing_sep);
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &trailing_sep);
         for tool in Tool::all() {
             let button = match tool {
                 Tool::Callout => icon_button(mtm, callout_icon(), tool.name(), tool.tag()),
@@ -3279,15 +3350,10 @@ impl EditorWindow {
             // transforming (Pen and Blur end their groups, Resize ends
             // the tools zone).
             if matches!(tool, Tool::Pen | Tool::Blur | Tool::Resize) {
-                toolbar.setCustomSpacing_afterView(10.0, &button);
+                toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &button);
             }
             tool_buttons.push((tool.tag(), button));
         }
-        let trailing_sep = bar_separator(mtm);
-        toolbar.addArrangedSubview(&trailing_sep);
-        toolbar.setCustomSpacing_afterView(10.0, &trailing_sep);
-        toolbar.addArrangedSubview(&color_button);
-        toolbar.addArrangedSubview(&slider);
 
         // Layout: the toolbar strip across the top, the canvas filling
         // everything below it. The flexible min-Y margin keeps the bar
