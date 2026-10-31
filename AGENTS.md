@@ -37,3 +37,12 @@ tasks) and is implemented task by task from that change's `tasks.md`.
 - During apply, work strictly from the change's task list; if a task needs
   work beyond what its spec describes, surface it instead of silently
   widening the change.
+
+## Worktrees
+
+The project has no worktree helper scripts — plain git mechanics. A worktree
+lives inside the project at `.worktrees/<branch>` (the directory is already
+in `.gitignore`). Create the branch and the worktree in one step —
+`git worktree add -b <branch> .worktrees/<branch> [base]` — and remove the
+worktree with `git worktree remove .worktrees/<branch>`; the branch ref
+itself stays.
