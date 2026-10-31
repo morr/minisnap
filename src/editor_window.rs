@@ -672,6 +672,9 @@ struct EditorIvars {
     toolbar_panel: RefCell<Option<Retained<ToolbarPanel>>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
+    /// Whether the window has been placed already: the first refit centers
+    /// it, later refits keep the top-left corner.
+    placed: Cell<bool>,
 }
 
 define_class!(
@@ -712,6 +715,7 @@ define_class!(
                 arrow_param_rows: RefCell::new(Vec::new()),
                 toolbar_panel: RefCell::new(None),
                 min_width: Cell::new(0.0),
+                placed: Cell::new(false),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -2270,11 +2274,24 @@ impl EditorView {
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
         // The refit never shrinks below the toolbar's minimum width.
         let width = content_size.width.max(self.ivars().min_width.get());
-        window.setContentSize(CGSize::new(
-            width,
-            content_size.height + TOOLBAR_RESERVED,
-        ));
-        window.center();
+        let height = content_size.height + TOOLBAR_RESERVED;
+        if self.ivars().placed.get() {
+            // Keep the window's top-left corner where it was: AppKit's frame
+            // origin is the bottom-left one, so the same corner moves the
+            // origin by the height delta.
+            let old = window.frame();
+            let frame = CGRect::new(
+                CGPoint::new(old.origin.x, old.origin.y + old.size.height - height),
+                CGSize::new(width, height),
+            );
+            window.setFrame_display(frame, false);
+        } else {
+            // The first placement centers the window; every later refit
+            // anchors it instead.
+            window.setContentSize(CGSize::new(width, height));
+            window.center();
+            self.ivars().placed.set(true);
+        }
         self.redraw();
     }
 
