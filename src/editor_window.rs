@@ -7,21 +7,24 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{
     define_class, extern_methods, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker,
-    MainThreadOnly,
+    MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSBox, NSBoxType, NSColor, NSControl,
-    NSTitlePosition,
-    NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
-    NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSPopoverDelegate, NSPasteboard, NSPasteboardTypeString, NSScreen, NSSlider,
-    NSStackView, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
+    NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox, NSBoxType, NSButton,
+    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
+    NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
+    NSImageSymbolConfiguration, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSPopover,
+    NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSVisualEffectMaterial,
+    NSVisualEffectView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
+use objc2_app_kit::NSAccessibility;
+use objc2_app_kit::NSLayoutConstraintOrientation;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSString, NSNotification, NSRectEdge};
@@ -34,13 +37,31 @@ use crate::editor::{
 };
 
 /// The dark backdrop the frame sits on.
-const BACKDROP: [f64; 4] = [0.12, 0.12, 0.14, 1.0];
+const BACKDROP: [f64; 4] = [0.055, 0.055, 0.065, 1.0];
+
+/// Corner radius of the borderless editor window (and of the floating
+/// toolbar panel), in points.
+const WINDOW_RADIUS: f64 = 12.0;
 
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
 
 /// Toolbar strip height, in points.
-const TOOLBAR_HEIGHT: f64 = 40.0;
+const TOOLBAR_HEIGHT: f64 = 44.0;
+
+/// The top strip the toolbar reserves: the full-height bar itself. The
+/// canvas fills everything below it.
+const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
+
+/// Side padding of the toolbar stack inside the bar, in points.
+const BAR_PAD: f64 = 12.0;
+
+/// The hairline separating the toolbar strip from the canvas: white at a
+/// low alpha over the vibrancy bar.
+const BAR_HAIRLINE: [f64; 4] = [1.0, 1.0, 1.0, 0.12];
+
+/// The vertical dividers between the toolbar zones: white at a low alpha.
+const BAR_DIVIDER: [f64; 4] = [1.0, 1.0, 1.0, 0.15];
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -54,7 +75,23 @@ const STROKE_MIN: f64 = 1.0;
 const STROKE_MAX: f64 = 12.0;
 
 /// Width of the stroke-width slider in the toolbar, in points.
-const STROKE_SLIDER_WIDTH_PT: f64 = 115.0;
+const STROKE_SLIDER_WIDTH_PT: f64 = 90.0;
+
+/// Knob radius of the custom stroke-width slider, in points.
+const SLIDER_KNOB_RADIUS: f64 = 6.5;
+
+/// Height of the custom stroke-width slider's track, in points.
+const SLIDER_TRACK_HEIGHT: f64 = 3.0;
+
+/// Wash behind the active tool's button: the system accent at this alpha.
+const ACTIVE_WASH: f64 = 0.25;
+
+/// The part of the slider track ahead of the knob's reach: a faint white
+/// line reading as recessed.
+const TRACK_UNFILLED: f64 = 0.22;
+
+/// Alpha of the slider knob's soft shadow.
+const KNOB_SHADOW: f64 = 0.35;
 
 /// A drag shorter than this (in image pixels) is a plain click, not a
 /// drawn element.
@@ -78,6 +115,40 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
+
+/// Toolbar tag of the color-swatch button: its layer background is the
+/// current color, so hover styling skips it.
+const COLOR_BUTTON_TAG: isize = -1;
+
+/// Toolbar button side, in points.
+const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(26.0, 26.0);
+
+/// Tint of an inactive toolbar symbol: near-white, readable on the dark
+/// HUD panel regardless of the system appearance.
+const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+
+/// Hover background of a toolbar button: a faint white wash.
+const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
+
+/// Side of a color swatch (the toolbar swatch and the palette presets), in
+/// points: the minimum pointer target a pointer-driven control is expected
+/// to meet.
+const SWATCH_SIZE: f64 = 24.0;
+
+/// Resting outline of a color swatch: bright enough to mark the darkest
+/// presets (black, blue) against the dark HUD panel at the 3:1 boundary
+/// contrast graphics are expected to reach, faint enough not to read as a
+/// highlight.
+const SWATCH_RING: [f64; 4] = [1.0, 1.0, 1.0, 0.5];
+
+/// Hover outline of a color swatch: the ring brightens on hover instead of
+/// the fill — the fill is the color itself.
+const SWATCH_RING_HOVER: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+
+/// Crossfade length of toolbar plate changes (hover, tool highlight), in
+/// seconds. Short enough that feedback stays responsive; the database rule
+/// is only that instant swaps are the anti-pattern.
+const PLATE_TRANSITION: f64 = 0.15;
 
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
@@ -216,13 +287,314 @@ impl Tool {
         self as isize
     }
 
+    /// Human-readable name for the button's tooltip and accessibility
+    /// label: icon-only buttons carry no visible text, and the SF Symbol
+    /// name is not a name a person can read.
+    fn name(self) -> &'static str {
+        match self {
+            Tool::Arrow => "Arrow",
+            Tool::Rect => "Rectangle",
+            Tool::Line => "Line",
+            Tool::Pen => "Freehand",
+            Tool::Text => "Text",
+            Tool::Callout => "Callout",
+            Tool::Blur => "Blur",
+            Tool::Crop => "Crop",
+            Tool::Resize => "Resize",
+        }
+    }
+
     fn from_tag(tag: isize) -> Option<Tool> {
         Tool::all().into_iter().find(|tool| tool.tag() == tag)
     }
 }
 
+define_class!(
+    /// The editor's borderless window. Borderless `NSWindow`s refuse key
+    /// status by default; the canvas lives on keyboard commands (Esc, ⌘Q,
+    /// ⌘C, ⌘Z, ←/→), so the window must accept key.
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    pub struct KeyableWindow;
+
+    unsafe impl NSObjectProtocol for KeyableWindow {}
+
+    impl KeyableWindow {
+        #[unsafe(method(canBecomeKey))]
+        fn __can_become_key(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl KeyableWindow {
+    extern_methods!(
+        #[unsafe(method(initWithContentRect:styleMask:backing:defer:))]
+        unsafe fn init_with_content_rect(
+            this: objc2::rc::Allocated<Self>,
+            content_rect: CGRect,
+            style: NSWindowStyleMask,
+            backing: NSBackingStoreType,
+            defer: bool,
+        ) -> Retained<Self>;
+    );
+}
+
+define_class!(
+    /// The floating toolbar panel: a vibrancy pill that drags the window
+    /// when a click lands on its free surface. Controls consume their own
+    /// clicks, so they never reach this handler.
+    #[unsafe(super(NSVisualEffectView))]
+    #[thread_kind = MainThreadOnly]
+    struct ToolbarPanel;
+
+    unsafe impl NSObjectProtocol for ToolbarPanel {}
+
+    impl ToolbarPanel {
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                window.performWindowDragWithEvent(event);
+            }
+        }
+    }
+);
+
+impl ToolbarPanel {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        unsafe fn init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self>;
+    );
+
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: designated initializer with no ivars.
+        unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
+    }
+}
+
+/// Ivars of the custom stroke-width slider.
+struct WidthSliderIvars {
+    value: Cell<f64>,
+    target: RefCell<Option<Retained<AnyObject>>>,
+    action: Cell<Option<Sel>>,
+}
+
+define_class!(
+    /// The custom-drawn stroke-width slider: a thin track, an accent fill
+    /// and a white round knob. The contract mirrors the `NSSlider` it
+    /// replaced — `doubleValue` is what the editor's `widthChanged:` reads
+    /// and `setDoubleValue:` is what syncs the knob with the selection —
+    /// but it draws itself and reports every drag step (the width edits
+    /// collapse into one undo step anyway).
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = WidthSliderIvars]
+    struct WidthSliderView;
+
+    unsafe impl NSObjectProtocol for WidthSliderView {}
+
+    impl WidthSliderView {
+        #[unsafe(method_id(initWithFrame:))]
+        unsafe fn __init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self> {
+            let this = this.set_ivars(WidthSliderIvars {
+                value: Cell::new(DEFAULT_STROKE_WIDTH),
+                target: RefCell::new(None),
+                action: Cell::new(None),
+            });
+            // SAFETY: NSView's designated initializer with plain ivars set.
+            unsafe { msg_send![super(this), initWithFrame: frame_rect] }
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn __accepts_first_responder(&self) -> bool {
+            // Keys stay with the canvas, like every other toolbar control.
+            false
+        }
+
+        #[unsafe(method(doubleValue))]
+        fn __double_value(&self) -> f64 {
+            self.ivars().value.get()
+        }
+
+        #[unsafe(method(setDoubleValue:))]
+        fn __set_double_value(&self, value: f64) {
+            self.set_value(value.clamp(STROKE_MIN, STROKE_MAX));
+        }
+
+        #[unsafe(method(setTarget:))]
+        unsafe fn __set_target(&self, target: Option<&AnyObject>) {
+            *self.ivars().target.borrow_mut() = target.and_then(|target| {
+                // SAFETY: the target outlives the slider's use of it — the
+                // editor view owns both ends of the pair.
+                unsafe { Retained::retain((target as *const AnyObject).cast_mut()) }
+            });
+        }
+
+        #[unsafe(method(setAction:))]
+        unsafe fn __set_action(&self, action: Option<Sel>) {
+            self.ivars().action.set(action);
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn __draw_rect(&self, _dirty_rect: CGRect) {
+            self.draw();
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn __mouse_down(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn __mouse_dragged(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn __mouse_up(&self, event: &NSEvent) {
+            self.drag_to(event);
+        }
+    }
+);
+
+impl WidthSliderView {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        unsafe fn init_with_frame(
+            this: objc2::rc::Allocated<Self>,
+            frame_rect: CGRect,
+        ) -> Retained<Self>;
+
+        #[unsafe(method(setTarget:))]
+        unsafe fn set_target(&self, target: Option<&AnyObject>);
+
+        #[unsafe(method(setAction:))]
+        unsafe fn set_action(&self, action: Option<Sel>);
+
+        #[unsafe(method(setDoubleValue:))]
+        fn set_double_value(&self, value: f64);
+    );
+
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: designated initializer with plain ivars set.
+        unsafe { Self::init_with_frame(Self::alloc(mtm), CGRect::ZERO) }
+    }
+
+    /// Center X of the knob for the current value, in view points.
+    fn knob_x(&self, width: f64) -> f64 {
+        let frac = ((self.ivars().value.get() - STROKE_MIN) / (STROKE_MAX - STROKE_MIN))
+            .clamp(0.0, 1.0);
+        SLIDER_KNOB_RADIUS + (width - 2.0 * SLIDER_KNOB_RADIUS) * frac
+    }
+
+    /// Store the value, redraw, and report the change through the
+    /// target/action pair (the `widthChanged:` editor handler).
+    fn set_value(&self, value: f64) {
+        let old = self.ivars().value.get();
+        self.ivars().value.set(value);
+        if value == old {
+            return;
+        }
+        self.setNeedsDisplayInRect(self.bounds());
+        self.send_action();
+    }
+
+    /// Track the drag (or a plain click) to the event's X position.
+    fn drag_to(&self, event: &NSEvent) {
+        let bounds = self.bounds();
+        if bounds.size.width < 2.0 * SLIDER_KNOB_RADIUS {
+            return;
+        }
+        let local = self.convertPoint_fromView(event.locationInWindow(), None);
+        let frac = ((local.x - SLIDER_KNOB_RADIUS)
+            / (bounds.size.width - 2.0 * SLIDER_KNOB_RADIUS))
+        .clamp(0.0, 1.0);
+        self.set_value(STROKE_MIN + (STROKE_MAX - STROKE_MIN) * frac);
+    }
+
+    /// Fire the target/action pair like a control would.
+    fn send_action(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let action = self.ivars().action.get();
+        let target = self.ivars().target.borrow().clone();
+        if let Some(action) = action {
+            // SAFETY: main-thread target/action pair; the action takes the
+            // slider as its sender.
+            unsafe {
+                NSApplication::sharedApplication(mtm).sendAction_to_from(
+                    action,
+                    target.as_deref(),
+                    Some(self),
+                );
+            }
+        }
+    }
+
+    /// The track, the accent fill up to the knob, and the white knob.
+    fn draw(&self) {
+        let Some(context) = NSGraphicsContext::currentContext() else {
+            return;
+        };
+        let cg = context.CGContext();
+        let bounds = self.bounds();
+        let (w, h) = (bounds.size.width, bounds.size.height);
+        if w < 2.0 * SLIDER_KNOB_RADIUS {
+            return;
+        }
+        let knob_x = self.knob_x(w);
+        let track_y = h / 2.0 - SLIDER_TRACK_HEIGHT / 2.0;
+        // The recessed track behind the fill.
+        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, TRACK_UNFILLED);
+        CGContext::fill_rect(
+            Some(&cg),
+            CGRect::new(
+                CGPoint::new(SLIDER_KNOB_RADIUS, track_y),
+                CGSize::new(w - 2.0 * SLIDER_KNOB_RADIUS, SLIDER_TRACK_HEIGHT),
+            ),
+        );
+        // The accent fill from the left end to the knob center.
+        let filled = knob_x - SLIDER_KNOB_RADIUS;
+        if filled > 0.0 {
+            let accent: Retained<NSColor> = NSColor::controlAccentColor();
+            let accent_cg = accent.CGColor();
+            CGContext::set_fill_color_with_color(Some(&cg), Some(&accent_cg));
+            CGContext::fill_rect(
+                Some(&cg),
+                CGRect::new(
+                    CGPoint::new(SLIDER_KNOB_RADIUS, track_y),
+                    CGSize::new(filled, SLIDER_TRACK_HEIGHT),
+                ),
+            );
+        }
+        // The knob: a white disc with a soft shadow.
+        let knob = CGRect::new(
+            CGPoint::new(knob_x - SLIDER_KNOB_RADIUS, h / 2.0 - SLIDER_KNOB_RADIUS),
+            CGSize::new(2.0 * SLIDER_KNOB_RADIUS, 2.0 * SLIDER_KNOB_RADIUS),
+        );
+        let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, KNOB_SHADOW);
+        let shadow_cg = shadow.CGColor();
+        CGContext::set_shadow_with_color(
+            Some(&cg),
+            CGSize::new(0.0, 1.0),
+            2.0,
+            Some(&shadow_cg),
+        );
+        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, 1.0);
+        CGContext::fill_ellipse_in_rect(Some(&cg), knob);
+        CGContext::set_shadow_with_color(Some(&cg), CGSize::ZERO, 0.0, None);
+    }
+}
+
 pub struct EditorWindow {
-    pub window: Retained<NSWindow>,
+    pub window: Retained<KeyableWindow>,
     view: Retained<EditorView>,
 }
 
@@ -252,17 +624,22 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
+    /// The file-name label in the toolbar (the borderless window has no
+    /// system title).
+    file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
     color_button: RefCell<Option<Retained<NSButton>>>,
     /// The open color popover, if any.
     color_popover: RefCell<Option<Retained<NSPopover>>>,
-    /// The stroke-width slider (its handle mirrors the selection's width).
-    width_slider: RefCell<Option<Retained<NSSlider>>>,
+    /// The stroke-width slider (its knob mirrors the selection's width).
+    width_slider: RefCell<Option<Retained<WidthSliderView>>>,
     /// Debug tuner rows: each arrow-param slider with its value field
     /// (position matches ARROW_PARAM_SPECS; empty without the tuner).
     arrow_param_rows: RefCell<Vec<(Retained<NSSlider>, Retained<NSTextField>)>>,
+    /// The floating toolbar panel (hover hit-testing target).
+    toolbar_panel: RefCell<Option<Retained<ToolbarPanel>>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
 }
@@ -295,11 +672,13 @@ define_class!(
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
+                file_label: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
                 width_slider: RefCell::new(None),
                 arrow_param_rows: RefCell::new(Vec::new()),
+                toolbar_panel: RefCell::new(None),
                 min_width: Cell::new(0.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -376,6 +755,21 @@ define_class!(
                 let rect = self.spot_cursor_rect(point);
                 self.addCursorRect_cursor(rect, &cursor);
             }
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn __mouse_entered(&self, event: &NSEvent) {
+            self.hover_at(Some(event));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn __mouse_exited(&self, _event: &NSEvent) {
+            self.hover_at(None);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn __mouse_moved(&self, event: &NSEvent) {
+            self.hover_at(Some(event));
         }
 
         #[unsafe(method(frameOkClicked:))]
@@ -833,12 +1227,14 @@ impl EditorView {
             CGContext::fill_rect(Some(cg), r);
         }
         // Frame border.
-        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 0.9);
         CGContext::set_line_width(Some(cg), 1.5);
         CGContext::stroke_rect(Some(cg), CGRect::new(CGPoint::new(vx, y0), CGSize::new(vw, vh)));
         // Handle dots: white fill with the accent ring. A dot sitting on
         // the window edge is pressed inward just enough to stay fully
         // visible; its hit zone stays at the true spot.
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
             let cx = (point.x * sx).clamp(r, (bounds.size.width - r).max(r));
@@ -847,10 +1243,18 @@ impl EditorView {
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
             );
+            // A soft shadow keeps the dots readable over light frames.
+            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+            let shadow_cg = shadow.CGColor();
+            CGContext::set_shadow_with_color(
+                Some(cg),
+                CGSize::new(0.0, 1.0),
+                2.0,
+                Some(&shadow_cg),
+            );
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker);
-            let accent: Retained<NSColor> = NSColor::controlAccentColor();
-            let accent_cg = accent.CGColor();
+            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
             CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
             CGContext::set_line_width(Some(cg), 1.5);
             CGContext::stroke_ellipse_in_rect(Some(cg), marker);
@@ -899,8 +1303,18 @@ impl EditorView {
             let r = MARKER_RADIUS_PT;
             let marker_rect =
                 CGRect::new(CGPoint::new(p.x - r, p.y - r), CGSize::new(2.0 * r, 2.0 * r));
+            // A soft shadow keeps the markers readable over light frames.
+            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+            let shadow_cg = shadow.CGColor();
+            CGContext::set_shadow_with_color(
+                Some(cg),
+                CGSize::new(0.0, 1.0),
+                2.0,
+                Some(&shadow_cg),
+            );
             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
             CGContext::fill_ellipse_in_rect(Some(cg), marker_rect);
+            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
             CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
             CGContext::set_line_width(Some(cg), 1.5);
             CGContext::stroke_ellipse_in_rect(Some(cg), marker_rect);
@@ -1340,7 +1754,7 @@ impl EditorView {
         });
         let Some(width) = width else { return };
         let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
-        slider.setDoubleValue(clamped);
+        slider.set_double_value(clamped);
         self.ivars().stroke_width.set(clamped);
     }
 
@@ -1661,6 +2075,17 @@ impl EditorView {
         }
         ok.setFocusRingType(NSFocusRingType::None);
         ok.setRefusesFirstResponder(true);
+        // The default-button weight: Enter applies the frame, the button is
+        // the frame mode's confirmation.
+        ok.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
+        // An accent plate instead of the default bezel; the title renders
+        // white on it in the window's dark appearance.
+        ok.setBordered(false);
+        ok.setWantsLayer(true);
+        if let Some(layer) = ok.layer() {
+            layer.setCornerRadius(6.0);
+            layer.setBackgroundColor(Some(&NSColor::controlAccentColor().CGColor()));
+        }
         self.addSubview(&ok);
         *ivars.frame_label.borrow_mut() = Some(label);
         *ivars.frame_ok.borrow_mut() = Some(ok);
@@ -1795,7 +2220,7 @@ impl EditorView {
                     iw as f64,
                     ih as f64,
                     visible.width,
-                    visible.height - 2.0 * TOOLBAR_HEIGHT,
+                    visible.height - TOOLBAR_RESERVED,
                 )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
@@ -1803,22 +2228,23 @@ impl EditorView {
         let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
             width,
-            content_size.height + 2.0 * TOOLBAR_HEIGHT,
+            content_size.height + TOOLBAR_RESERVED,
         ));
         window.center();
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: title, size, full redraw.
+    /// Show (or replace) the shot in the window: file-name label, size,
+    /// full redraw.
     fn display_shot(&self, shot: OpenShot) {
-        let title = shot.file_name();
+        let file_name = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
         self.discard_text_editor();
         self.exit_frame_edit();
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().selection.set(None);
-        if let Some(window) = self.window() {
-            window.setTitle(&NSString::from_str(&title));
+        if let Some(label) = self.ivars().file_label.borrow().as_ref() {
+            label.setStringValue(&NSString::from_str(&file_name));
         }
         self.refit_window();
     }
@@ -1849,28 +2275,174 @@ impl EditorView {
         }
     }
 
-    /// Accent-tint the active tool's button, clear the others.
-    fn update_tool_highlight(&self) {
-        let active = self.ivars().tool.get().map(|tool| tool.tag());
-        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if Some(*tag) == active {
-                let accent: Retained<NSColor> = NSColor::controlAccentColor();
-                button.setBezelColor(Some(&accent));
-            } else {
-                button.setBezelColor(None);
+    /// Restyle the controls under the cursor: a faint wash on the hovered
+    /// toolbar button, a brighter outline on the hovered color swatch,
+    /// nothing on the others. The active tool's button and the swatch fill
+    /// own their backgrounds and are skipped. The toolbar panel lives in
+    /// the editor window and the palette presets in the popover's own
+    /// window, so the event's window decides which surface is under the
+    /// cursor; `None` (the cursor left both) clears both.
+    fn hover_at(&self, event: Option<&NSEvent>) {
+        let (toolbar_hit, preset_hit) = match event {
+            None => (None, None),
+            Some(event) => {
+                let point = event.locationInWindow();
+                // Compared by window number: NSEvent::window needs a
+                // MainThreadMarker, the number needs nothing.
+                let editor_number = self.window().map(|window| window.windowNumber());
+                let in_editor_window = editor_number == Some(event.windowNumber());
+                if in_editor_window {
+                    (self.panel_button_at(point), None)
+                } else {
+                    (None, self.palette_button_at(point))
+                }
             }
-        }
+        };
+        let active = self.ivars().tool.get().map(|tool| tool.tag());
+        // The active tool's accent background reads as a highlight already.
+        let toolbar_hit = if toolbar_hit.is_some() && toolbar_hit == active {
+            None
+        } else {
+            toolbar_hit
+        };
+        let hover = NSColor::colorWithSRGBRed_green_blue_alpha(
+            HOVER_BG[0],
+            HOVER_BG[1],
+            HOVER_BG[2],
+            HOVER_BG[3],
+        );
+        let ring = NSColor::colorWithSRGBRed_green_blue_alpha(
+            SWATCH_RING[0],
+            SWATCH_RING[1],
+            SWATCH_RING[2],
+            SWATCH_RING[3],
+        );
+        let ring_hover = NSColor::colorWithSRGBRed_green_blue_alpha(
+            SWATCH_RING_HOVER[0],
+            SWATCH_RING_HOVER[1],
+            SWATCH_RING_HOVER[2],
+            SWATCH_RING_HOVER[3],
+        );
+        animate_plate_changes(|| {
+            for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+                if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
+                    continue;
+                }
+                if let Some(layer) = button.layer() {
+                    let bg: Option<&NSColor> = if Some(*tag) == toolbar_hit {
+                        Some(&hover)
+                    } else {
+                        None
+                    };
+                    layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
+                }
+            }
+            // The toolbar swatch shows the current color as its fill; its
+            // hover feedback is the outline.
+            if let Some(button) = self.ivars().color_button.borrow().as_ref() {
+                if let Some(layer) = button.layer() {
+                    let hover_ring = if toolbar_hit == Some(COLOR_BUTTON_TAG) {
+                        &ring_hover
+                    } else {
+                        &ring
+                    };
+                    layer.setBorderColor(Some(&hover_ring.CGColor()));
+                }
+            }
+            for button in self.palette_swatch_buttons() {
+                if let Some(layer) = button.layer() {
+                    let hover_ring = if Some(button.tag()) == preset_hit {
+                        &ring_hover
+                    } else {
+                        &ring
+                    };
+                    layer.setBorderColor(Some(&hover_ring.CGColor()));
+                }
+            }
+        });
     }
 
-    /// Show the current color on the toolbar swatch.
+    /// Tag of the toolbar-panel button under a window-space point.
+    fn panel_button_at(&self, point: CGPoint) -> Option<isize> {
+        let panel = self.ivars().toolbar_panel.borrow().clone()?;
+        let hit = panel.hitTest(panel.convertPoint_fromView(point, None))?;
+        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+    }
+
+    /// Tag of the palette preset under a window-space point, if the
+    /// popover is open.
+    fn palette_button_at(&self, point: CGPoint) -> Option<isize> {
+        let popover = self.ivars().color_popover.borrow().clone()?;
+        if !popover.isShown() {
+            return None;
+        }
+        let controller = popover.contentViewController()?;
+        let stack = controller.view();
+        let hit = stack.hitTest(stack.convertPoint_fromView(point, None))?;
+        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+    }
+
+    /// The preset swatch buttons of the open popover.
+    fn palette_swatch_buttons(&self) -> Vec<Retained<NSButton>> {
+        let Some(popover) = self.ivars().color_popover.borrow().clone() else {
+            return Vec::new();
+        };
+        if !popover.isShown() {
+            return Vec::new();
+        }
+        let Some(controller) = popover.contentViewController() else {
+            return Vec::new();
+        };
+        controller
+            .view()
+            .subviews()
+            .iter()
+            .filter_map(|view| view.downcast_ref::<NSButton>().map(|button| button.retain()))
+            .collect()
+    }
+
+    /// Accent-wash the active tool's button, white-tint the others.
+    fn update_tool_highlight(&self) {
+        let active = self.ivars().tool.get().map(|tool| tool.tag());
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
+            ICON_TINT[0],
+            ICON_TINT[1],
+            ICON_TINT[2],
+            ICON_TINT[3],
+        );
+        // Only the plate backgrounds crossfade; the symbol tint swap is
+        // instant (not a layer property).
+        animate_plate_changes(|| {
+            for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+                if Some(*tag) == active {
+                    let bg = accent.colorWithAlphaComponent(ACTIVE_WASH);
+                    if let Some(layer) = button.layer() {
+                        layer.setBackgroundColor(Some(&bg.CGColor()));
+                    }
+                    button.setContentTintColor(Some(&accent));
+                } else {
+                    if let Some(layer) = button.layer() {
+                        layer.setBackgroundColor(None);
+                    }
+                    button.setContentTintColor(Some(&icon));
+                }
+            }
+        });
+    }
+
+    /// Show the current color on the toolbar swatch circle.
     fn update_color_swatch(&self) {
         let button = self.ivars().color_button.borrow().clone();
         let Some(button) = button.as_ref() else {
             return;
         };
+        let Some(layer) = button.layer() else {
+            return;
+        };
         let [r, g, b, a] = self.ivars().color.get();
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
-        button.setBezelColor(Some(&color));
+        layer.setBackgroundColor(Some(&color.CGColor()));
     }
 
     /// Open (or close) the color preset popover under the swatch button.
@@ -1927,15 +2499,22 @@ impl EditorView {
             button.setFocusRingType(NSFocusRingType::None);
             button.setRefusesFirstResponder(true);
             if let Some(layer) = button.layer() {
-                // SAFETY: plain CGColor bridge of a live color.
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
-                layer.setCornerRadius(8.0);
-                // A visible outline: light presets (white) would blend into
-                // the popover background.
+                layer.setCornerRadius(SWATCH_SIZE / 2.0);
+                // The same bright resting outline as the toolbar swatch:
+                // dark presets stay visible on the popover background.
                 layer.setBorderWidth(1.0);
-                layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
+                layer.setBorderColor(Some(
+                    &NSColor::colorWithSRGBRed_green_blue_alpha(
+                        SWATCH_RING[0],
+                        SWATCH_RING[1],
+                        SWATCH_RING[2],
+                        SWATCH_RING[3],
+                    )
+                    .CGColor(),
+                ));
             }
-            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(18.0, 18.0)));
+            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
             button.setTag(index as isize);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
@@ -1949,6 +2528,22 @@ impl EditorView {
         let content_view: &NSView = &content;
         controller.setView(content_view);
         popover.setContentViewController(Some(&controller));
+        // Swatch hover rides the same owner as the toolbar tracking: one
+        // tracking area over the stack, and `hover_at` restyles whichever
+        // preset the cursor is over.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                CGRect::ZERO,
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&*self),
+                None,
+            )
+        };
+        content.addTrackingArea(&tracking);
         popover.showRelativeToRect_ofView_preferredEdge(
             anchor_button.bounds(),
             &anchor_button,
@@ -1961,6 +2556,27 @@ impl EditorView {
 /// Distance between two points.
 fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Run toolbar plate changes inside an implicit-animation group: hover and
+/// highlight crossfade instead of popping (instant state changes are a UX
+/// anti-pattern). Only layer properties animate; a color tint applied to a
+/// symbol stays instant. When the system asks to reduce motion the change
+/// applies directly. Core Animation replaces a conflicting in-flight
+/// transition, and the final state is whatever the block sets — nothing
+/// depends on the animation finishing.
+fn animate_plate_changes(change: impl FnOnce()) {
+    let reduce_motion = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+    if reduce_motion {
+        change();
+        return;
+    }
+    NSAnimationContext::beginGrouping();
+    let context = NSAnimationContext::currentContext();
+    context.setDuration(PLATE_TRANSITION);
+    context.setAllowsImplicitAnimation(true);
+    change();
+    NSAnimationContext::endGrouping();
 }
 
 /// The stroke width of an element the width slider styles; None for kinds
@@ -2042,15 +2658,21 @@ fn rect_corners(rect: Rect) -> [Point; 4] {
 }
 
 /// An SF Symbol toolbar button with an empty title, tagged with the tool.
-fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NSButton> {
-    icon_button(mtm, symbol_image(symbol), tag)
+fn symbol_button(
+    mtm: MainThreadMarker,
+    symbol: &str,
+    title: &str,
+    tag: isize,
+) -> Retained<NSButton> {
+    icon_button(mtm, symbol_image(symbol, title), title, tag)
 }
 
-/// The SF Symbol image at the shared icon size.
-fn symbol_image(symbol: &str) -> Retained<NSImage> {
+/// The SF Symbol image at the shared icon size; the accessibility
+/// description is the human-readable button name, not the symbol name.
+fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(symbol),
-        Some(&NSString::from_str(symbol)),
+        Some(&NSString::from_str(name)),
     )
     .expect("SF Symbol image");
     let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
@@ -2063,10 +2685,37 @@ fn symbol_image(symbol: &str) -> Retained<NSImage> {
         .expect("configured symbol")
 }
 
+/// A vertical divider between the toolbar zones: a 1×22 pt view with a
+/// low-alpha white layer. Not a button, so the hover pass ignores it.
+fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
+    // SAFETY: designated initializer with a plain frame.
+    let view = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            BAR_DIVIDER[0],
+            BAR_DIVIDER[1],
+            BAR_DIVIDER[2],
+            BAR_DIVIDER[3],
+        )
+        .CGColor()));
+    }
+    view.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(1.0, 22.0)));
+    view
+}
+
 /// A toolbar button showing `image` as a template (tinted like the SF
-/// Symbols), with an empty title and the given tag. Toolbar buttons never
-/// take first responder: no focus ring, keys stay with the canvas.
-fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> Retained<NSButton> {
+/// Symbols), with an empty title and the given tag. Bezel-less: the hover
+/// wash and the active-tool accent are layer backgrounds. Toolbar buttons
+/// never take first responder: no focus ring, keys stay with the canvas.
+/// `title` becomes the tooltip and the accessibility label — an icon-only
+/// button has no visible text for either to fall back on.
+fn icon_button(
+    mtm: MainThreadMarker,
+    image: Retained<NSImage>,
+    title: &str,
+    tag: isize,
+) -> Retained<NSButton> {
     image.setTemplate(true);
     // SAFETY: class convenience constructor, no external invariants.
     let button = unsafe {
@@ -2081,6 +2730,15 @@ fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> R
     button.setTag(tag);
     button.setFocusRingType(NSFocusRingType::None);
     button.setRefusesFirstResponder(true);
+    button.setBordered(false);
+    button.setWantsLayer(true);
+    if let Some(layer) = button.layer() {
+        layer.setCornerRadius(6.0);
+    }
+    button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
+    let name = NSString::from_str(title);
+    button.setToolTip(Some(&name));
+    button.setAccessibilityLabel(Some(&name));
     button
 }
 
@@ -2333,7 +2991,13 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
             CGSize::new(SLIDER_W, 18.0),
         ));
         // Reset for this one knob, tagged with the row.
-        let reset = icon_button(mtm, symbol_image("arrow.counterclockwise"), tag as isize);
+        let reset_name = format!("reset {}", spec.name);
+        let reset = icon_button(
+            mtm,
+            symbol_image("arrow.counterclockwise", &reset_name),
+            &reset_name,
+            tag as isize,
+        );
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
             reset.setTarget(Some(view));
@@ -2410,18 +3074,30 @@ impl EditorWindow {
         let view = EditorView::new(mtm);
         view.set_save_dir(save_dir);
         let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
+            KeyableWindow::init_with_content_rect(
+                KeyableWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + 2.0 * TOOLBAR_HEIGHT),
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
                 ),
-                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSWindowStyleMask::Borderless,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
-        window.setTitle(&NSString::from_str("minisnap"));
+        // Borderless chrome: rounded corners come from the content view's
+        // layer clip, the system shadow follows the rounded alpha mask, and
+        // the window background stays transparent under it.
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setHasShadow(true);
+        // The dark HUD panel, the tints and the label all resolve against
+        // the dark appearance.
+        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
+            window.setAppearance(Some(&dark));
+        }
+        // Toolbar hover styling rides on mouse-moved events.
+        window.setAcceptsMouseMovedEvents(true);
         // The window lives in the app controller for the whole process;
         // closing only hides it, the next shot reuses it (no second window).
         // SAFETY: plain setter on the freshly created window.
@@ -2429,60 +3105,120 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // Toolbar: the ◄/► leafing strip stays at the top left; the
-        // editing toolbar sits at the bottom, Monosnap-style — color
-        // swatch with a preset popover, stroke-width slider, then the
-        // tools in Monosnap order.
-        let pages = NSStackView::new(mtm);
-        pages.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        pages.setSpacing(6.0);
-        for (tag, symbol) in [
-            (PAGE_PREV_TAG, "chevron.left"),
-            (PAGE_NEXT_TAG, "chevron.right"),
+        // The toolbar strip across the top: a full-width vibrancy bar
+        // carrying the ◄/► leafing buttons, the file name (the borderless
+        // window has no system title), the tools, the color swatch with its
+        // preset popover and the stroke-width slider.
+        let panel = ToolbarPanel::new(mtm);
+        panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        // No corner radius of its own: the window's content view clips the
+        // top corners, and the bar's bottom edge must stay square against
+        // the canvas.
+        panel.setWantsLayer(true);
+        // Hover styling: one tracking area over the panel, owned by the
+        // canvas view — it holds the button list and the active tool.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                CGRect::ZERO,
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&*view),
+                None,
+            )
+        };
+        panel.addTrackingArea(&tracking);
+        let toolbar = NSStackView::new(mtm);
+        toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        toolbar.setSpacing(6.0);
+        let mut tool_buttons = Vec::new();
+        for (tag, symbol, title) in [
+            (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
+            (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
         ] {
-            let button = symbol_button(mtm, symbol, tag);
+            let button = symbol_button(mtm, symbol, title, tag);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
                 button.setTarget(Some(&view));
                 button.setAction(Some(sel!(pageClicked:)));
             }
-            pages.addArrangedSubview(&button);
+            toolbar.addArrangedSubview(&button);
+            tool_buttons.push((tag, button));
         }
-        let toolbar = NSStackView::new(mtm);
-        toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        toolbar.setSpacing(6.0);
-        let color_button = symbol_button(mtm, "paintpalette", -1);
+        let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        // Long file names truncate instead of stretching the window's
+        // minimum width.
+        file_label.setContentCompressionResistancePriority_forOrientation(
+            250.0,
+            NSLayoutConstraintOrientation::Horizontal,
+        );
+        toolbar.addArrangedSubview(&file_label);
+        // Zones: leafing + file name | tools | color + width, separated
+        // by 1 pt dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(10.0, &file_label);
+        let leading_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&leading_sep);
+        toolbar.setCustomSpacing_afterView(10.0, &leading_sep);
+        // The color swatch: a circle showing the current color (no symbol);
+        // the popover with the presets opens on click.
+        // SAFETY: class convenience constructor, plain setters afterwards.
+        let color_button = unsafe {
+            NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, mtm)
+        };
+        color_button.setTag(COLOR_BUTTON_TAG);
+        color_button.setFocusRingType(NSFocusRingType::None);
+        color_button.setRefusesFirstResponder(true);
+        color_button.setBordered(false);
+        color_button.setWantsLayer(true);
+        if let Some(layer) = color_button.layer() {
+            layer.setCornerRadius(SWATCH_SIZE / 2.0);
+            // A bright resting outline keeps dark presets (black, blue)
+            // distinguishable from the panel at boundary contrast; on hover
+            // the outline brightens instead of the fill (the fill is the
+            // color itself).
+            layer.setBorderWidth(1.0);
+            layer.setBorderColor(Some(
+                &NSColor::colorWithSRGBRed_green_blue_alpha(
+                    SWATCH_RING[0],
+                    SWATCH_RING[1],
+                    SWATCH_RING[2],
+                    SWATCH_RING[3],
+                )
+                .CGColor(),
+            ));
+        }
+        color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
+        let name = NSString::from_str("Color");
+        color_button.setToolTip(Some(&name));
+        color_button.setAccessibilityLabel(Some(&name));
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
             color_button.setTarget(Some(&view));
             color_button.setAction(Some(sel!(colorClicked:)));
         }
-        toolbar.addArrangedSubview(&color_button);
-        // SAFETY: class convenience constructor for the slider.
-        let slider = unsafe {
-            objc2_app_kit::NSSlider::sliderWithValue_minValue_maxValue_target_action(
-                DEFAULT_STROKE_WIDTH,
-                STROKE_MIN,
-                STROKE_MAX,
-                Some(&view),
-                Some(sel!(widthChanged:)),
-                mtm,
-            )
-        };
-        slider.setFocusRingType(NSFocusRingType::None);
-        slider.setRefusesFirstResponder(true);
-        // The convenience constructor leaves the slider a sliver wide; the
-        // width control needs room to drag precisely.
+        // The swatch and the slider join the stack after the tools —
+        // they close the right-hand zone.
+        // The custom stroke-width slider: track, accent fill, round knob.
+        let slider = WidthSliderView::new(mtm);
+        // SAFETY: target is this canvas view, alive for the process; the
+        // action reads `doubleValue` off the sender.
+        unsafe {
+            slider.set_target(Some(&*view));
+            slider.set_action(Some(sel!(widthChanged:)));
+        }
+        // The width control needs room to drag precisely.
         slider.setFrame(CGRect::new(
             CGPoint::ZERO,
             CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
         ));
-        toolbar.addArrangedSubview(&slider);
-        let mut tool_buttons = Vec::new();
         for tool in Tool::all() {
             let button = match tool {
-                Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
-                other => symbol_button(mtm, other.symbol(), other.tag()),
+                Tool::Callout => icon_button(mtm, callout_icon(), tool.name(), tool.tag()),
+                other => symbol_button(mtm, other.symbol(), other.name(), other.tag()),
             };
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
@@ -2490,41 +3226,78 @@ impl EditorWindow {
                 button.setAction(Some(sel!(toolClicked:)));
             }
             toolbar.addArrangedSubview(&button);
+            // Wider gaps between the tool groups: drawing | annotating |
+            // transforming (Pen and Blur end their groups, Resize ends
+            // the tools zone).
+            if matches!(tool, Tool::Pen | Tool::Blur | Tool::Resize) {
+                toolbar.setCustomSpacing_afterView(10.0, &button);
+            }
             tool_buttons.push((tool.tag(), button));
         }
+        let trailing_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&trailing_sep);
+        toolbar.setCustomSpacing_afterView(10.0, &trailing_sep);
+        toolbar.addArrangedSubview(&color_button);
+        toolbar.addArrangedSubview(&slider);
 
-        // Layout: ◄/► strip pinned to the top, editing toolbar pinned to
-        // the bottom, canvas filling the space between. The flexible
-        // max-Y margin keeps the bottom bar down when the window grows;
-        // the canvas grows into the freed space.
+        // Layout: the toolbar strip across the top, the canvas filling
+        // everything below it. The flexible min-Y margin keeps the bar
+        // pinned to the top when the window grows; the canvas grows into
+        // the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The window cannot shrink below the editing toolbar: its full
-        // fitting width plus the side margins.
-        let min_width = toolbar.fittingSize().width + 16.0;
+        // The container clips its subviews to the rounded window shape.
+        content.setWantsLayer(true);
+        if let Some(layer) = content.layer() {
+            layer.setCornerRadius(WINDOW_RADIUS);
+            layer.setMasksToBounds(true);
+        }
+        // The window cannot shrink below the bar: the stack's fitting
+        // width plus its side padding.
+        let min_width = toolbar.fittingSize().width + 2.0 * BAR_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        pages.setFrame(CGRect::new(
-            CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT),
-            CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
+        panel.setFrame(CGRect::new(
+            CGPoint::new(0.0, size.height - TOOLBAR_HEIGHT),
+            CGSize::new(size.width, TOOLBAR_HEIGHT),
         ));
-        pages.setAutoresizingMask(
+        panel.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
-        content.addSubview(&pages);
+        content.addSubview(&panel);
+        // The hairline under the bar: one point of white at a low alpha,
+        // stretching with the bar.
+        // SAFETY: designated initializer with a plain frame.
+        let hairline = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
+        hairline.setWantsLayer(true);
+        if let Some(layer) = hairline.layer() {
+            layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                BAR_HAIRLINE[0],
+                BAR_HAIRLINE[1],
+                BAR_HAIRLINE[2],
+                BAR_HAIRLINE[3],
+            )
+            .CGColor()));
+        }
+        hairline.setFrame(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(size.width, 1.0),
+        ));
+        hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        panel.addSubview(&hairline);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(8.0, 0.0),
-            CGSize::new(size.width - 16.0, TOOLBAR_HEIGHT),
+            CGPoint::new(BAR_PAD, 0.0),
+            CGSize::new(size.width - 2.0 * BAR_PAD, TOOLBAR_HEIGHT),
         ));
         toolbar.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        content.addSubview(&toolbar);
-        let canvas_height = size.height - 2.0 * TOOLBAR_HEIGHT;
+        panel.addSubview(&toolbar);
+        let canvas_height = size.height - TOOLBAR_RESERVED;
         view.setFrame(CGRect::new(
-            CGPoint::new(0.0, TOOLBAR_HEIGHT),
+            CGPoint::ZERO,
             CGSize::new(size.width, canvas_height),
         ));
         view.setAutoresizingMask(
@@ -2551,7 +3324,9 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
+        *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
+        *view.ivars().toolbar_panel.borrow_mut() = Some(panel);
         view.update_tool_highlight();
         view.update_color_swatch();
 
