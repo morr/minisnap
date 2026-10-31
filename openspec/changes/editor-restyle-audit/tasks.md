@@ -2,7 +2,7 @@
 
 ## 1. Анимации состояний
 
-- [ ] 1.1 Плавная смена плашек: обёртка смены фонов слоёв в `NSAnimationContext` (duration 0.15, `allowsImplicitAnimation`) в `hover_at` и `update_tool_highlight`; гейт `accessibilityDisplayShouldReduceMotion`; фичи `NSAnimationContext` в `Cargo.toml`. Проверка: `cargo test` зелёный; ручной прогон — плашка наведения проявляется кроссфейдом, при «уменьшить движение» — мгновенно
+- [x] 1.1 Плавная смена плашек: обёртка смены фонов слоёв в `NSAnimationContext` (duration 0.15, `allowsImplicitAnimation`) в `hover_at` и `update_tool_highlight`; гейт `accessibilityDisplayShouldReduceMotion`; фичи `NSAnimationContext` в `Cargo.toml`. Проверка: `cargo test` зелёный; ручной прогон — плашка наведения проявляется кроссфейдом, при «уменьшить движение» — мгновенно
 
 ## 2. Доступность кнопок
 

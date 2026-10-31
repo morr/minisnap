@@ -13,13 +13,14 @@ use objc2::{
     MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAppearance, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton,
-    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSLineBreakMode, NSPopover, NSPopoverDelegate, NSScreen,
-    NSStackView, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSAnimationContext, NSAppearance, NSApplication, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSCursor,
+    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
+    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSPopover,
+    NSPopoverDelegate, NSScreen, NSStackView, NSTextField, NSTextFieldDelegate, NSTextView,
     NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
     NSViewController, NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_app_kit::NSAppearanceCustomization;
 use objc2_app_kit::NSAppearanceNameDarkAqua;
@@ -112,6 +113,11 @@ const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
 
 /// Hover background of a toolbar button: a faint white wash.
 const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
+
+/// Crossfade length of toolbar plate changes (hover, tool highlight), in
+/// seconds. Short enough that feedback stays responsive; the database rule
+/// is only that instant swaps are the anti-pattern.
+const PLATE_TRANSITION: f64 = 0.15;
 
 /// What the open field editor is editing.
 #[derive(Clone, Copy)]
@@ -2163,19 +2169,21 @@ impl EditorView {
             HOVER_BG[2],
             HOVER_BG[3],
         );
-        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
-                continue;
+        animate_plate_changes(|| {
+            for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+                if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
+                    continue;
+                }
+                if let Some(layer) = button.layer() {
+                    let bg: Option<&NSColor> = if Some(*tag) == hovered {
+                        Some(&hover)
+                    } else {
+                        None
+                    };
+                    layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
+                }
             }
-            if let Some(layer) = button.layer() {
-                let bg: Option<&NSColor> = if Some(*tag) == hovered {
-                    Some(&hover)
-                } else {
-                    None
-                };
-                layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
-            }
-        }
+        });
     }
 
     /// Accent-wash the active tool's button, white-tint the others.
@@ -2188,20 +2196,24 @@ impl EditorView {
             ICON_TINT[2],
             ICON_TINT[3],
         );
-        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if Some(*tag) == active {
-                let bg = accent.colorWithAlphaComponent(0.25);
-                if let Some(layer) = button.layer() {
-                    layer.setBackgroundColor(Some(&bg.CGColor()));
+        // Only the plate backgrounds crossfade; the symbol tint swap is
+        // instant (not a layer property).
+        animate_plate_changes(|| {
+            for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+                if Some(*tag) == active {
+                    let bg = accent.colorWithAlphaComponent(0.25);
+                    if let Some(layer) = button.layer() {
+                        layer.setBackgroundColor(Some(&bg.CGColor()));
+                    }
+                    button.setContentTintColor(Some(&accent));
+                } else {
+                    if let Some(layer) = button.layer() {
+                        layer.setBackgroundColor(None);
+                    }
+                    button.setContentTintColor(Some(&icon));
                 }
-                button.setContentTintColor(Some(&accent));
-            } else {
-                if let Some(layer) = button.layer() {
-                    layer.setBackgroundColor(None);
-                }
-                button.setContentTintColor(Some(&icon));
             }
-        }
+        });
     }
 
     /// Show the current color on the toolbar swatch circle.
@@ -2305,6 +2317,27 @@ impl EditorView {
 /// Distance between two points.
 fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Run toolbar plate changes inside an implicit-animation group: hover and
+/// highlight crossfade instead of popping (instant state changes are a UX
+/// anti-pattern). Only layer properties animate; a color tint applied to a
+/// symbol stays instant. When the system asks to reduce motion the change
+/// applies directly. Core Animation replaces a conflicting in-flight
+/// transition, and the final state is whatever the block sets — nothing
+/// depends on the animation finishing.
+fn animate_plate_changes(change: impl FnOnce()) {
+    let reduce_motion = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+    if reduce_motion {
+        change();
+        return;
+    }
+    NSAnimationContext::beginGrouping();
+    let context = NSAnimationContext::currentContext();
+    context.setDuration(PLATE_TRANSITION);
+    context.setAllowsImplicitAnimation(true);
+    change();
+    NSAnimationContext::endGrouping();
 }
 
 /// The stroke width of an element the width slider styles; None for kinds
