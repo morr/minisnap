@@ -2,10 +2,10 @@
 
 ## 1. Каркас окна: titled-хром с traffic-lights
 
-- [ ] 1.1 Перевести `EditorWindow::new` (`src/editor_window.rs`) с `NSWindowStyleMask::Borderless` на `Titled | FullSizeContentView | Closable`, добавить `titlebarAppearsTransparent(true)` и `titleVisibility(Hidden)`; убедиться сборкой (`cargo build`) и визуально: окно открывается, системные кружки видны в левом верхнем углу поверх полосы тулбара
-- [ ] 1.2 Скрыть кнопки миниатюризации и зума (`standardWindowButton(MiniaturizeButton/ZoomButton)` → `setHidden(true)`, close не трогать); проверить визуально: видна только красная кнопка, клик в зоне скрытых кнопок не сворачивает и не масштабирует окно
-- [ ] 1.3 Перейти на системный хром: убрать `setOpaque(false)` + clearColor и клип `WINDOW_RADIUS`/`masksToBounds` на слое контента (константу `WINDOW_RADIUS` удалить), оставить системную тень и тёмную внешность (`setAppearance`); обновить комментарий `KeyableWindow` (переопределение `canBecomeKeyWindow` для titled-окна избыточно, оставлено как страховка); проверить визуально: углы и тень системные, тёмный вид сохранён
-- [ ] 1.4 Проверить контрольную точку design D4: `setContentSize` при `FullSizeContentView` даёт окно высотой «канва + TOOLBAR_RESERVED» без надбавки titlebar-зоны (сверить `window.frame` при `refit_window`); при расхождении — скомпенсировать в `refit_window`/`INITIAL_SIZE` и перепроверить: кадр снимка вписан, полоса прижата к верху, канва снизу без лишнего фона
+- [x] 1.1 Перевести `EditorWindow::new` (`src/editor_window.rs`) с `NSWindowStyleMask::Borderless` на `Titled | FullSizeContentView | Closable`, добавить `titlebarAppearsTransparent(true)` и `titleVisibility(Hidden)`; убедиться сборкой (`cargo build`) и визуально: окно открывается, системные кружки видны в левом верхнем углу поверх полосы тулбара
+- [x] 1.2 Скрыть кнопки миниатюризации и зума (`standardWindowButton(MiniaturizeButton/ZoomButton)` → `setHidden(true)`, close не трогать); проверить визуально: видна только красная кнопка, клик в зоне скрытых кнопок не сворачивает и не масштабирует окно
+- [x] 1.3 Перейти на системный хром: убрать `setOpaque(false)` + clearColor и клип `WINDOW_RADIUS`/`masksToBounds` на слое контента (константу `WINDOW_RADIUS` удалить), оставить системную тень и тёмную внешность (`setAppearance`); обновить комментарий `KeyableWindow` (переопределение `canBecomeKeyWindow` для titled-окна избыточно, оставлено как страховка); проверить визуально: углы и тень системные, тёмный вид сохранён
+- [x] 1.4 Проверить контрольную точку design D4: `setContentSize` при `FullSizeContentView` даёт окно высотой «канва + TOOLBAR_RESERVED» без надбавки titlebar-зоны (сверить `window.frame` при `refit_window`); при расхождении — скомпенсировать в `refit_window`/`INITIAL_SIZE` и перепроверить: кадр снимка вписан, полоса прижата к верху, канва снизу без лишнего фона
 
 ## 2. Тулбар под кружки
 

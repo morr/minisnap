@@ -21,7 +21,8 @@ use objc2_app_kit::{
     NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSVisualEffectMaterial,
-    NSVisualEffectView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSVisualEffectView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
 use objc2_app_kit::NSLayoutConstraintOrientation;
@@ -39,10 +40,6 @@ use crate::editor::{
 
 /// The dark backdrop the frame sits on.
 const BACKDROP: [f64; 4] = [0.055, 0.055, 0.065, 1.0];
-
-/// Corner radius of the borderless editor window (and of the floating
-/// toolbar panel), in points.
-const WINDOW_RADIUS: f64 = 12.0;
 
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
@@ -333,9 +330,10 @@ impl Tool {
 }
 
 define_class!(
-    /// The editor's borderless window. Borderless `NSWindow`s refuse key
-    /// status by default; the canvas lives on keyboard commands (Esc, ⌘Q,
-    /// ⌘C, ⌘Z, ←/→), so the window must accept key.
+    /// The editor's window. A titled window accepts key status by default;
+    /// the `canBecomeKeyWindow` override is redundant for it and is kept
+    /// only as harmless insurance — the canvas lives on keyboard commands
+    /// (Esc, ⌘Q, ⌘C, ⌘Z, ←/→), so the window must accept key.
     #[unsafe(super(NSWindow))]
     #[thread_kind = MainThreadOnly]
     pub struct KeyableWindow;
@@ -654,8 +652,8 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
-    /// The file-name label in the toolbar (the borderless window has no
-    /// system title).
+    /// The file-name label in the toolbar (the window title is hidden,
+    /// the bar carries the name instead).
     file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
@@ -3157,17 +3155,27 @@ impl EditorWindow {
                     CGPoint::ZERO,
                     CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
                 ),
-                NSWindowStyleMask::Borderless,
+                NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::FullSizeContentView
+                    | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
-        // Borderless chrome: rounded corners come from the content view's
-        // layer clip, the system shadow follows the rounded alpha mask, and
-        // the window background stays transparent under it.
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        // Electron-style hidden inset: a titled window with a transparent,
+        // hidden titlebar — the system traffic lights draw over the toolbar
+        // strip, which stays the only top chrome of the window.
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
+        // An accessory app has no dock icon: a miniaturized window would be
+        // unreachable, and zoom is meaningless — the window is refit to
+        // every shot anyway. Hide both standard buttons; close stays.
+        for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+            if let Some(button) = window.standardWindowButton(role) {
+                button.setHidden(true);
+            }
+        }
         // The dark HUD panel, the tints and the label all resolve against
         // the dark appearance.
         if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
@@ -3183,13 +3191,13 @@ impl EditorWindow {
         }
 
         // The toolbar strip across the top: a full-width vibrancy bar
-        // carrying the ◄/► leafing buttons, the file name (the borderless
-        // window has no system title), the tools, the color swatch with its
+        // carrying the ◄/► leafing buttons, the file name (the window
+        // title is hidden), the tools, the color swatch with its
         // preset popover and the stroke-width slider.
         let panel = ToolbarPanel::new(mtm);
         panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        // No corner radius of its own: the window's content view clips the
-        // top corners, and the bar's bottom edge must stay square against
+        // No corner radius of its own: the window supplies the system
+        // rounding, and the bar's bottom edge must stay square against
         // the canvas.
         panel.setWantsLayer(true);
         // Hover styling: one tracking area over the panel, owned by the
@@ -3361,12 +3369,6 @@ impl EditorWindow {
         // the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The container clips its subviews to the rounded window shape.
-        content.setWantsLayer(true);
-        if let Some(layer) = content.layer() {
-            layer.setCornerRadius(WINDOW_RADIUS);
-            layer.setMasksToBounds(true);
-        }
         // The window cannot shrink below the bar: the stack's fitting
         // width plus its side padding.
         let min_width = toolbar.fittingSize().width + 2.0 * BAR_PAD;
