@@ -531,6 +531,30 @@ define_class!(
             self.redraw();
         }
 
+        #[unsafe(method(arrowParamReset:))]
+        fn __arrow_param_reset(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: the sender is a per-row reset button; `tag` is its
+            // accessor.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let Some(spec) = ARROW_PARAM_SPECS.get(tag as usize) else {
+                return;
+            };
+            // Only this knob returns to its shipped default; the rest of
+            // the tuning session stays.
+            let defaults = render::ArrowParams::DEFAULT;
+            let value = (spec.get)(defaults);
+            let mut params = render::arrow_params();
+            (spec.set)(&mut params, value);
+            render::set_arrow_params(params);
+            if let Some((slider, field)) = self.ivars().arrow_param_rows.borrow().get(tag as usize)
+            {
+                slider.setDoubleValue(value);
+                field.setStringValue(&NSString::from_str(&format!("{value:.2}")));
+            }
+            self.redraw();
+        }
+
         #[unsafe(method(arrowPromptCopy:))]
         fn __arrow_prompt_copy(&self, _sender: Option<&AnyObject>) {
             // The tuner's whole point: carry the tuned values out of the
@@ -2222,8 +2246,30 @@ fn arrow_params_prompt(params: render::ArrowParams) -> String {
 /// The arrow debug tuner: a translucent panel of sliders over the canvas'
 /// top-left corner, editing the live arrow params (`render::ARROW_PARAMS`)
 /// with instant redraw. Built only under `MINISNAP_ARROW_DEBUG` — a tuning
-/// instrument, not shipped UI.
+/// instrument, not shipped UI. Every view gets an explicit frame in rows
+/// of fixed height: a stack-view panel sized from `fittingSize` proved
+/// fragile and dropped its bottom row of buttons.
 fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSView> {
+    // Row geometry, in points: label | slider | this-row reset | value.
+    const TOP: f64 = 10.0;
+    const BOTTOM: f64 = 10.0;
+    const INSET: f64 = 12.0;
+    const ROW_H: f64 = 20.0;
+    const ROW_GAP: f64 = 2.0;
+    const LABEL_W: f64 = 104.0;
+    const SLIDER_X: f64 = INSET + LABEL_W + 4.0;
+    const SLIDER_W: f64 = 88.0;
+    const RESET_X: f64 = SLIDER_X + SLIDER_W + 4.0;
+    const RESET_W: f64 = 22.0;
+    const VALUE_X: f64 = RESET_X + RESET_W + 4.0;
+    const VALUE_W: f64 = 44.0;
+    const ACTIONS_GAP: f64 = 8.0;
+    const ACTION_H: f64 = 24.0;
+    const ACTION_W: f64 = 64.0;
+    const W: f64 = VALUE_X + VALUE_W + INSET;
+    let n = ARROW_PARAM_SPECS.len() as f64;
+    let h = TOP + n * ROW_H + (n - 1.0) * ROW_GAP + ACTIONS_GAP + ACTION_H + BOTTOM;
+
     let panel = NSView::new(mtm);
     panel.setWantsLayer(true);
     if let Some(layer) = panel.layer() {
@@ -2232,9 +2278,7 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
         layer.setBackgroundColor(Some(&bg.CGColor()));
         layer.setCornerRadius(10.0);
     }
-    let stack = NSStackView::new(mtm);
-    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    stack.setSpacing(3.0);
+    panel.setFrameSize(CGSize::new(W, h));
     let font = NSFont::monospacedSystemFontOfSize_weight(
         10.0,
         // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
@@ -2243,12 +2287,14 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
     let params = render::arrow_params();
     let mut rows = Vec::new();
     for (tag, spec) in ARROW_PARAM_SPECS.iter().enumerate() {
-        let row = NSStackView::new(mtm);
-        row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-        row.setSpacing(6.0);
+        let y = h - TOP - ROW_H - tag as f64 * (ROW_H + ROW_GAP);
         let label = NSTextField::labelWithString(&NSString::from_str(spec.name), mtm);
         label.setFont(Some(&font));
         label.setTextColor(Some(&NSColor::whiteColor()));
+        label.setFrame(CGRect::new(
+            CGPoint::new(INSET, y + 3.0),
+            CGSize::new(LABEL_W, 14.0),
+        ));
         let value = (spec.get)(params);
         // SAFETY: class convenience constructor for the slider.
         let slider = unsafe {
@@ -2266,26 +2312,44 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
         slider.setContinuous(true);
         slider.setFocusRingType(NSFocusRingType::None);
         slider.setRefusesFirstResponder(true);
-        // The convenience constructor leaves the slider a sliver wide.
-        slider.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(110.0, 18.0)));
+        slider.setFrame(CGRect::new(
+            CGPoint::new(SLIDER_X, y + 1.0),
+            CGSize::new(SLIDER_W, 18.0),
+        ));
+        // Reset for this one knob, tagged with the row.
+        let reset = icon_button(mtm, symbol_image("arrow.counterclockwise"), tag as isize);
+        // SAFETY: target is this canvas view, alive for the process.
+        unsafe {
+            reset.setTarget(Some(view));
+            reset.setAction(Some(sel!(arrowParamReset:)));
+        }
+        reset.setToolTip(Some(&NSString::from_str(&format!(
+            "reset {} to its default",
+            spec.name
+        ))));
+        reset.setFrame(CGRect::new(
+            CGPoint::new(RESET_X, y + 1.0),
+            CGSize::new(RESET_W, 18.0),
+        ));
         let field =
             NSTextField::labelWithString(&NSString::from_str(&format!("{value:.2}")), mtm);
         field.setFont(Some(&font));
         field.setTextColor(Some(&NSColor::whiteColor()));
         field.setAlignment(NSTextAlignment::Right);
-        row.addArrangedSubview(&label);
-        row.addArrangedSubview(&slider);
-        row.addArrangedSubview(&field);
-        stack.addArrangedSubview(&row);
+        field.setFrame(CGRect::new(
+            CGPoint::new(VALUE_X, y + 3.0),
+            CGSize::new(VALUE_W, 14.0),
+        ));
+        panel.addSubview(&label);
+        panel.addSubview(&slider);
+        panel.addSubview(&reset);
+        panel.addSubview(&field);
         rows.push((slider, field));
     }
-    // One row of actions: reset to the shipped defaults, or copy a prompt
-    // that makes the coding agent bake the tuned values in as the new
-    // defaults (the old ones backed up to /tmp).
-    let actions = NSStackView::new(mtm);
-    actions.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-    actions.setSpacing(8.0);
-    let action_button = |title: &str, action: objc2::runtime::Sel| {
+    // Bottom actions: reset everything to the shipped defaults, or copy
+    // the tuned values as a prompt that makes the coding agent bake them
+    // in as the new defaults (the old ones backed up to /tmp).
+    let action_button = |title: &str, action: objc2::runtime::Sel, x: f64| {
         // SAFETY: class convenience constructor, no external invariants.
         let button = unsafe {
             NSButton::buttonWithTitle_target_action(
@@ -2298,25 +2362,23 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
         button.setFont(Some(&font));
         button.setFocusRingType(NSFocusRingType::None);
         button.setRefusesFirstResponder(true);
+        button.setFrame(CGRect::new(
+            CGPoint::new(x, BOTTOM),
+            CGSize::new(ACTION_W, ACTION_H),
+        ));
         button
     };
-    let reset = action_button("reset", sel!(arrowTunerReset:));
+    let reset = action_button("reset", sel!(arrowTunerReset:), INSET);
     reset.setToolTip(Some(&NSString::from_str(
-        "reset the arrow params to the shipped defaults",
+        "reset all the arrow params to the shipped defaults",
     )));
-    let prompt = action_button("prompt", sel!(arrowPromptCopy:));
+    let prompt = action_button("prompt", sel!(arrowPromptCopy:), INSET + ACTION_W + 8.0);
     prompt.setToolTip(Some(&NSString::from_str(
         "copy the tuned params and a prompt that bakes them in as the \
          new defaults",
     )));
-    actions.addArrangedSubview(&reset);
-    actions.addArrangedSubview(&prompt);
-    stack.addArrangedSubview(&actions);
-
-    let fit = stack.fittingSize();
-    stack.setFrame(CGRect::new(CGPoint::ZERO, fit));
-    panel.setFrameSize(fit);
-    panel.addSubview(&stack);
+    panel.addSubview(&reset);
+    panel.addSubview(&prompt);
     *view.ivars().arrow_param_rows.borrow_mut() = rows;
     panel
 }
