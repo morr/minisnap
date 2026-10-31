@@ -57,6 +57,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSFont",
     "NSFontDescriptor",
     "NSAnimationContext",
+    "NSAccessibilityProtocols",
     "NSLayoutAnchor",
     "NSLayoutConstraint",
     "NSUserInterfaceLayout",

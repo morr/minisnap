@@ -22,6 +22,7 @@ use objc2_app_kit::{
     NSViewController, NSVisualEffectMaterial, NSVisualEffectView, NSWindow, NSWindowStyleMask,
     NSWorkspace,
 };
+use objc2_app_kit::NSAccessibility;
 use objc2_app_kit::NSAppearanceCustomization;
 use objc2_app_kit::NSAppearanceNameDarkAqua;
 use objc2_app_kit::NSLayoutConstraintOrientation;
@@ -254,6 +255,23 @@ impl Tool {
 
     fn tag(self) -> isize {
         self as isize
+    }
+
+    /// Human-readable name for the button's tooltip and accessibility
+    /// label: icon-only buttons carry no visible text, and the SF Symbol
+    /// name is not a name a person can read.
+    fn name(self) -> &'static str {
+        match self {
+            Tool::Arrow => "Arrow",
+            Tool::Rect => "Rectangle",
+            Tool::Line => "Line",
+            Tool::Pen => "Freehand",
+            Tool::Text => "Text",
+            Tool::Callout => "Callout",
+            Tool::Blur => "Blur",
+            Tool::Crop => "Crop",
+            Tool::Resize => "Resize",
+        }
     }
 
     fn from_tag(tag: isize) -> Option<Tool> {
@@ -2419,15 +2437,21 @@ fn rect_corners(rect: Rect) -> [Point; 4] {
 }
 
 /// An SF Symbol toolbar button with an empty title, tagged with the tool.
-fn symbol_button(mtm: MainThreadMarker, symbol: &str, tag: isize) -> Retained<NSButton> {
-    icon_button(mtm, symbol_image(symbol), tag)
+fn symbol_button(
+    mtm: MainThreadMarker,
+    symbol: &str,
+    title: &str,
+    tag: isize,
+) -> Retained<NSButton> {
+    icon_button(mtm, symbol_image(symbol, title), title, tag)
 }
 
-/// The SF Symbol image at the shared icon size.
-fn symbol_image(symbol: &str) -> Retained<NSImage> {
+/// The SF Symbol image at the shared icon size; the accessibility
+/// description is the human-readable button name, not the symbol name.
+fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(symbol),
-        Some(&NSString::from_str(symbol)),
+        Some(&NSString::from_str(name)),
     )
     .expect("SF Symbol image");
     let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
@@ -2444,7 +2468,14 @@ fn symbol_image(symbol: &str) -> Retained<NSImage> {
 /// Symbols), with an empty title and the given tag. Bezel-less: the hover
 /// wash and the active-tool accent are layer backgrounds. Toolbar buttons
 /// never take first responder: no focus ring, keys stay with the canvas.
-fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> Retained<NSButton> {
+/// `title` becomes the tooltip and the accessibility label — an icon-only
+/// button has no visible text for either to fall back on.
+fn icon_button(
+    mtm: MainThreadMarker,
+    image: Retained<NSImage>,
+    title: &str,
+    tag: isize,
+) -> Retained<NSButton> {
     image.setTemplate(true);
     // SAFETY: class convenience constructor, no external invariants.
     let button = unsafe {
@@ -2465,6 +2496,9 @@ fn icon_button(mtm: MainThreadMarker, image: Retained<NSImage>, tag: isize) -> R
         layer.setCornerRadius(6.0);
     }
     button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
+    let name = NSString::from_str(title);
+    button.setToolTip(Some(&name));
+    button.setAccessibilityLabel(Some(&name));
     button
 }
 
@@ -2559,11 +2593,11 @@ impl EditorWindow {
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(6.0);
         let mut tool_buttons = Vec::new();
-        for (tag, symbol) in [
-            (PAGE_PREV_TAG, "chevron.left"),
-            (PAGE_NEXT_TAG, "chevron.right"),
+        for (tag, symbol, title) in [
+            (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
+            (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
         ] {
-            let button = symbol_button(mtm, symbol, tag);
+            let button = symbol_button(mtm, symbol, title, tag);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
                 button.setTarget(Some(&view));
@@ -2601,6 +2635,9 @@ impl EditorWindow {
             layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
         }
         color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(20.0, 20.0)));
+        let name = NSString::from_str("Color");
+        color_button.setToolTip(Some(&name));
+        color_button.setAccessibilityLabel(Some(&name));
         // SAFETY: target is this canvas view, alive for the process.
         unsafe {
             color_button.setTarget(Some(&view));
@@ -2623,8 +2660,8 @@ impl EditorWindow {
         toolbar.addArrangedSubview(&slider);
         for tool in Tool::all() {
             let button = match tool {
-                Tool::Callout => icon_button(mtm, callout_icon(), tool.tag()),
-                other => symbol_button(mtm, other.symbol(), other.tag()),
+                Tool::Callout => icon_button(mtm, callout_icon(), tool.name(), tool.tag()),
+                other => symbol_button(mtm, other.symbol(), other.name(), other.tag()),
             };
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {

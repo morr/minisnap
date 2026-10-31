@@ -16,7 +16,7 @@
 
 - База: «give the control an accessible name and expose applicable state» (иконочное правило, домен `icons`); pro-rules «Contextual Semantics».
 - Сейчас `accessibilityDescription` у SF-символов — внутреннее имя (`arrow.up.right`), у кнопок тулбара пустой заголовок: вспомогательные технологии не смогут назвать кнопку.
-- Реализация: человеческие подписи (`accessibilityLabel`) и `toolTip` на всех кнопках (◄/►, свотч, 9 инструментов); `accessibilityDescription` символов — тот же человеческий текст. Требуется фича `NSAccessibility`.
+- Реализация: человеческие подписи (`accessibilityLabel`) и `toolTip` на всех кнопках (◄/►, свотч, 9 инструментов); `accessibilityDescription` символов — тот же человеческий текст. Требуется фича `NSAccessibilityProtocols`.
 
 ### Свотчи: размер, hover, обводка (заменено)
 
