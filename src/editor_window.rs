@@ -13,8 +13,9 @@ use objc2::{
     MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSBox, NSBoxType,
-    NSColor, NSControl, NSTitlePosition,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSBox, NSBoxType, NSColor, NSControl,
+    NSTitlePosition,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
     NSPopover, NSPopoverDelegate, NSPasteboard, NSPasteboardTypeString, NSScreen, NSSlider,
@@ -2285,6 +2286,13 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
     panel.setContentViewMargins(objc2_foundation::NSSize::new(0.0, 0.0));
     panel.setFrameSize(CGSize::new(W, h));
     let content_area = panel.contentView().expect("box content view");
+    // The panel's buttons draw in the dark look whatever the system
+    // appearance is: on the dark fill their titles read white and the
+    // template icons stay light.
+    // SAFETY: NSAppearanceNameDarkAqua is a plain extern NSString
+    // constant.
+    let dark_appearance =
+        unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) };
     let font = NSFont::monospacedSystemFontOfSize_weight(
         10.0,
         // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
@@ -2333,6 +2341,9 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
             "reset {} to its default",
             spec.name
         ))));
+        if let Some(appearance) = &dark_appearance {
+            reset.setAppearance(Some(appearance));
+        }
         reset.setFrame(CGRect::new(
             CGPoint::new(RESET_X, y + 1.0),
             CGSize::new(RESET_W, 18.0),
@@ -2368,6 +2379,9 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
         button.setFont(Some(&font));
         button.setFocusRingType(NSFocusRingType::None);
         button.setRefusesFirstResponder(true);
+        if let Some(appearance) = &dark_appearance {
+            button.setAppearance(Some(appearance));
+        }
         button.setFrame(CGRect::new(
             CGPoint::new(x, BOTTOM),
             CGSize::new(ACTION_W, ACTION_H),
