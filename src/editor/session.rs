@@ -121,6 +121,36 @@ fn session_dir(root: &Path, shot_path: &Path) -> PathBuf {
     root.join(stem)
 }
 
+/// Pixel density carried by the shot's file name: a capture from a
+/// display with `n` pixels per point is saved as `...@<n>x.png` and the
+/// editor shows it at 1/n — the size it had on screen. A name without a
+/// valid trailing `@<n>x` (plus the name-collision suffix `_2`, which
+/// lands after the density mark) reads as 1.
+pub fn name_density(file_name: &str) -> f64 {
+    let Some(stem) = file_name.strip_suffix(".png") else {
+        return 1.0;
+    };
+    let Some(at) = stem.rfind('@') else {
+        return 1.0;
+    };
+    let tail = &stem[at + 1..];
+    let tail = match tail.split_once('_') {
+        Some((density, collision))
+            if !collision.is_empty() && collision.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            density
+        }
+        _ => tail,
+    };
+    let Some(digits) = tail.strip_suffix('x') else {
+        return 1.0;
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return 1.0;
+    }
+    digits.parse::<f64>().unwrap_or(1.0).max(1.0)
+}
+
 /// Load the session for `shot_path`: the original frame and the applied
 /// commands. A missing or unreadable session reads as "no history".
 pub fn load(root: &Path, shot_path: &Path) -> Option<(Retained<CGImage>, Vec<Command>)> {
@@ -254,6 +284,21 @@ mod tests {
             Command::EditText(1, "правка".into()),
             Command::SetWidth(1, 6.5),
         ]
+    }
+
+    #[test]
+    fn density_from_file_name() {
+        assert_eq!(name_density("MiniSnap_2026-10-31_19-33-21@2x.png"), 2.0);
+        assert_eq!(name_density("MiniSnap_2026-10-31_19-33-21.png"), 1.0);
+        // The collision suffix lands after the density mark.
+        assert_eq!(name_density("MiniSnap_2026-10-31_19-33-21@2x_2.png"), 2.0);
+        assert_eq!(name_density("shot@3x.png"), 3.0);
+        // A non-numeric tail after the mark is not a density.
+        assert_eq!(name_density("shot@2x_backup.png"), 1.0);
+        assert_eq!(name_density("shot@x.png"), 1.0);
+        assert_eq!(name_density("shot@.png"), 1.0);
+        assert_eq!(name_density("shot@0x.png"), 1.0);
+        assert_eq!(name_density("shot@2x.jpg"), 1.0);
     }
 
     #[test]

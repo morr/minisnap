@@ -33,8 +33,8 @@ use objc2_foundation::{NSString, NSNotification, NSRectEdge};
 use crate::editor::hit_test::{Hit, text_bounds, top_hit};
 use crate::editor::text;
 use crate::editor::{
-    render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint, OpenShot, Point,
-    Rect, Rgba, Size,
+    name_density, render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint,
+    OpenShot, Point, Rect, Rgba, Size,
 };
 
 /// The dark backdrop the frame sits on.
@@ -672,6 +672,9 @@ struct EditorIvars {
     toolbar_panel: RefCell<Option<Retained<ToolbarPanel>>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
+    /// Pixel density of the open shot's display (from the file name's
+    /// `@<n>x`): the shot is shown at 1/n, the size it had on screen.
+    density: Cell<f64>,
 }
 
 define_class!(
@@ -712,6 +715,7 @@ define_class!(
                 arrow_param_rows: RefCell::new(Vec::new()),
                 toolbar_panel: RefCell::new(None),
                 min_width: Cell::new(0.0),
+                density: Cell::new(1.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -2295,6 +2299,7 @@ impl EditorView {
         self.discard_text_editor();
         self.exit_frame_edit();
         *self.ivars().shot.borrow_mut() = Some(shot);
+        self.ivars().density.set(name_density(&file_name));
         self.ivars().selection.set(None);
         if let Some(label) = self.ivars().file_label.borrow().as_ref() {
             label.setStringValue(&NSString::from_str(&file_name));
