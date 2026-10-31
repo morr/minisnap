@@ -200,39 +200,87 @@ fn clamp_rect(rect: Rect, bounds: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// The cross-wise gradient fill: how much the light end blends toward white
-/// and the dark end scales down the picked color (the axis runs from the
-/// upper notch of the head to the lower one — light from above, whatever
-/// the arrow's direction).
-const ARROW_LIGHT_TOWARD_WHITE: f64 = 0.25;
-const ARROW_DARK_SHADE: f64 = 0.72;
+/// The knobs of the arrow construction — head proportions, notch and wing
+/// curves, fill, shadow — in one `Copy` struct. `ArrowParams::DEFAULT` is
+/// the shipped look; the debug tuner (`arrow_tuner_panel` in
+/// `editor_window.rs`, shown under `MINISNAP_ARROW_DEBUG`) rewrites the
+/// live copy in `ARROW_PARAMS` on every slider tick, and each render
+/// re-reads it, so the arrows respond instantly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArrowParams {
+    /// Head length and half-width at the base (the barbs), in stroke
+    /// widths; the head length clamps to half the arrow length so short
+    /// arrows keep a body.
+    pub head_len_w: f64,
+    /// Must stay above the body half-width (1.1 stroke widths), or the
+    /// wing inverts into the body.
+    pub half_head_w: f64,
+    /// Where the notch shoulder sits along the head, as a fraction of the
+    /// head length from the tip (in front of the barb line, leaving a
+    /// notch pocket between the head and the body).
+    pub notch_at: f64,
+    /// How far the notch control point bows out between the body edge and
+    /// the barb, 0..1. 0.5 leaves the notch edge tangent to the
+    /// perpendicular at the barb — the wing tips open wide (~60°) — while
+    /// the pocket stays as deep as the straight edge's.
+    pub notch_bow: f64,
+    /// How far the outer wing edge (barb → tip) bows out of its chord, as
+    /// a fraction of the head half-width — the convex sweep of the head's
+    /// silhouette, the outer counterpart of the notch bow. 0 is straight.
+    pub outer_bow: f64,
+    /// Corner-rounding radius of the notch ends — the wing tips and the
+    /// pocket apexes — in stroke widths. The wing tips read like the
+    /// rounded tail cap, a touch narrower.
+    pub notch_round_w: f64,
+    /// The cross-wise gradient fill: how much the light end blends toward
+    /// white and the dark end scales down the picked color (the axis runs
+    /// from the upper notch of the head to the lower one — light from
+    /// above, whatever the arrow's direction).
+    pub light_toward_white: f64,
+    pub dark_shade: f64,
+    /// Soft drop shadow under an arrow: offset in element space (+y is
+    /// screen-down here — note the render context is Y-flipped, so the
+    /// offset needs a negative y to land below), blur radius, and opacity.
+    pub shadow_dx: f64,
+    pub shadow_dy: f64,
+    pub shadow_blur: f64,
+    pub shadow_alpha: f64,
+}
 
-/// Soft drop shadow under an arrow: offset in element space (+y is
-/// screen-down here — note the render context is Y-flipped, so the offset
-/// needs a negative y to land below), blur radius, and opacity.
-const ARROW_SHADOW_OFFSET_X: f64 = 0.5;
-const ARROW_SHADOW_OFFSET_Y: f64 = -1.0;
-const ARROW_SHADOW_BLUR: f64 = 2.0;
-const ARROW_SHADOW_ALPHA: f64 = 0.28;
+impl ArrowParams {
+    /// The shipped Monosnap-style look.
+    pub(crate) const DEFAULT: ArrowParams = ArrowParams {
+        head_len_w: 4.6,
+        half_head_w: 2.4,
+        notch_at: 0.70,
+        notch_bow: 0.5,
+        outer_bow: 0.25,
+        notch_round_w: 0.40,
+        light_toward_white: 0.25,
+        dark_shade: 0.72,
+        shadow_dx: 0.5,
+        shadow_dy: -1.0,
+        shadow_blur: 2.0,
+        shadow_alpha: 0.28,
+    };
+}
 
-/// Head length and half-width at the base (the barbs), in stroke widths;
-/// the head length clamps to half the arrow length so short arrows keep a
-/// body.
-const ARROW_HEAD_LEN_W: f64 = 4.6;
-const ARROW_HALF_HEAD_W: f64 = 2.4;
-/// Where the notch shoulder sits along the head, as a fraction of the head
-/// length from the tip (in front of the barb line, leaving a notch pocket
-/// between the head and the body).
-const ARROW_NOTCH_AT: f64 = 0.70;
-/// How far the notch control point bows out between the body edge and the
-/// barb, 0..1. 0.5 leaves the notch edge tangent to the perpendicular at
-/// the barb — the wing tips open wide (~60°) — while the pocket stays as
-/// deep as the straight edge's.
-const ARROW_NOTCH_BOW: f64 = 0.5;
-/// Corner-rounding radius of the notch ends — the wing tips and the pocket
-/// apexes — in stroke widths. The wing tips read like the rounded tail
-/// cap, a touch narrower.
-const ARROW_NOTCH_ROUND_W: f64 = 0.40;
+/// The live arrow knobs — `ArrowParams::DEFAULT` until the debug tuner
+/// rewrites them. A poisoned lock is taken over rather than panicked on:
+/// the params are plain copyable data, never structurally broken.
+static ARROW_PARAMS: std::sync::RwLock<ArrowParams> =
+    std::sync::RwLock::new(ArrowParams::DEFAULT);
+
+/// A copy of the live arrow knobs.
+pub(crate) fn arrow_params() -> ArrowParams {
+    *ARROW_PARAMS.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Replace the live arrow knobs (the debug tuner calls this on every
+/// slider tick).
+pub(crate) fn set_arrow_params(params: ArrowParams) {
+    *ARROW_PARAMS.write().unwrap_or_else(|e| e.into_inner()) = params;
+}
 
 /// Direction and head proportions of an arrow.
 struct ArrowFrame {
@@ -247,7 +295,12 @@ struct ArrowFrame {
 }
 
 impl ArrowFrame {
-    fn new(a: super::Point, b: super::Point, width: f64) -> Option<ArrowFrame> {
+    fn new(
+        a: super::Point,
+        b: super::Point,
+        width: f64,
+        params: ArrowParams,
+    ) -> Option<ArrowFrame> {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
         let len = (dx * dx + dy * dy).sqrt();
         if len < f64::EPSILON {
@@ -256,8 +309,8 @@ impl ArrowFrame {
         Some(ArrowFrame {
             u: super::Point::new(dx / len, dy / len),
             n: super::Point::new(-dy / len, dx / len),
-            head_len: (width * ARROW_HEAD_LEN_W).min(len * 0.5),
-            half_head: width * ARROW_HALF_HEAD_W,
+            head_len: (width * params.head_len_w).min(len * 0.5),
+            half_head: width * params.half_head_w,
         })
     }
 
@@ -272,17 +325,28 @@ impl ArrowFrame {
 
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
 /// needle-thin with a rounded cap at `a` and widens along the whole length;
-/// the head is a barbed arrowhead whose wings end in wide flat-chamfered
-/// tips, with notch pockets between the wings and the body. One closed
-/// ring (the last point connects back to the first); empty for a
-/// degenerate zero-length arrow.
+/// the head is a barbed arrowhead whose wings sweep out on convex outer
+/// edges and end in wide rounded tips, with notch pockets between the
+/// wings and the body. One closed ring (the last point connects back to
+/// the first); empty for a degenerate zero-length arrow.
 pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec<super::Point> {
-    let Some(frame) = ArrowFrame::new(a, b, width) else {
+    arrow_outline_with(arrow_params(), a, b, width)
+}
+
+/// `arrow_outline` against explicit params — tests reshape the arrow
+/// without touching the live global.
+pub(crate) fn arrow_outline_with(
+    params: ArrowParams,
+    a: super::Point,
+    b: super::Point,
+    width: f64,
+) -> Vec<super::Point> {
+    let Some(frame) = ArrowFrame::new(a, b, width, params) else {
         return Vec::new();
     };
     let half_body = width * 1.1;
     let tail_r = width * 0.32;
-    let round_r = width * ARROW_NOTCH_ROUND_W;
+    let round_r = width * params.notch_round_w;
     // The rounded tail cap is a semicircle of radius `tail_r` behind its
     // center; the body widens linearly from `tail_r` to `half_body` up to
     // the notch shoulder.
@@ -291,27 +355,33 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
     // barb, bowed so it leaves the barb perpendicular to the axis (wide
     // wing tips) and flattens into the pocket toward the shoulder.
     let wing = |sign: f64| {
-        let shoulder = frame.step(b, -frame.head_len * ARROW_NOTCH_AT, half_body * sign);
+        let shoulder = frame.step(b, -frame.head_len * params.notch_at, half_body * sign);
         let barb = frame.step(b, -frame.head_len, frame.half_head * sign);
-        let out = half_body + ARROW_NOTCH_BOW * (frame.half_head - half_body);
+        let out = half_body + params.notch_bow * (frame.half_head - half_body);
         let elbow = frame.step(b, -frame.head_len, out * sign);
-        let bez = |t: f64| {
-            let (a2, b2, c2) = ((1.0 - t).powi(2), 2.0 * t * (1.0 - t), t * t);
-            super::Point::new(
-                a2 * shoulder.x + b2 * elbow.x + c2 * barb.x,
-                a2 * shoulder.y + b2 * elbow.y + c2 * barb.y,
-            )
-        };
         vec![
             (shoulder, Some(round_r)),
-            (bez(0.35), None),
-            (bez(0.55), None),
+            (quad(shoulder, elbow, barb, 0.35), None),
+            (quad(shoulder, elbow, barb, 0.55), None),
             (barb, Some(round_r)),
         ]
     };
+    // The outer wing edge: a convex quadratic from the barb to the tip,
+    // bowed out of the chord by a fraction of the head half-width — the
+    // outer counterpart of the notch curve, so the wing sweeps into the
+    // tip instead of running straight. The tip itself stays sharp.
+    let outer = |sign: f64| {
+        let barb = frame.step(b, -frame.head_len, frame.half_head * sign);
+        let bulge = params.outer_bow * frame.half_head;
+        let ctrl = super::Point::new(
+            (barb.x + b.x) / 2.0 + frame.n.x * sign * bulge,
+            (barb.y + b.y) / 2.0 + frame.n.y * sign * bulge,
+        );
+        [0.3, 0.5, 0.7].map(|t| (quad(barb, ctrl, b, t), None))
+    };
     // (point, corner radius) pairs: the cap arc points and the tip stay
     // sharp, the notch ends round.
-    let mut ring: Vec<(super::Point, Option<f64>)> = Vec::with_capacity(20);
+    let mut ring: Vec<(super::Point, Option<f64>)> = Vec::with_capacity(24);
     const CAP_STEPS: usize = 6;
     for k in 0..=CAP_STEPS {
         let t =
@@ -327,10 +397,22 @@ pub(crate) fn arrow_outline(a: super::Point, b: super::Point, width: f64) -> Vec
     // One side's notch and wing, the tip, then the mirrored side walked
     // back from the head toward the tail.
     ring.extend(wing(1.0));
+    ring.extend(outer(1.0));
     ring.push((b, None));
+    let lower_outer = outer(-1.0);
+    ring.extend(lower_outer.into_iter().rev());
     let lower = wing(-1.0);
     ring.extend(lower.into_iter().rev());
     round_corners(&ring)
+}
+
+/// A point on the quadratic Bézier (`a`, `ctrl`, `b`) at `t`.
+fn quad(a: super::Point, ctrl: super::Point, b: super::Point, t: f64) -> super::Point {
+    let (sa, sc, sb) = ((1.0 - t).powi(2), 2.0 * t * (1.0 - t), t * t);
+    super::Point::new(
+        sa * a.x + sc * ctrl.x + sb * b.x,
+        sa * a.y + sc * ctrl.y + sb * b.y,
+    )
 }
 
 /// Round every corner carrying a radius: the vertex is replaced by a short
@@ -379,17 +461,20 @@ fn pt_dist(a: super::Point, b: super::Point) -> f64 {
 
 /// The arrow's fill: a linear gradient from a lighter shade of the picked
 /// color (blended toward white) to a darker one.
-fn arrow_gradient(color: super::Rgba) -> Option<CFRetained<CGGradient>> {
+fn arrow_gradient(
+    color: super::Rgba,
+    params: ArrowParams,
+) -> Option<CFRetained<CGGradient>> {
     let space = CGColorSpace::new_device_rgb()?;
-    let light = |c: f64| c + (1.0 - c) * ARROW_LIGHT_TOWARD_WHITE;
+    let light = |c: f64| c + (1.0 - c) * params.light_toward_white;
     let components = [
         light(color[0]),
         light(color[1]),
         light(color[2]),
         color[3],
-        color[0] * ARROW_DARK_SHADE,
-        color[1] * ARROW_DARK_SHADE,
-        color[2] * ARROW_DARK_SHADE,
+        color[0] * params.dark_shade,
+        color[1] * params.dark_shade,
+        color[2] * params.dark_shade,
         color[3],
     ];
     let locations = [0.0f64, 1.0];
@@ -414,10 +499,11 @@ pub(crate) fn draw_arrow(
     color: super::Rgba,
     width: f64,
 ) {
-    let Some(frame) = ArrowFrame::new(a, b, width) else {
+    let params = arrow_params();
+    let Some(frame) = ArrowFrame::new(a, b, width, params) else {
         return;
     };
-    let outline = arrow_outline(a, b, width);
+    let outline = arrow_outline_with(params, a, b, width);
     let add_path = |ctx: &CGContext| {
         CGContext::begin_path(Some(ctx));
         let mut iter = outline.iter();
@@ -435,11 +521,11 @@ pub(crate) fn draw_arrow(
     // the shadow it cast (and as the arrow itself when the gradient cannot
     // be built).
     CGContext::save_g_state(Some(ctx));
-    let shadow = CGColor::new_srgb(0.0, 0.0, 0.0, ARROW_SHADOW_ALPHA);
+    let shadow = CGColor::new_srgb(0.0, 0.0, 0.0, params.shadow_alpha);
     CGContext::set_shadow_with_color(
         Some(ctx),
-        CGSize::new(ARROW_SHADOW_OFFSET_X, ARROW_SHADOW_OFFSET_Y),
-        ARROW_SHADOW_BLUR,
+        CGSize::new(params.shadow_dx, params.shadow_dy),
+        params.shadow_blur,
         Some(&shadow),
     );
     CGContext::set_rgb_fill_color(Some(ctx), color[0], color[1], color[2], color[3]);
@@ -449,7 +535,7 @@ pub(crate) fn draw_arrow(
 
     // Gradient pass: across the arrow, from one notch of the head to the
     // other, the light end on whichever barb sits higher on screen.
-    if let Some(gradient) = arrow_gradient(color) {
+    if let Some(gradient) = arrow_gradient(color, params) {
         let barb_a = frame.step(b, -frame.head_len, frame.half_head);
         let barb_b = frame.step(b, -frame.head_len, -frame.half_head);
         let (top, bottom) = if (barb_a.y, barb_a.x) <= (barb_b.y, barb_b.x) {
@@ -638,6 +724,53 @@ mod tests {
         // hair past it).
         let below = pixel(&bytes, 64, 20, 36);
         assert!(below[0] < 120 && below[2] < 120, "shadow below: {below:?}");
+    }
+
+    #[test]
+    fn arrow_outer_edge_bows_out() {
+        // The outer wing edge is a convex sweep, not a straight run into
+        // the tip: the outline point nearest the barb→tip chord's midpoint
+        // sits farther off the axis than the chord itself (by roughly the
+        // curve's mid deviation, outer_bow · half_head / 2).
+        let params = ArrowParams::DEFAULT;
+        let (a, b) = (Point::new(8.0, 32.0), Point::new(56.0, 32.0));
+        let outline = arrow_outline_with(params, a, b, 6.0);
+        let frame = ArrowFrame::new(a, b, 6.0, params).expect("frame");
+        let barb = frame.step(b, -frame.head_len, frame.half_head);
+        let chord_mid = Point::new((barb.x + b.x) / 2.0, (barb.y + b.y) / 2.0);
+        let edge_mid = outline
+            .iter()
+            .copied()
+            .min_by(|p, q| {
+                pt_dist(*p, chord_mid)
+                    .partial_cmp(&pt_dist(*q, chord_mid))
+                    .expect("finite distances")
+            })
+            .expect("non-empty outline");
+        let bulge = params.outer_bow * frame.half_head / 2.0;
+        assert!(
+            (edge_mid.y - 32.0).abs() > (chord_mid.y - 32.0).abs() + bulge * 0.5,
+            "edge mid {edge_mid:?} barely clears the chord mid {chord_mid:?}"
+        );
+    }
+
+    #[test]
+    fn arrow_params_reshape_the_outline() {
+        // The knobs are live geometry, not just paint: a wider head
+        // spreads the whole silhouette.
+        let (a, b) = (Point::new(0.0, 0.0), Point::new(60.0, 0.0));
+        let mut params = ArrowParams::DEFAULT;
+        params.half_head_w = 4.0;
+        let wide = arrow_outline_with(params, a, b, 6.0);
+        params.half_head_w = 1.2;
+        let narrow = arrow_outline_with(params, a, b, 6.0);
+        let spread = |outline: &[Point]| outline.iter().map(|p| p.y.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            spread(&wide) > spread(&narrow) + 5.0,
+            "wide {} vs narrow {}",
+            spread(&wide),
+            spread(&narrow)
+        );
     }
 
     #[test]
