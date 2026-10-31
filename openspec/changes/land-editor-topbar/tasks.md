@@ -21,7 +21,7 @@
 ## 5. Скилл и зачистка
 
 - [x] 5.1 Обновить доменный скилл `minisnap-editor` под новое окно: верхняя полоса трёх зон, режим просмотра по умолчанию, перенос окна за снимок, инвариант intrinsic-размеров в `NSStackView`, тюнер остаётся из master. Проверка: адреса в скилле сверены с кодом после правок.
-- [ ] 5.2 Удалить worktree `~/develop/minisnap-editor-{topbar,restyle,restyle-audit,rail}` (`git worktree remove`) и ветку `editor-rail` (`git branch -D`). Проверка: `git worktree list` показывает только основной каталог, ветки `editor-*` нет в `git branch`.
+- [x] 5.2 Удалить worktree `~/develop/minisnap-editor-{topbar,restyle,restyle-audit,rail}` (`git worktree remove`) и ветку `editor-rail` (`git branch -D`). Проверка: `git worktree list` показывает только основной каталог, ветки `editor-*` нет в `git branch`.
 
 ## Workflow follow-up
 
