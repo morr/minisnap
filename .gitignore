@@ -1,1 +1,4 @@
 /target
+
+# agent session worktrees
+/.worktrees
