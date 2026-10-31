@@ -77,6 +77,11 @@ const STROKE_MAX: f64 = 12.0;
 /// Width of the stroke-width slider in the toolbar, in points.
 const STROKE_SLIDER_WIDTH_PT: f64 = 90.0;
 
+/// Height of the stroke-width slider in the toolbar, in points. Reported
+/// as the view's intrinsic content size: the toolbar stack sizes arranged
+/// views by autolayout, so an explicit frame would be overwritten.
+const SLIDER_HEIGHT: f64 = 24.0;
+
 /// Knob radius of the custom stroke-width slider, in points.
 const SLIDER_KNOB_RADIUS: f64 = 6.5;
 
@@ -415,6 +420,13 @@ define_class!(
         fn __accepts_first_responder(&self) -> bool {
             // Keys stay with the canvas, like every other toolbar control.
             false
+        }
+
+        #[unsafe(method(intrinsicContentSize))]
+        fn __intrinsic_content_size(&self) -> CGSize {
+            // No intrinsic size means the toolbar stack collapses the
+            // slider to zero width — the size must live on the view.
+            CGSize::new(STROKE_SLIDER_WIDTH_PT, SLIDER_HEIGHT)
         }
 
         #[unsafe(method(doubleValue))]
@@ -2514,7 +2526,16 @@ impl EditorView {
                     .CGColor(),
                 ));
             }
-            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
+            // A borderless button with an empty title has no intrinsic
+            // size: without constraints the popover's stack collapses the
+            // preset to nothing, same as the toolbar swatch.
+            button.setTranslatesAutoresizingMaskIntoConstraints(false);
+            button.widthAnchor()
+                .constraintEqualToConstant(SWATCH_SIZE)
+                .setActive(true);
+            button.heightAnchor()
+                .constraintEqualToConstant(SWATCH_SIZE)
+                .setActive(true);
             button.setTag(index as isize);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
@@ -2686,10 +2707,12 @@ fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
 }
 
 /// A vertical divider between the toolbar zones: a 1×22 pt view with a
-/// low-alpha white layer. Not a button, so the hover pass ignores it.
+/// low-alpha white layer. Not a button, so the hover pass ignores it. The
+/// size rides on constraints: the toolbar stack sizes arranged views by
+/// autolayout and would collapse a frame-only view.
 fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
-    // SAFETY: designated initializer with a plain frame.
-    let view = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
+    let view = NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO);
+    view.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
         layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -2700,7 +2723,12 @@ fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
         )
         .CGColor()));
     }
-    view.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(1.0, 22.0)));
+    view.widthAnchor()
+        .constraintEqualToConstant(1.0)
+        .setActive(true);
+    view.heightAnchor()
+        .constraintEqualToConstant(22.0)
+        .setActive(true);
     view
 }
 
@@ -3191,7 +3219,18 @@ impl EditorWindow {
                 .CGColor(),
             ));
         }
-        color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
+        // The swatch has no intrinsic size (borderless button, empty
+        // title): its 24×24 size must ride on constraints, or the toolbar
+        // stack collapses it to nothing.
+        color_button.setTranslatesAutoresizingMaskIntoConstraints(false);
+        color_button
+            .widthAnchor()
+            .constraintEqualToConstant(SWATCH_SIZE)
+            .setActive(true);
+        color_button
+            .heightAnchor()
+            .constraintEqualToConstant(SWATCH_SIZE)
+            .setActive(true);
         let name = NSString::from_str("Color");
         color_button.setToolTip(Some(&name));
         color_button.setAccessibilityLabel(Some(&name));
@@ -3202,7 +3241,8 @@ impl EditorWindow {
         }
         // The swatch and the slider join the stack after the tools —
         // they close the right-hand zone.
-        // The custom stroke-width slider: track, accent fill, round knob.
+        // The slider sizes itself through its intrinsicContentSize — the
+        // toolbar stack reads it for layout.
         let slider = WidthSliderView::new(mtm);
         // SAFETY: target is this canvas view, alive for the process; the
         // action reads `doubleValue` off the sender.
@@ -3210,11 +3250,6 @@ impl EditorWindow {
             slider.set_target(Some(&*view));
             slider.set_action(Some(sel!(widthChanged:)));
         }
-        // The width control needs room to drag precisely.
-        slider.setFrame(CGRect::new(
-            CGPoint::ZERO,
-            CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
-        ));
         for tool in Tool::all() {
             let button = match tool {
                 Tool::Callout => icon_button(mtm, callout_icon(), tool.name(), tool.tag()),
