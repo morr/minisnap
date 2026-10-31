@@ -2283,7 +2283,7 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
     panel.setBoxType(NSBoxType::Custom);
     panel.setTitlePosition(NSTitlePosition::NoTitle);
     panel.setBorderWidth(0.0);
-    panel.setFillColor(&NSColor::blackColor().colorWithAlphaComponent(0.85));
+    panel.setFillColor(&NSColor::blackColor().colorWithAlphaComponent(0.7));
     panel.setCornerRadius(10.0);
     panel.setContentViewMargins(objc2_foundation::NSSize::new(0.0, 0.0));
     panel.setFrameSize(CGSize::new(W, h));
