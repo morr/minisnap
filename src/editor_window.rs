@@ -16,9 +16,9 @@ use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextField, NSTextFieldDelegate,
-    NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
-    NSWindowStyleMask,
+    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -258,6 +258,9 @@ struct EditorIvars {
     color_popover: RefCell<Option<Retained<NSPopover>>>,
     /// The stroke-width slider (its handle mirrors the selection's width).
     width_slider: RefCell<Option<Retained<NSSlider>>>,
+    /// Debug tuner rows: each arrow-param slider with its value field
+    /// (position matches ARROW_PARAM_SPECS; empty without the tuner).
+    arrow_param_rows: RefCell<Vec<(Retained<NSSlider>, Retained<NSTextField>)>>,
     /// The smallest content width that fits the whole toolbar.
     min_width: Cell<f64>,
 }
@@ -294,6 +297,7 @@ define_class!(
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
                 width_slider: RefCell::new(None),
+                arrow_param_rows: RefCell::new(Vec::new()),
                 min_width: Cell::new(0.0),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -488,6 +492,41 @@ define_class!(
                         eprintln!("editor: failed to restyle the element width: {err}");
                     }
                 }
+            }
+            self.redraw();
+        }
+
+        #[unsafe(method(arrowParamChanged:))]
+        fn __arrow_param_changed(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: the sender is a tuner slider; `tag` and `doubleValue`
+            // are its accessors.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let value: f64 = unsafe { msg_send![sender, doubleValue] };
+            let Some(spec) = ARROW_PARAM_SPECS.get(tag as usize) else {
+                return;
+            };
+            let mut params = render::arrow_params();
+            (spec.set)(&mut params, value);
+            render::set_arrow_params(params);
+            if let Some((_, field)) = self.ivars().arrow_param_rows.borrow().get(tag as usize) {
+                field.setStringValue(&NSString::from_str(&format!("{value:.2}")));
+            }
+            // Instant feedback: the canvas re-renders every element from
+            // the live params on each draw. No command is involved, so
+            // nothing enters the undo journal or the session files.
+            self.redraw();
+        }
+
+        #[unsafe(method(arrowTunerReset:))]
+        fn __arrow_tuner_reset(&self, _sender: Option<&AnyObject>) {
+            let defaults = render::ArrowParams::DEFAULT;
+            render::set_arrow_params(defaults);
+            let rows = self.ivars().arrow_param_rows.borrow();
+            for (spec, (slider, field)) in ARROW_PARAM_SPECS.iter().zip(rows.iter()) {
+                let value = (spec.get)(defaults);
+                slider.setDoubleValue(value);
+                field.setStringValue(&NSString::from_str(&format!("{value:.2}")));
             }
             self.redraw();
         }
@@ -2027,6 +2066,195 @@ fn callout_icon() -> Retained<NSImage> {
     NSImage::initWithCGImage_size(NSImage::alloc(), &image, CGSize::new(15.0, 15.0))
 }
 
+/// Toolbar tag of the arrow tuner's reset button.
+const ARROW_TUNER_RESET_TAG: isize = -4;
+
+/// One knob of the arrow tuner: the `ArrowParams` field it reads and
+/// writes, the slider's range, and the row label. Slider tags index this
+/// table.
+struct ArrowParamSpec {
+    name: &'static str,
+    min: f64,
+    max: f64,
+    get: fn(render::ArrowParams) -> f64,
+    set: fn(&mut render::ArrowParams, f64),
+}
+
+/// The tuner rows, top to bottom — the main constants of the arrow
+/// construction (`render::ArrowParams`). `half_head_w` stays above the
+/// body half-width (1.1 stroke widths), so even a dragged-low slider
+/// cannot invert the wing into the body.
+const ARROW_PARAM_SPECS: &[ArrowParamSpec] = &[
+    ArrowParamSpec {
+        name: "head_len_w",
+        min: 2.0,
+        max: 8.0,
+        get: |p| p.head_len_w,
+        set: |p, v| p.head_len_w = v,
+    },
+    ArrowParamSpec {
+        name: "half_head_w",
+        min: 1.2,
+        max: 4.0,
+        get: |p| p.half_head_w,
+        set: |p, v| p.half_head_w = v,
+    },
+    ArrowParamSpec {
+        name: "notch_at",
+        min: 0.4,
+        max: 0.95,
+        get: |p| p.notch_at,
+        set: |p, v| p.notch_at = v,
+    },
+    ArrowParamSpec {
+        name: "notch_bow",
+        min: 0.0,
+        max: 1.0,
+        get: |p| p.notch_bow,
+        set: |p, v| p.notch_bow = v,
+    },
+    ArrowParamSpec {
+        name: "outer_bow",
+        min: 0.0,
+        max: 1.0,
+        get: |p| p.outer_bow,
+        set: |p, v| p.outer_bow = v,
+    },
+    ArrowParamSpec {
+        name: "notch_round_w",
+        min: 0.0,
+        max: 0.8,
+        get: |p| p.notch_round_w,
+        set: |p, v| p.notch_round_w = v,
+    },
+    ArrowParamSpec {
+        name: "light_toward_white",
+        min: 0.0,
+        max: 0.6,
+        get: |p| p.light_toward_white,
+        set: |p, v| p.light_toward_white = v,
+    },
+    ArrowParamSpec {
+        name: "dark_shade",
+        min: 0.3,
+        max: 1.0,
+        get: |p| p.dark_shade,
+        set: |p, v| p.dark_shade = v,
+    },
+    ArrowParamSpec {
+        name: "shadow_dx",
+        min: -4.0,
+        max: 4.0,
+        get: |p| p.shadow_dx,
+        set: |p, v| p.shadow_dx = v,
+    },
+    ArrowParamSpec {
+        name: "shadow_dy",
+        min: -4.0,
+        max: 4.0,
+        get: |p| p.shadow_dy,
+        set: |p, v| p.shadow_dy = v,
+    },
+    ArrowParamSpec {
+        name: "shadow_blur",
+        min: 0.0,
+        max: 8.0,
+        get: |p| p.shadow_blur,
+        set: |p, v| p.shadow_blur = v,
+    },
+    ArrowParamSpec {
+        name: "shadow_alpha",
+        min: 0.0,
+        max: 1.0,
+        get: |p| p.shadow_alpha,
+        set: |p, v| p.shadow_alpha = v,
+    },
+];
+
+/// The arrow debug tuner: a translucent panel of sliders over the canvas'
+/// top-left corner, editing the live arrow params (`render::ARROW_PARAMS`)
+/// with instant redraw. Built only under `MINISNAP_ARROW_DEBUG` — a tuning
+/// instrument, not shipped UI.
+fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSView> {
+    let panel = NSView::new(mtm);
+    panel.setWantsLayer(true);
+    if let Some(layer) = panel.layer() {
+        let bg = NSColor::blackColor().colorWithAlphaComponent(0.78);
+        // SAFETY: plain CGColor bridge of a live color.
+        layer.setBackgroundColor(Some(&bg.CGColor()));
+        layer.setCornerRadius(10.0);
+    }
+    let stack = NSStackView::new(mtm);
+    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    stack.setSpacing(3.0);
+    let font = NSFont::monospacedSystemFontOfSize_weight(
+        10.0,
+        // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
+        unsafe { NSFontWeightRegular },
+    );
+    let params = render::arrow_params();
+    let mut rows = Vec::new();
+    for (tag, spec) in ARROW_PARAM_SPECS.iter().enumerate() {
+        let row = NSStackView::new(mtm);
+        row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        row.setSpacing(6.0);
+        let label = NSTextField::labelWithString(&NSString::from_str(spec.name), mtm);
+        label.setFont(Some(&font));
+        label.setTextColor(Some(&NSColor::whiteColor()));
+        let value = (spec.get)(params);
+        // SAFETY: class convenience constructor for the slider.
+        let slider = unsafe {
+            NSSlider::sliderWithValue_minValue_maxValue_target_action(
+                value,
+                spec.min,
+                spec.max,
+                Some(view),
+                Some(sel!(arrowParamChanged:)),
+                mtm,
+            )
+        };
+        slider.setTag(tag as isize);
+        // Sliders report on every tick of a drag, not only on release.
+        slider.setContinuous(true);
+        slider.setFocusRingType(NSFocusRingType::None);
+        slider.setRefusesFirstResponder(true);
+        // The convenience constructor leaves the slider a sliver wide.
+        slider.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(110.0, 18.0)));
+        let field =
+            NSTextField::labelWithString(&NSString::from_str(&format!("{value:.2}")), mtm);
+        field.setFont(Some(&font));
+        field.setTextColor(Some(&NSColor::whiteColor()));
+        field.setAlignment(NSTextAlignment::Right);
+        row.addArrangedSubview(&label);
+        row.addArrangedSubview(&slider);
+        row.addArrangedSubview(&field);
+        stack.addArrangedSubview(&row);
+        rows.push((slider, field));
+    }
+    // One click back to the shipped defaults.
+    let reset = icon_button(
+        mtm,
+        symbol_image("arrow.counterclockwise"),
+        ARROW_TUNER_RESET_TAG,
+    );
+    // SAFETY: target is this canvas view, alive for the process.
+    unsafe {
+        reset.setTarget(Some(view));
+        reset.setAction(Some(sel!(arrowTunerReset:)));
+    }
+    reset.setToolTip(Some(&NSString::from_str(
+        "reset the arrow params to the shipped defaults",
+    )));
+    stack.addArrangedSubview(&reset);
+
+    let fit = stack.fittingSize();
+    stack.setFrame(CGRect::new(CGPoint::ZERO, fit));
+    panel.setFrameSize(fit);
+    panel.addSubview(&stack);
+    *view.ivars().arrow_param_rows.borrow_mut() = rows;
+    panel
+}
+
 impl EditorWindow {
     pub fn new(mtm: MainThreadMarker, save_dir: std::path::PathBuf) -> EditorWindow {
         let view = EditorView::new(mtm);
@@ -2157,6 +2385,19 @@ impl EditorWindow {
         // Keys land on the canvas; the toolbar buttons refuse first
         // responder, so the window never opens with a focused button.
         window.setInitialFirstResponder(Some(&view));
+
+        // The arrow debug tuner overlays the canvas' top-left corner under
+        // MINISNAP_ARROW_DEBUG — a tuning instrument, not shipped UI.
+        if std::env::var_os("MINISNAP_ARROW_DEBUG").is_some_and(|v| !v.is_empty()) {
+            let tuner = arrow_tuner_panel(mtm, &view);
+            let fit = tuner.frame().size;
+            tuner.setFrame(CGRect::new(
+                CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT - 8.0 - fit.height),
+                fit,
+            ));
+            tuner.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+            content.addSubview(&tuner);
+        }
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
