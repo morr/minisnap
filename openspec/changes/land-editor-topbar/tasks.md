@@ -2,7 +2,7 @@
 
 ## 1. Мердж topbar-стека в master
 
-- [ ] 1.1 Выполнить `git merge editor-topbar` в master и разрешить конфликт `src/editor_window.rs` по правилу «хром окна и тулбар из ветки, блок тюнера стрелки из master» (тюнер остаётся оверлеем канваса под `MINISNAP_ARROW_DEBUG`). Проверка: `cargo build` проходит; `git diff master@{1}..HEAD -- src/editor/render.rs` пуст.
+- [x] 1.1 Выполнить `git merge editor-topbar` в master и разрешить конфликт `src/editor_window.rs` по правилу «хром окна и тулбар из ветки, блок тюнера стрелки из master» (тюнер остаётся оверлеем канваса под `MINISNAP_ARROW_DEBUG`). Проверка: `cargo build` проходит; `git diff master@{1}..HEAD -- src/editor/render.rs` пуст.
 - [ ] 1.2 Живой прогон мерджа: окно редактора открывается в новом хроме; запуск с `MINISNAP_ARROW_DEBUG=1` открывает тюнер поверх канваса, слайдеры тюнера правят стрелку. Проверка: оба запуска глазами, без паник в stderr.
 
 ## 2. Клавиатура редактора
