@@ -13,7 +13,8 @@ use objc2::{
     MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSBox, NSBoxType,
+    NSColor, NSControl, NSTitlePosition,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
     NSPopover, NSPopoverDelegate, NSPasteboard, NSPasteboardTypeString, NSScreen, NSSlider,
@@ -2249,7 +2250,7 @@ fn arrow_params_prompt(params: render::ArrowParams) -> String {
 /// instrument, not shipped UI. Every view gets an explicit frame in rows
 /// of fixed height: a stack-view panel sized from `fittingSize` proved
 /// fragile and dropped its bottom row of buttons.
-fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSView> {
+fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox> {
     // Row geometry, in points: label | slider | this-row reset | value.
     const TOP: f64 = 10.0;
     const BOTTOM: f64 = 10.0;
@@ -2270,15 +2271,20 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
     let n = ARROW_PARAM_SPECS.len() as f64;
     let h = TOP + n * ROW_H + (n - 1.0) * ROW_GAP + ACTIONS_GAP + ACTION_H + BOTTOM;
 
-    let panel = NSView::new(mtm);
-    panel.setWantsLayer(true);
-    if let Some(layer) = panel.layer() {
-        let bg = NSColor::blackColor().colorWithAlphaComponent(0.78);
-        // SAFETY: plain CGColor bridge of a live color.
-        layer.setBackgroundColor(Some(&bg.CGColor()));
-        layer.setCornerRadius(10.0);
-    }
+    let panel = NSBox::new(mtm);
+    // A classic drawn box, not a layer-backed view: on this macOS every
+    // control is SwiftUI-hosted, and inline-hosted controls (NSButton)
+    // stop compositing inside a view with a hand-configured layer — they
+    // went invisible. NSBox paints its fill the old way and leaves the
+    // control hosting alone.
+    panel.setBoxType(NSBoxType::Primary);
+    panel.setTitlePosition(NSTitlePosition::NoTitle);
+    panel.setBorderWidth(0.0);
+    panel.setFillColor(&NSColor::blackColor().colorWithAlphaComponent(0.78));
+    panel.setCornerRadius(10.0);
+    panel.setContentViewMargins(objc2_foundation::NSSize::new(0.0, 0.0));
     panel.setFrameSize(CGSize::new(W, h));
+    let content_area = panel.contentView().expect("box content view");
     let font = NSFont::monospacedSystemFontOfSize_weight(
         10.0,
         // SAFETY: NSFontWeightRegular is a plain extern CGFloat constant.
@@ -2340,10 +2346,10 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
             CGPoint::new(VALUE_X, y + 3.0),
             CGSize::new(VALUE_W, 14.0),
         ));
-        panel.addSubview(&label);
-        panel.addSubview(&slider);
-        panel.addSubview(&reset);
-        panel.addSubview(&field);
+        content_area.addSubview(&label);
+        content_area.addSubview(&slider);
+        content_area.addSubview(&reset);
+        content_area.addSubview(&field);
         rows.push((slider, field));
     }
     // Bottom actions: reset everything to the shipped defaults, or copy
@@ -2377,8 +2383,8 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
         "copy the tuned params and a prompt that bakes them in as the \
          new defaults",
     )));
-    panel.addSubview(&reset);
-    panel.addSubview(&prompt);
+    content_area.addSubview(&reset);
+    content_area.addSubview(&prompt);
     *view.ivars().arrow_param_rows.borrow_mut() = rows;
     panel
 }
