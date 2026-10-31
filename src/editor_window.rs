@@ -1125,21 +1125,31 @@ impl EditorView {
         )
     }
 
+    /// View-space position of an image-pixel point (top-left origin).
+    fn pixel_to_view(&self, p: Point) -> CGPoint {
+        let frame = self.frame_rect();
+        let (sx, sy) = self.view_scale();
+        CGPoint::new(
+            frame.origin.x + p.x * sx,
+            frame.origin.y + frame.size.height - p.y * sy,
+        )
+    }
+
     /// Cursor position in image pixel space (top-left origin): view points
     /// scale by the current frame-to-pixel ratio and flip vertically.
     fn pixel_point(&self, event: &NSEvent) -> Point {
         let location = event.locationInWindow();
         let local = self.convertPoint_fromView(location, None);
-        let bounds = self.bounds();
+        let frame = self.frame_rect();
         let (iw, ih) = self.image_size();
-        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 || iw == 0 || ih == 0 {
+        if frame.size.width <= 0.0 || frame.size.height <= 0.0 || iw == 0 || ih == 0 {
             return Point::new(0.0, 0.0);
         }
         // Clamp into the frame: drags that leave the image stick to its
         // edge instead of drawing outside it.
         Point::new(
-            (local.x * iw as f64 / bounds.size.width).clamp(0.0, iw as f64),
-            ((bounds.size.height - local.y) * ih as f64 / bounds.size.height)
+            ((local.x - frame.origin.x) * iw as f64 / frame.size.width).clamp(0.0, iw as f64),
+            ((frame.origin.y + frame.size.height - local.y) * ih as f64 / frame.size.height)
                 .clamp(0.0, ih as f64),
         )
     }
@@ -1162,8 +1172,7 @@ impl EditorView {
         // transparent areas — the frame floats on it, centered.
         let mut cache = ivars.checker.borrow_mut();
         let checker = cache.get_or_insert_with(checker_color);
-        // SAFETY: plain setter on a live color.
-        unsafe { checker.setFill() };
+        checker.setFill();
         CGContext::fill_rect(Some(&cg), bounds);
         drop(cache);
 
@@ -1261,7 +1270,7 @@ impl EditorView {
         // Selection markers on top, in screen points so they stay constant
         // sized; they never reach a saved composite.
         if let Some(id) = ivars.selection.get() {
-            self.draw_markers(&cg, shot, id, &bounds, sx, sy);
+            self.draw_markers(&cg, shot, id);
         }
 
         // The crop/resize frame overlay on top of everything.
@@ -1276,10 +1285,11 @@ impl EditorView {
         let Some(rect) = self.current_frame_rect() else {
             return;
         };
-        let vx = rect.x * sx;
+        let frame = self.frame_rect();
+        let vx = frame.origin.x + rect.x * sx;
         let vw = rect.width * sx;
         let vh = rect.height * sy;
-        let y0 = bounds.size.height - rect.max_y() * sy;
+        let y0 = frame.origin.y + frame.size.height - rect.max_y() * sy;
         // Dim everything outside the frame.
         CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 0.45);
         let dim = [
@@ -1308,8 +1318,9 @@ impl EditorView {
         let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
-            let cx = (point.x * sx).clamp(r, (bounds.size.width - r).max(r));
-            let cy = (bounds.size.height - point.y * sy).clamp(r, (bounds.size.height - r).max(r));
+            let cx = (frame.origin.x + point.x * sx).clamp(r, (bounds.size.width - r).max(r));
+            let cy = (frame.origin.y + frame.size.height - point.y * sy)
+                .clamp(r, (bounds.size.height - r).max(r));
             let marker = CGRect::new(
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
@@ -1334,19 +1345,11 @@ impl EditorView {
 
     /// Handles of the selected element: endpoint dots and bounding-box
     /// corners, white fill with the system accent ring.
-    fn draw_markers(
-        &self,
-        cg: &CGContext,
-        shot: &OpenShot,
-        id: u64,
-        bounds: &CGRect,
-        sx: f64,
-        sy: f64,
-    ) {
+    fn draw_markers(&self, cg: &CGContext, shot: &OpenShot, id: u64) {
         let Some(element) = shot.doc.element(id) else {
             return;
         };
-        let to_point = |p: Point| -> CGPoint { CGPoint::new(p.x * sx, bounds.size.height - p.y * sy) };
+        let to_point = |p: Point| -> CGPoint { self.pixel_to_view(p) };
         let points: Vec<CGPoint> = match &element.kind {
             ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => {
                 vec![to_point(*a), to_point(*b)]
@@ -1843,19 +1846,19 @@ impl EditorView {
 
     /// Scale factors from image pixels to view points.
     fn view_scale(&self) -> (f64, f64) {
-        let bounds = self.bounds();
+        let frame = self.frame_rect();
         let (iw, ih) = self.image_size();
-        if iw == 0 || ih == 0 {
+        if iw == 0 || ih == 0 || frame.size.width <= 0.0 || frame.size.height <= 0.0 {
             return (1.0, 1.0);
         }
-        (bounds.size.width / iw as f64, bounds.size.height / ih as f64)
+        (frame.size.width / iw as f64, frame.size.height / ih as f64)
     }
 
     /// View-space rect for the field editor over a text block whose
     /// top-left sits at `origin` (image pixels), holding `text` (may be
     /// empty) at `size` image pixels.
     fn text_editor_frame(&self, origin: Point, text: &str, size: f64) -> CGRect {
-        let bounds = self.bounds();
+        let frame = self.frame_rect();
         let (sx, sy) = self.view_scale();
         let font_pt = (size * sy).max(9.0);
         let (width, height) = if text.is_empty() {
@@ -1869,8 +1872,8 @@ impl EditorView {
                 None => (TEXT_EDITOR_WIDTH_PT, font_pt * 1.6 + 6.0),
             }
         };
-        let x = origin.x * sx - 3.0;
-        let y_top = bounds.size.height - origin.y * sy;
+        let x = frame.origin.x + origin.x * sx - 3.0;
+        let y_top = frame.origin.y + frame.size.height - origin.y * sy;
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
     }
 
@@ -2113,13 +2116,10 @@ impl EditorView {
 
     /// The view-space cursor rect around a frame spot.
     fn spot_cursor_rect(&self, point: Point) -> CGRect {
-        let bounds = self.bounds();
-        let (sx, sy) = self.view_scale();
         let pad = HANDLE_RADIUS_PT + 3.0;
-        let cx = point.x * sx;
-        let cy = bounds.size.height - point.y * sy;
+        let v = self.pixel_to_view(point);
         CGRect::new(
-            CGPoint::new(cx - pad, cy - pad),
+            CGPoint::new(v.x - pad, v.y - pad),
             CGSize::new(pad * 2.0, pad * 2.0),
         )
     }
@@ -2184,9 +2184,10 @@ impl EditorView {
             return;
         };
         let bounds = self.bounds();
+        let frame = self.frame_rect();
         let (sx, sy) = self.view_scale();
-        let bottom_y = bounds.size.height - rect.max_y() * sy;
-        let top_y = bounds.size.height - rect.y * sy;
+        let bottom_y = frame.origin.y + frame.size.height - rect.max_y() * sy;
+        let top_y = frame.origin.y + frame.size.height - rect.y * sy;
         let below = bottom_y - FRAME_OK_SIZE.height - 6.0;
         let strip_y = if below >= 2.0 { below } else { top_y + 6.0 };
         // A frame hugging the canvas top would otherwise push the strip
@@ -2196,7 +2197,7 @@ impl EditorView {
             (bounds.size.height - FRAME_OK_SIZE.height - 2.0).max(2.0),
         );
         if let Some(ok) = ivars.frame_ok.borrow().as_ref() {
-            let x = (rect.max_x() * sx - FRAME_OK_SIZE.width)
+            let x = (frame.origin.x + rect.max_x() * sx - FRAME_OK_SIZE.width)
                 .clamp(0.0, (bounds.size.width - FRAME_OK_SIZE.width).max(0.0));
             ok.setFrame(CGRect::new(
                 CGPoint::new(x, strip_y),
@@ -3511,9 +3512,9 @@ fn checker_color() -> Retained<NSColor> {
     let Some(image) = CGBitmapContextCreateImage(Some(&ctx)) else {
         return NSColor::lightGrayColor();
     };
-    // SAFETY: designated initializers on fresh allocations.
-    let tile = unsafe { NSImage::initWithCGImage_size(NSImage::alloc(), &image, tile_pt) };
-    unsafe { NSColor::colorWithPatternImage(&tile) }
+    // Designated initializers on fresh allocations.
+    let tile = NSImage::initWithCGImage_size(NSImage::alloc(), &image, tile_pt);
+    NSColor::colorWithPatternImage(&tile)
 }
 
 /// Uniformly fit `(w, h)` inside `(max_w, max_h)` without upscaling.
