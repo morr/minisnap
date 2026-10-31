@@ -21,7 +21,8 @@ use objc2_app_kit::{
     NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSVisualEffectMaterial,
-    NSVisualEffectView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSVisualEffectView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
 use objc2_app_kit::NSLayoutConstraintOrientation;
@@ -40,9 +41,7 @@ use crate::editor::{
 /// Checkerboard cell of the transparent-backdrop fill, in points: the
 /// light checker image editors draw behind transparent areas.
 const CHECKER_CELL_PT: f64 = 8.0;
-/// Corner radius of the borderless editor window (and of the floating
-/// toolbar panel), in points.
-const WINDOW_RADIUS: f64 = 12.0;
+
 
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
@@ -54,8 +53,13 @@ const TOOLBAR_HEIGHT: f64 = 33.0;
 /// canvas fills everything below it.
 const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
 
-/// Side padding of the toolbar stack inside the bar, in points.
-const BAR_PAD: f64 = 12.0;
+/// Leading padding of the toolbar stack inside the bar, in points: room
+/// for the system traffic lights, whose cluster ends at ~26 pt (the red
+/// button's right edge), plus a gap so controls never run under them.
+const BAR_LEADING_PAD: f64 = 40.0;
+
+/// Trailing padding of the toolbar stack inside the bar, in points.
+const BAR_TRAILING_PAD: f64 = 12.0;
 
 /// The hairline separating the toolbar strip from the canvas: white at a
 /// low alpha over the vibrancy bar.
@@ -121,9 +125,6 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
-
-/// Toolbar tag of the close button.
-const CLOSE_TAG: isize = -4;
 
 /// Toolbar tag of the color-swatch button: its layer background is the
 /// current color, so hover styling skips it.
@@ -333,9 +334,10 @@ impl Tool {
 }
 
 define_class!(
-    /// The editor's borderless window. Borderless `NSWindow`s refuse key
-    /// status by default; the canvas lives on keyboard commands (Esc, ⌘Q,
-    /// ⌘C, ⌘Z, ←/→), so the window must accept key.
+    /// The editor's window. A titled window accepts key status by default;
+    /// the `canBecomeKeyWindow` override is redundant for it and is kept
+    /// only as harmless insurance — the canvas lives on keyboard commands
+    /// (Esc, ⌘Q, ⌘C, ⌘Z, ←/→), so the window must accept key.
     #[unsafe(super(NSWindow))]
     #[thread_kind = MainThreadOnly]
     pub struct KeyableWindow;
@@ -654,8 +656,8 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
-    /// The file-name label in the toolbar (the borderless window has no
-    /// system title).
+    /// The file-name label in the toolbar (the window title is hidden,
+    /// the bar carries the name instead).
     file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
@@ -680,6 +682,9 @@ struct EditorIvars {
     frame_size: Cell<CGSize>,
     /// Cached checkerboard pattern color for the backdrop.
     checker: RefCell<Option<Retained<NSColor>>>,
+    /// Whether the window has been placed already: the first refit centers
+    /// it, later refits keep the top-left corner.
+    placed: Cell<bool>,
 }
 
 define_class!(
@@ -723,6 +728,7 @@ define_class!(
                 density: Cell::new(1.0),
                 frame_size: Cell::new(CGSize::ZERO),
                 checker: RefCell::new(None),
+                placed: Cell::new(false),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -818,15 +824,6 @@ define_class!(
         #[unsafe(method(frameOkClicked:))]
         fn __frame_ok_clicked(&self, _sender: Option<&AnyObject>) {
             self.commit_frame_edit();
-        }
-
-        #[unsafe(method(closeClicked:))]
-        fn __close_clicked(&self, _sender: Option<&AnyObject>) {
-            // Same path as Esc/⌘Q: closing only hides the window, the
-            // next shot reuses it.
-            if let Some(window) = self.window() {
-                window.close();
-            }
         }
 
         #[unsafe(method(pageClicked:))]
@@ -2314,12 +2311,25 @@ impl EditorView {
             .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
         // The refit never shrinks below the toolbar's minimum width.
         let width = content_size.width.max(self.ivars().min_width.get());
-        window.setContentSize(CGSize::new(
-            width,
-            content_size.height + TOOLBAR_RESERVED,
-        ));
+        let height = content_size.height + TOOLBAR_RESERVED;
         self.ivars().frame_size.set(content_size);
-        window.center();
+        if self.ivars().placed.get() {
+            // Keep the window's top-left corner where it was: AppKit's frame
+            // origin is the bottom-left one, so the same corner moves the
+            // origin by the height delta.
+            let old = window.frame();
+            let frame = CGRect::new(
+                CGPoint::new(old.origin.x, old.origin.y + old.size.height - height),
+                CGSize::new(width, height),
+            );
+            window.setFrame_display(frame, false);
+        } else {
+            // The first placement centers the window; every later refit
+            // anchors it instead.
+            window.setContentSize(CGSize::new(width, height));
+            window.center();
+            self.ivars().placed.set(true);
+        }
         self.redraw();
     }
 
@@ -3194,17 +3204,27 @@ impl EditorWindow {
                     CGPoint::ZERO,
                     CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
                 ),
-                NSWindowStyleMask::Borderless,
+                NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::FullSizeContentView
+                    | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
-        // Borderless chrome: rounded corners come from the content view's
-        // layer clip, the system shadow follows the rounded alpha mask, and
-        // the window background stays transparent under it.
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        // Electron-style hidden inset: a titled window with a transparent,
+        // hidden titlebar — the system traffic lights draw over the toolbar
+        // strip, which stays the only top chrome of the window.
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
+        // An accessory app has no dock icon: a miniaturized window would be
+        // unreachable, and zoom is meaningless — the window is refit to
+        // every shot anyway. Hide both standard buttons; close stays.
+        for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+            if let Some(button) = window.standardWindowButton(role) {
+                button.setHidden(true);
+            }
+        }
         // The dark HUD panel, the tints and the label all resolve against
         // the dark appearance.
         if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
@@ -3220,13 +3240,13 @@ impl EditorWindow {
         }
 
         // The toolbar strip across the top: a full-width vibrancy bar
-        // carrying the ◄/► leafing buttons, the file name (the borderless
-        // window has no system title), the tools, the color swatch with its
+        // carrying the ◄/► leafing buttons, the file name (the window
+        // title is hidden), the tools, the color swatch with its
         // preset popover and the stroke-width slider.
         let panel = ToolbarPanel::new(mtm);
         panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        // No corner radius of its own: the window's content view clips the
-        // top corners, and the bar's bottom edge must stay square against
+        // No corner radius of its own: the window supplies the system
+        // rounding, and the bar's bottom edge must stay square against
         // the canvas.
         panel.setWantsLayer(true);
         // Hover styling: one tracking area over the panel, owned by the
@@ -3248,16 +3268,6 @@ impl EditorWindow {
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(BAR_SPACING);
         let mut tool_buttons = Vec::new();
-        // The close button leads the bar: the borderless window has no
-        // system traffic lights, the ✕ is the visible way out.
-        let close_button = symbol_button(mtm, "xmark", "Close", CLOSE_TAG);
-        // SAFETY: target is this canvas view, alive for the process.
-        unsafe {
-            close_button.setTarget(Some(&view));
-            close_button.setAction(Some(sel!(closeClicked:)));
-        }
-        toolbar.addArrangedSubview(&close_button);
-        tool_buttons.push((CLOSE_TAG, close_button));
         for (tag, symbol, title) in [
             (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
             (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
@@ -3281,7 +3291,7 @@ impl EditorWindow {
             NSLayoutConstraintOrientation::Horizontal,
         );
         toolbar.addArrangedSubview(&file_label);
-        // Zones: close + leafing + file name | color + width | tools,
+        // Zones: leafing + file name | color + width | tools,
         // separated by 1 pt dividers with a wider gap around them.
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
         let leading_sep = bar_separator(mtm);
@@ -3398,15 +3408,9 @@ impl EditorWindow {
         // the freed space.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The container clips its subviews to the rounded window shape.
-        content.setWantsLayer(true);
-        if let Some(layer) = content.layer() {
-            layer.setCornerRadius(WINDOW_RADIUS);
-            layer.setMasksToBounds(true);
-        }
         // The window cannot shrink below the bar: the stack's fitting
-        // width plus its side padding.
-        let min_width = toolbar.fittingSize().width + 2.0 * BAR_PAD;
+        // width plus its leading and trailing padding.
+        let min_width = toolbar.fittingSize().width + BAR_LEADING_PAD + BAR_TRAILING_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
         panel.setFrame(CGRect::new(
@@ -3439,8 +3443,8 @@ impl EditorWindow {
         hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         panel.addSubview(&hairline);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(BAR_PAD, 0.0),
-            CGSize::new(size.width - 2.0 * BAR_PAD, TOOLBAR_HEIGHT),
+            CGPoint::new(BAR_LEADING_PAD, 0.0),
+            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
         ));
         toolbar.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
