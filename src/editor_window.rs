@@ -16,9 +16,9 @@ use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSControl,
     NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType,
     NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSViewController,
-    NSWindow, NSWindowStyleMask,
+    NSPopover, NSPopoverDelegate, NSPasteboard, NSPasteboardTypeString, NSScreen, NSSlider,
+    NSStackView, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -529,6 +529,22 @@ define_class!(
                 field.setStringValue(&NSString::from_str(&format!("{value:.2}")));
             }
             self.redraw();
+        }
+
+        #[unsafe(method(arrowPromptCopy:))]
+        fn __arrow_prompt_copy(&self, _sender: Option<&AnyObject>) {
+            // The tuner's whole point: carry the tuned values out of the
+            // app and into the coding agent that bakes them in as the new
+            // defaults.
+            let text = NSString::from_str(&arrow_params_prompt(render::arrow_params()));
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            // SAFETY: NSPasteboardTypeString is a plain extern NSString
+            // constant.
+            let ok = pasteboard.setString_forType(&text, unsafe { NSPasteboardTypeString });
+            if !ok {
+                eprintln!("editor: the pasteboard rejected the tuner prompt");
+            }
         }
     }
 
@@ -2066,9 +2082,6 @@ fn callout_icon() -> Retained<NSImage> {
     NSImage::initWithCGImage_size(NSImage::alloc(), &image, CGSize::new(15.0, 15.0))
 }
 
-/// Toolbar tag of the arrow tuner's reset button.
-const ARROW_TUNER_RESET_TAG: isize = -4;
-
 /// One knob of the arrow tuner: the `ArrowParams` field it reads and
 /// writes, the slider's range, and the row label. Slider tags index this
 /// table.
@@ -2171,6 +2184,41 @@ const ARROW_PARAM_SPECS: &[ArrowParamSpec] = &[
     },
 ];
 
+/// The text the tuner's `prompt` button puts on the clipboard: the tuned
+/// values plus a ready-to-paste instruction for the coding agent (ZCode)
+/// to bake them in as the new defaults, backing the old ones up to /tmp.
+fn arrow_params_prompt(params: render::ArrowParams) -> String {
+    let mut out = String::from(
+        "Примени настроенные в debug-панели значения параметров стрелки \
+         как новые дефолты в minisnap.\n\n",
+    );
+    out.push_str("Значения (все 12 полей ArrowParams):\n");
+    for spec in ARROW_PARAM_SPECS {
+        out.push_str(&format!("{} = {:.2}\n", spec.name, (spec.get)(params)));
+    }
+    out.push_str("\nШаги:\n");
+    out.push_str(
+        "1. Забекапь прежние значения из ArrowParams::DEFAULT в \
+         src/editor/render.rs в файл /tmp/minisnap-arrow-defaults-backup-<время>.txt — \
+         те же 12 строк вида `имя = значение`.\n",
+    );
+    out.push_str(
+        "2. Подставь значения из списка выше в ArrowParams::DEFAULT. Кроме \
+         DEFAULT ничего в коде не меняй: живые параметры — рантайм-крутилки \
+         тюнера, новыми дефолтами становятся только значения DEFAULT.\n",
+    );
+    out.push_str(
+        "3. Прогони cargo test: стрелочные тесты должны остаться зелёными. \
+         Если пиксельный тест стрелки падает из-за изменившегося силуэта — \
+         сдвинь его контрольные точки осмысленно, не ослабляй пороги.\n",
+    );
+    out.push_str(
+        "4. Закоммить по скиллу git: только src/editor/render.rs; сообщение \
+         вроде `set the arrow defaults to the tuned look`.\n",
+    );
+    out
+}
+
 /// The arrow debug tuner: a translucent panel of sliders over the canvas'
 /// top-left corner, editing the live arrow params (`render::ARROW_PARAMS`)
 /// with instant redraw. Built only under `MINISNAP_ARROW_DEBUG` — a tuning
@@ -2231,21 +2279,39 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSVie
         stack.addArrangedSubview(&row);
         rows.push((slider, field));
     }
-    // One click back to the shipped defaults.
-    let reset = icon_button(
-        mtm,
-        symbol_image("arrow.counterclockwise"),
-        ARROW_TUNER_RESET_TAG,
-    );
-    // SAFETY: target is this canvas view, alive for the process.
-    unsafe {
-        reset.setTarget(Some(view));
-        reset.setAction(Some(sel!(arrowTunerReset:)));
-    }
+    // One row of actions: reset to the shipped defaults, or copy a prompt
+    // that makes the coding agent bake the tuned values in as the new
+    // defaults (the old ones backed up to /tmp).
+    let actions = NSStackView::new(mtm);
+    actions.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    actions.setSpacing(8.0);
+    let action_button = |title: &str, action: objc2::runtime::Sel| {
+        // SAFETY: class convenience constructor, no external invariants.
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(title),
+                Some(view),
+                Some(action),
+                mtm,
+            )
+        };
+        button.setFont(Some(&font));
+        button.setFocusRingType(NSFocusRingType::None);
+        button.setRefusesFirstResponder(true);
+        button
+    };
+    let reset = action_button("reset", sel!(arrowTunerReset:));
     reset.setToolTip(Some(&NSString::from_str(
         "reset the arrow params to the shipped defaults",
     )));
-    stack.addArrangedSubview(&reset);
+    let prompt = action_button("prompt", sel!(arrowPromptCopy:));
+    prompt.setToolTip(Some(&NSString::from_str(
+        "copy the tuned params and a prompt that bakes them in as the \
+         new defaults",
+    )));
+    actions.addArrangedSubview(&reset);
+    actions.addArrangedSubview(&prompt);
+    stack.addArrangedSubview(&actions);
 
     let fit = stack.fittingSize();
     stack.setFrame(CGRect::new(CGPoint::ZERO, fit));
@@ -2435,5 +2501,18 @@ mod tests {
         // registration, which is exactly what panicked when the
         // end-editing callback sat on the sub-protocol.
         let _ = EditorView::class();
+    }
+
+    #[test]
+    fn arrow_prompt_carries_every_param_and_the_steps() {
+        let params = render::ArrowParams::DEFAULT;
+        let prompt = arrow_params_prompt(params);
+        for spec in ARROW_PARAM_SPECS {
+            let line = format!("{} = {:.2}\n", spec.name, (spec.get)(params));
+            assert!(prompt.contains(&line), "prompt lacks {line:?}");
+        }
+        assert!(prompt.contains("ArrowParams::DEFAULT"));
+        assert!(prompt.contains("/tmp"));
+        assert!(prompt.contains("cargo test"));
     }
 }
