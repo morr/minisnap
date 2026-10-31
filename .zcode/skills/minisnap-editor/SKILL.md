@@ -15,7 +15,7 @@ description: Map of the minisnap shot-editor domain (src/editor_window.rs + src/
 |---|---|---|
 | `src/editor_window.rs` | окно и канвас `EditorView` (свой objc2-класс, MainThreadOnly): мышь, клавиатура, тулбар, ввод текста, кроп/ресайз | `EditorWindow`, `EditorView`/`EditorIvars`, `Tool`, `Drag`, `TextTarget`, `PendingCallout`, `FrameEdit`/`FrameSpot` |
 | `src/editor/mod.rs` | документ: элементы и журнал команд; undo/redo — реплей | `Element`, `ElementKind`, `Command`, `Endpoint`, `EditorDoc`, `Point`/`Rect`/`Rgba` |
-| `src/editor/render.rs` | рендер композита и элементов, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `draw_arrow`, `arrow_outline`, `pixelate_region`, `bitmap_context` |
+| `src/editor/render.rs` | рендер композита и элементов, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `draw_arrow`, `arrow_outline`, `ArrowParams`, `pixelate_region`, `bitmap_context` |
 | `src/editor/hit_test.rs` | кто оказался под кликом | `Hit`, `top_hit`, `hit_element`, `text_bounds` |
 | `src/editor/session.rs` | сессии в tmp, автосейв после каждой команды | `OpenShot`, `MAX_SESSIONS`, `default_root`, `load`/`save`, `enforce_retention` |
 | `src/editor/text.rs` | замеры и отрисовка текста (Core Text) | `measure`, `measure_block`, `line_height`, `draw_text`, `FONT_NAME` |
