@@ -2278,7 +2278,9 @@ fn arrow_tuner_panel(mtm: MainThreadMarker, view: &EditorView) -> Retained<NSBox
     // stop compositing inside a view with a hand-configured layer — they
     // went invisible. NSBox paints its fill the old way and leaves the
     // control hosting alone.
-    panel.setBoxType(NSBoxType::Primary);
+    // NSBoxCustom: the Primary style draws a system material and ignores
+    // the fill color; Custom is the type where fillColor actually paints.
+    panel.setBoxType(NSBoxType::Custom);
     panel.setTitlePosition(NSTitlePosition::NoTitle);
     panel.setBorderWidth(0.0);
     panel.setFillColor(&NSColor::blackColor().colorWithAlphaComponent(0.85));
