@@ -61,6 +61,9 @@ const BAR_PAD: f64 = 12.0;
 /// low alpha over the vibrancy bar.
 const BAR_HAIRLINE: [f64; 4] = [1.0, 1.0, 1.0, 0.12];
 
+/// The vertical dividers between the toolbar zones: white at a low alpha.
+const BAR_DIVIDER: [f64; 4] = [1.0, 1.0, 1.0, 0.15];
+
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
 
@@ -2604,6 +2607,25 @@ fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
         .expect("configured symbol")
 }
 
+/// A vertical divider between the toolbar zones: a 1×22 pt view with a
+/// low-alpha white layer. Not a button, so the hover pass ignores it.
+fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
+    // SAFETY: designated initializer with a plain frame.
+    let view = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            BAR_DIVIDER[0],
+            BAR_DIVIDER[1],
+            BAR_DIVIDER[2],
+            BAR_DIVIDER[3],
+        )
+        .CGColor()));
+    }
+    view.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(1.0, 22.0)));
+    view
+}
+
 /// A toolbar button showing `image` as a template (tinted like the SF
 /// Symbols), with an empty title and the given tag. Bezel-less: the hover
 /// wash and the active-tool accent are layer backgrounds. Toolbar buttons
@@ -2754,7 +2776,12 @@ impl EditorWindow {
             NSLayoutConstraintOrientation::Horizontal,
         );
         toolbar.addArrangedSubview(&file_label);
-        toolbar.setCustomSpacing_afterView(14.0, &file_label);
+        // Zones: leafing + file name | tools | color + width, separated
+        // by 1 pt dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(10.0, &file_label);
+        let leading_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&leading_sep);
+        toolbar.setCustomSpacing_afterView(10.0, &leading_sep);
         // The color swatch: a circle showing the current color (no symbol);
         // the popover with the presets opens on click.
         // SAFETY: class convenience constructor, plain setters afterwards.
@@ -2792,7 +2819,8 @@ impl EditorWindow {
             color_button.setTarget(Some(&view));
             color_button.setAction(Some(sel!(colorClicked:)));
         }
-        toolbar.addArrangedSubview(&color_button);
+        // The swatch and the slider join the stack after the tools —
+        // they close the right-hand zone.
         // The custom stroke-width slider: track, accent fill, round knob.
         let slider = WidthSliderView::new(mtm);
         // SAFETY: target is this canvas view, alive for the process; the
@@ -2806,7 +2834,6 @@ impl EditorWindow {
             CGPoint::ZERO,
             CGSize::new(STROKE_SLIDER_WIDTH_PT, 24.0),
         ));
-        toolbar.addArrangedSubview(&slider);
         for tool in Tool::all() {
             let button = match tool {
                 Tool::Callout => icon_button(mtm, callout_icon(), tool.name(), tool.tag()),
@@ -2818,8 +2845,19 @@ impl EditorWindow {
                 button.setAction(Some(sel!(toolClicked:)));
             }
             toolbar.addArrangedSubview(&button);
+            // Wider gaps between the tool groups: drawing | annotating |
+            // transforming (Pen and Blur end their groups, Resize ends
+            // the tools zone).
+            if matches!(tool, Tool::Pen | Tool::Blur | Tool::Resize) {
+                toolbar.setCustomSpacing_afterView(10.0, &button);
+            }
             tool_buttons.push((tool.tag(), button));
         }
+        let trailing_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&trailing_sep);
+        toolbar.setCustomSpacing_afterView(10.0, &trailing_sep);
+        toolbar.addArrangedSubview(&color_button);
+        toolbar.addArrangedSubview(&slider);
 
         // Layout: the toolbar strip across the top, the canvas filling
         // everything below it. The flexible min-Y margin keeps the bar
