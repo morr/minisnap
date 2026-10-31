@@ -675,6 +675,9 @@ struct EditorIvars {
     /// Pixel density of the open shot's display (from the file name's
     /// `@<n>x`): the shot is shown at 1/n, the size it had on screen.
     density: Cell<f64>,
+    /// Displayed frame size, in view points: the shot at its display
+    /// scale, centered in the canvas by `frame_rect`.
+    frame_size: Cell<CGSize>,
 }
 
 define_class!(
@@ -716,6 +719,7 @@ define_class!(
                 toolbar_panel: RefCell::new(None),
                 min_width: Cell::new(0.0),
                 density: Cell::new(1.0),
+                frame_size: Cell::new(CGSize::ZERO),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -1103,6 +1107,19 @@ impl EditorView {
                 (CGImage::width(Some(base)), CGImage::height(Some(base)))
             })
             .unwrap_or((0, 0))
+    }
+
+    /// The shot's frame centered in the canvas, in view points.
+    fn frame_rect(&self) -> CGRect {
+        let bounds = self.bounds();
+        let size = self.ivars().frame_size.get();
+        CGRect::new(
+            CGPoint::new(
+                (bounds.size.width - size.width) / 2.0,
+                (bounds.size.height - size.height) / 2.0,
+            ),
+            size,
+        )
     }
 
     /// Cursor position in image pixel space (top-left origin): view points
@@ -2270,23 +2287,28 @@ impl EditorView {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
+        // Display scale: 1/n for an @nx capture (the size it had on
+        // screen), then fitted down when even that exceeds the screen.
+        // fit_size never upscales, so 1x shots pass through unchanged.
+        let density = self.ivars().density.get();
         let content_size = NSScreen::mainScreen(mtm)
             .map(|screen| screen.visibleFrame().size)
             .map(|visible| {
                 fit_size(
-                    iw as f64,
-                    ih as f64,
+                    iw as f64 / density,
+                    ih as f64 / density,
                     visible.width,
                     visible.height - TOOLBAR_RESERVED,
                 )
             })
-            .unwrap_or_else(|| CGSize::new(iw as f64, ih as f64));
+            .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
         // The refit never shrinks below the toolbar's minimum width.
         let width = content_size.width.max(self.ivars().min_width.get());
         window.setContentSize(CGSize::new(
             width,
             content_size.height + TOOLBAR_RESERVED,
         ));
+        self.ivars().frame_size.set(content_size);
         window.center();
         self.redraw();
     }
