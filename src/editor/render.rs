@@ -250,18 +250,18 @@ pub(crate) struct ArrowParams {
 impl ArrowParams {
     /// The shipped Monosnap-style look.
     pub(crate) const DEFAULT: ArrowParams = ArrowParams {
-        head_len_w: 4.6,
-        half_head_w: 2.4,
-        notch_at: 0.70,
-        notch_bow: 0.5,
-        outer_bow: 0.25,
-        notch_round_w: 0.40,
-        light_toward_white: 0.25,
-        dark_shade: 0.72,
+        head_len_w: 5.14,
+        half_head_w: 2.41,
+        notch_at: 0.71,
+        notch_bow: 0.40,
+        outer_bow: 0.08,
+        notch_round_w: 0.74,
+        light_toward_white: 0.26,
+        dark_shade: 0.67,
         shadow_dx: 0.5,
         shadow_dy: -1.0,
         shadow_blur: 2.0,
-        shadow_alpha: 0.28,
+        shadow_alpha: 0.33,
     };
 }
 
@@ -675,8 +675,8 @@ mod tests {
         let composite = render_composite(&base, &[element]).expect("composite");
         let bytes = pixel_bytes(&composite);
         // width 6 over len 48: tail cap radius 1.92 at x≈10, body widening
-        // to half 6.6 at the shoulder x≈39.2, barbs at x=32 with half 14.4,
-        // tip at b.
+        // to half 6.6 at the shoulder x≈34.1, barbs at x≈25.2 with half
+        // 14.5, tip at b.
         let is_arrow = |x: usize, y: usize| {
             let p = pixel(&bytes, 64, x, y);
             p[0] > 60 && p[2] > 60 && p[1] < 100 && (p[0] as i32 - p[2] as i32).abs() < 40
@@ -703,7 +703,7 @@ mod tests {
         assert!(is_arrow(38, 40), "head below the axis");
         assert!(is_arrow(53, 32), "head apex");
         assert!(is_gray(38, 16), "nothing beyond the head");
-        let pocket = pixel(&bytes, 64, 35, 40);
+        let pocket = pixel(&bytes, 64, 32, 38);
         assert!(
             pocket[1] as i32 > pocket[0] as i32 / 2,
             "curved notch pocket beside the body: {pocket:?}"
