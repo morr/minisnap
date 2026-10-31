@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{
     define_class, extern_methods, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker,
-    MainThreadOnly,
+    MainThreadOnly, Message,
 };
 use objc2_app_kit::{
     NSAnimationContext, NSAppearance, NSApplication, NSAutoresizingMaskOptions,
@@ -114,6 +114,21 @@ const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
 
 /// Hover background of a toolbar button: a faint white wash.
 const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
+
+/// Side of a color swatch (the toolbar swatch and the palette presets), in
+/// points: the minimum pointer target a pointer-driven control is expected
+/// to meet.
+const SWATCH_SIZE: f64 = 24.0;
+
+/// Resting outline of a color swatch: bright enough to mark the darkest
+/// presets (black, blue) against the dark HUD panel at the 3:1 boundary
+/// contrast graphics are expected to reach, faint enough not to read as a
+/// highlight.
+const SWATCH_RING: [f64; 4] = [1.0, 1.0, 1.0, 0.5];
+
+/// Hover outline of a color swatch: the ring brightens on hover instead of
+/// the fill — the fill is the color itself.
+const SWATCH_RING_HOVER: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
 
 /// Crossfade length of toolbar plate changes (hover, tool highlight), in
 /// seconds. Short enough that feedback stays responsive; the database rule
@@ -2163,23 +2178,35 @@ impl EditorView {
         }
     }
 
-    /// Restyle the toolbar button under the cursor: a faint wash on the
-    /// hovered button, nothing on the others. The active tool's button and
-    /// the color swatch own their backgrounds and are skipped.
+    /// Restyle the controls under the cursor: a faint wash on the hovered
+    /// toolbar button, a brighter outline on the hovered color swatch,
+    /// nothing on the others. The active tool's button and the swatch fill
+    /// own their backgrounds and are skipped. The toolbar panel lives in
+    /// the editor window and the palette presets in the popover's own
+    /// window, so the event's window decides which surface is under the
+    /// cursor; `None` (the cursor left both) clears both.
     fn hover_at(&self, event: Option<&NSEvent>) {
-        let hovered = event.and_then(|event| {
-            let panel = self.ivars().toolbar_panel.borrow().clone()?;
-            let point = panel.convertPoint_fromView(event.locationInWindow(), None);
-            let hit = panel.hitTest(point)?;
-            hit.downcast_ref::<NSButton>()
-                .map(|button| button.tag() as isize)
-        });
+        let (toolbar_hit, preset_hit) = match event {
+            None => (None, None),
+            Some(event) => {
+                let point = event.locationInWindow();
+                // Compared by window number: NSEvent::window needs a
+                // MainThreadMarker, the number needs nothing.
+                let editor_number = self.window().map(|window| window.windowNumber());
+                let in_editor_window = editor_number == Some(event.windowNumber());
+                if in_editor_window {
+                    (self.panel_button_at(point), None)
+                } else {
+                    (None, self.palette_button_at(point))
+                }
+            }
+        };
         let active = self.ivars().tool.get().map(|tool| tool.tag());
         // The active tool's accent background reads as a highlight already.
-        let hovered = if hovered.is_some() && hovered == active {
+        let toolbar_hit = if toolbar_hit.is_some() && toolbar_hit == active {
             None
         } else {
-            hovered
+            toolbar_hit
         };
         let hover = NSColor::colorWithSRGBRed_green_blue_alpha(
             HOVER_BG[0],
@@ -2187,13 +2214,25 @@ impl EditorView {
             HOVER_BG[2],
             HOVER_BG[3],
         );
+        let ring = NSColor::colorWithSRGBRed_green_blue_alpha(
+            SWATCH_RING[0],
+            SWATCH_RING[1],
+            SWATCH_RING[2],
+            SWATCH_RING[3],
+        );
+        let ring_hover = NSColor::colorWithSRGBRed_green_blue_alpha(
+            SWATCH_RING_HOVER[0],
+            SWATCH_RING_HOVER[1],
+            SWATCH_RING_HOVER[2],
+            SWATCH_RING_HOVER[3],
+        );
         animate_plate_changes(|| {
             for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
                 if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
                     continue;
                 }
                 if let Some(layer) = button.layer() {
-                    let bg: Option<&NSColor> = if Some(*tag) == hovered {
+                    let bg: Option<&NSColor> = if Some(*tag) == toolbar_hit {
                         Some(&hover)
                     } else {
                         None
@@ -2201,7 +2240,68 @@ impl EditorView {
                     layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
                 }
             }
+            // The toolbar swatch shows the current color as its fill; its
+            // hover feedback is the outline.
+            if let Some(button) = self.ivars().color_button.borrow().as_ref() {
+                if let Some(layer) = button.layer() {
+                    let hover_ring = if toolbar_hit == Some(COLOR_BUTTON_TAG) {
+                        &ring_hover
+                    } else {
+                        &ring
+                    };
+                    layer.setBorderColor(Some(&hover_ring.CGColor()));
+                }
+            }
+            for button in self.palette_swatch_buttons() {
+                if let Some(layer) = button.layer() {
+                    let hover_ring = if Some(button.tag()) == preset_hit {
+                        &ring_hover
+                    } else {
+                        &ring
+                    };
+                    layer.setBorderColor(Some(&hover_ring.CGColor()));
+                }
+            }
         });
+    }
+
+    /// Tag of the toolbar-panel button under a window-space point.
+    fn panel_button_at(&self, point: CGPoint) -> Option<isize> {
+        let panel = self.ivars().toolbar_panel.borrow().clone()?;
+        let hit = panel.hitTest(panel.convertPoint_fromView(point, None))?;
+        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+    }
+
+    /// Tag of the palette preset under a window-space point, if the
+    /// popover is open.
+    fn palette_button_at(&self, point: CGPoint) -> Option<isize> {
+        let popover = self.ivars().color_popover.borrow().clone()?;
+        if !popover.isShown() {
+            return None;
+        }
+        let controller = popover.contentViewController()?;
+        let stack = controller.view();
+        let hit = stack.hitTest(stack.convertPoint_fromView(point, None))?;
+        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+    }
+
+    /// The preset swatch buttons of the open popover.
+    fn palette_swatch_buttons(&self) -> Vec<Retained<NSButton>> {
+        let Some(popover) = self.ivars().color_popover.borrow().clone() else {
+            return Vec::new();
+        };
+        if !popover.isShown() {
+            return Vec::new();
+        }
+        let Some(controller) = popover.contentViewController() else {
+            return Vec::new();
+        };
+        controller
+            .view()
+            .subviews()
+            .iter()
+            .filter_map(|view| view.downcast_ref::<NSButton>().map(|button| button.retain()))
+            .collect()
     }
 
     /// Accent-wash the active tool's button, white-tint the others.
@@ -2303,13 +2403,21 @@ impl EditorView {
             button.setRefusesFirstResponder(true);
             if let Some(layer) = button.layer() {
                 layer.setBackgroundColor(Some(&ns_color.CGColor()));
-                layer.setCornerRadius(10.0);
-                // A visible outline: light presets (white) would blend into
-                // the popover background.
+                layer.setCornerRadius(SWATCH_SIZE / 2.0);
+                // The same bright resting outline as the toolbar swatch:
+                // dark presets stay visible on the popover background.
                 layer.setBorderWidth(1.0);
-                layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
+                layer.setBorderColor(Some(
+                    &NSColor::colorWithSRGBRed_green_blue_alpha(
+                        SWATCH_RING[0],
+                        SWATCH_RING[1],
+                        SWATCH_RING[2],
+                        SWATCH_RING[3],
+                    )
+                    .CGColor(),
+                ));
             }
-            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(20.0, 20.0)));
+            button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
             button.setTag(index as isize);
             // SAFETY: target is this canvas view, alive for the process.
             unsafe {
@@ -2323,6 +2431,22 @@ impl EditorView {
         let content_view: &NSView = &content;
         controller.setView(content_view);
         popover.setContentViewController(Some(&controller));
+        // Swatch hover rides the same owner as the toolbar tracking: one
+        // tracking area over the stack, and `hover_at` restyles whichever
+        // preset the cursor is over.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                CGRect::ZERO,
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&*self),
+                None,
+            )
+        };
+        content.addTrackingArea(&tracking);
         popover.showRelativeToRect_ofView_preferredEdge(
             anchor_button.bounds(),
             &anchor_button,
@@ -2629,12 +2753,23 @@ impl EditorWindow {
         color_button.setBordered(false);
         color_button.setWantsLayer(true);
         if let Some(layer) = color_button.layer() {
-            layer.setCornerRadius(10.0);
-            // A hairline outline keeps light presets visible on the panel.
+            layer.setCornerRadius(SWATCH_SIZE / 2.0);
+            // A bright resting outline keeps dark presets (black, blue)
+            // distinguishable from the panel at boundary contrast; on hover
+            // the outline brightens instead of the fill (the fill is the
+            // color itself).
             layer.setBorderWidth(1.0);
-            layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
+            layer.setBorderColor(Some(
+                &NSColor::colorWithSRGBRed_green_blue_alpha(
+                    SWATCH_RING[0],
+                    SWATCH_RING[1],
+                    SWATCH_RING[2],
+                    SWATCH_RING[3],
+                )
+                .CGColor(),
+            ));
         }
-        color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(20.0, 20.0)));
+        color_button.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(SWATCH_SIZE, SWATCH_SIZE)));
         let name = NSString::from_str("Color");
         color_button.setToolTip(Some(&name));
         color_button.setAccessibilityLabel(Some(&name));
