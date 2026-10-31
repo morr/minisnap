@@ -78,6 +78,16 @@ const SLIDER_KNOB_RADIUS: f64 = 6.5;
 /// Height of the custom stroke-width slider's track, in points.
 const SLIDER_TRACK_HEIGHT: f64 = 3.0;
 
+/// Wash behind the active tool's button: the system accent at this alpha.
+const ACTIVE_WASH: f64 = 0.25;
+
+/// The part of the slider track ahead of the knob's reach: a faint white
+/// line reading as recessed.
+const TRACK_UNFILLED: f64 = 0.22;
+
+/// Alpha of the slider knob's soft shadow.
+const KNOB_SHADOW: f64 = 0.35;
+
 /// A drag shorter than this (in image pixels) is a plain click, not a
 /// drawn element.
 const MIN_DRAG_PX: f64 = 4.0;
@@ -537,7 +547,7 @@ impl WidthSliderView {
         let knob_x = self.knob_x(w);
         let track_y = h / 2.0 - SLIDER_TRACK_HEIGHT / 2.0;
         // The recessed track behind the fill.
-        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, 0.22);
+        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, TRACK_UNFILLED);
         CGContext::fill_rect(
             Some(&cg),
             CGRect::new(
@@ -564,7 +574,7 @@ impl WidthSliderView {
             CGPoint::new(knob_x - SLIDER_KNOB_RADIUS, h / 2.0 - SLIDER_KNOB_RADIUS),
             CGSize::new(2.0 * SLIDER_KNOB_RADIUS, 2.0 * SLIDER_KNOB_RADIUS),
         );
-        let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+        let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, KNOB_SHADOW);
         let shadow_cg = shadow.CGColor();
         CGContext::set_shadow_with_color(
             Some(&cg),
@@ -1981,6 +1991,9 @@ impl EditorView {
         }
         ok.setFocusRingType(NSFocusRingType::None);
         ok.setRefusesFirstResponder(true);
+        // The default-button weight: Enter applies the frame, the button is
+        // the frame mode's confirmation.
+        ok.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
         // An accent plate instead of the default bezel; the title renders
         // white on it in the window's dark appearance.
         ok.setBordered(false);
@@ -2319,7 +2332,7 @@ impl EditorView {
         animate_plate_changes(|| {
             for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
                 if Some(*tag) == active {
-                    let bg = accent.colorWithAlphaComponent(0.25);
+                    let bg = accent.colorWithAlphaComponent(ACTIVE_WASH);
                     if let Some(layer) = button.layer() {
                         layer.setBackgroundColor(Some(&bg.CGColor()));
                     }
