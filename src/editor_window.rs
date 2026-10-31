@@ -673,7 +673,9 @@ define_class!(
             let this = this.set_ivars(EditorIvars {
                 shot: RefCell::new(None),
                 selection: Cell::new(None),
-                tool: Cell::new(Some(Tool::Arrow)),
+                // The editor opens in viewing mode: no tool is picked, so a
+                // plain drag moves the window (the tool is one click away).
+                tool: Cell::new(None),
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
                 drag: RefCell::new(None),
@@ -1464,6 +1466,18 @@ impl EditorView {
                         return;
                     }
                     (_, Some(kind)) => Drag::Draw(kind),
+                    // Viewing mode over free image space: the drag moves
+                    // the window. The frame handles, the text field and the
+                    // elements have already claimed their clicks above.
+                    (None, None) => {
+                        self.redraw();
+                        if let Some(window) = self.window() {
+                            window.performWindowDragWithEvent(event);
+                        }
+                        return;
+                    }
+                    // A tool is up but produced no draft (cannot happen
+                    // today): a plain deselect, the window stays put.
                     _ => {
                         self.redraw();
                         return;
