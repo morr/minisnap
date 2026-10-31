@@ -51,8 +51,13 @@ const TOOLBAR_HEIGHT: f64 = 33.0;
 /// canvas fills everything below it.
 const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
 
-/// Side padding of the toolbar stack inside the bar, in points.
-const BAR_PAD: f64 = 12.0;
+/// Leading padding of the toolbar stack inside the bar, in points: room
+/// for the system traffic lights, whose cluster ends at ~26 pt (the red
+/// button's right edge), plus a gap so controls never run under them.
+const BAR_LEADING_PAD: f64 = 40.0;
+
+/// Trailing padding of the toolbar stack inside the bar, in points.
+const BAR_TRAILING_PAD: f64 = 12.0;
 
 /// The hairline separating the toolbar strip from the canvas: white at a
 /// low alpha over the vibrancy bar.
@@ -118,9 +123,6 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
-
-/// Toolbar tag of the close button.
-const CLOSE_TAG: isize = -4;
 
 /// Toolbar tag of the color-swatch button: its layer background is the
 /// current color, so hover styling skips it.
@@ -805,15 +807,6 @@ define_class!(
         #[unsafe(method(frameOkClicked:))]
         fn __frame_ok_clicked(&self, _sender: Option<&AnyObject>) {
             self.commit_frame_edit();
-        }
-
-        #[unsafe(method(closeClicked:))]
-        fn __close_clicked(&self, _sender: Option<&AnyObject>) {
-            // Same path as Esc/⌘Q: closing only hides the window, the
-            // next shot reuses it.
-            if let Some(window) = self.window() {
-                window.close();
-            }
         }
 
         #[unsafe(method(pageClicked:))]
@@ -3219,16 +3212,6 @@ impl EditorWindow {
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(BAR_SPACING);
         let mut tool_buttons = Vec::new();
-        // The close button leads the bar: the borderless window has no
-        // system traffic lights, the ✕ is the visible way out.
-        let close_button = symbol_button(mtm, "xmark", "Close", CLOSE_TAG);
-        // SAFETY: target is this canvas view, alive for the process.
-        unsafe {
-            close_button.setTarget(Some(&view));
-            close_button.setAction(Some(sel!(closeClicked:)));
-        }
-        toolbar.addArrangedSubview(&close_button);
-        tool_buttons.push((CLOSE_TAG, close_button));
         for (tag, symbol, title) in [
             (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
             (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
@@ -3252,7 +3235,7 @@ impl EditorWindow {
             NSLayoutConstraintOrientation::Horizontal,
         );
         toolbar.addArrangedSubview(&file_label);
-        // Zones: close + leafing + file name | color + width | tools,
+        // Zones: leafing + file name | color + width | tools,
         // separated by 1 pt dividers with a wider gap around them.
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
         let leading_sep = bar_separator(mtm);
@@ -3370,8 +3353,8 @@ impl EditorWindow {
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
         // The window cannot shrink below the bar: the stack's fitting
-        // width plus its side padding.
-        let min_width = toolbar.fittingSize().width + 2.0 * BAR_PAD;
+        // width plus its leading and trailing padding.
+        let min_width = toolbar.fittingSize().width + BAR_LEADING_PAD + BAR_TRAILING_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
         panel.setFrame(CGRect::new(
@@ -3404,8 +3387,8 @@ impl EditorWindow {
         hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         panel.addSubview(&hairline);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(BAR_PAD, 0.0),
-            CGSize::new(size.width - 2.0 * BAR_PAD, TOOLBAR_HEIGHT),
+            CGPoint::new(BAR_LEADING_PAD, 0.0),
+            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
         ));
         toolbar.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
