@@ -1388,18 +1388,21 @@ impl OverlayView {
                 sckit.origin.x + up.x,
                 sckit.origin.y + (ivars.screen_frame.get().size.height - up.y),
             );
-            let frames: Vec<CGRect> = ivars.windows.borrow().iter().map(|w| w.frame).collect();
+            let t0_windows = ivars.windows.borrow();
             eprintln!(
                 "click: sckit point ({:.0},{:.0}), {} T0 windows",
                 point_sckit.x,
                 point_sckit.y,
-                frames.len()
+                t0_windows.len()
             );
-            let rect = match crate::capture::geometry::topmost_window_at(&frames, point_sckit) {
-                Some(i) => crate::capture::geometry::window_frame_to_pixel_rect(
-                    frames[i],
+            // The list is only candidates: freshness and stacking order are
+            // verified by rendering (see resolve_click_target).
+            let rect = match ivars.image.borrow().as_ref() {
+                Some(frozen) => crate::capture::resolve_click_target(
+                    &t0_windows,
+                    point_sckit,
                     sckit,
-                    ivars.scale.get(),
+                    frozen,
                 ),
                 None => {
                     let (w_px, h_px) = ivars.image_size_px.get();

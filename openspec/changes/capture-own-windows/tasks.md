@@ -3,7 +3,7 @@
 ## 1. Код
 
 - [x] 1.1 Убрать из `visible_windows` в `src/capture.rs` own-pid фильтр (проверку `app.processID() == own_pid` и вычисление `own_pid`); убедиться, что `cargo build` проходит и список окон T0 теперь включает видимые собственные окна — проверить `grep -n own_pid src/capture.rs` (совпадений нет) и `cargo clippy`.
-- [ ] 1.2 Реализовать `resolve_click_target` в `src/capture.rs` (кандидаты из списка T0 + свежий перезапрос `SCShareableContent`, рендер кандидата через `SCContentFilter::initWithDesktopIndependentWindow` + `SCScreenshotManager`, сравнение патча с замороженным кадром, прежний фолбэк) и подключить его в клик-путь `src/overlay.rs`; проверить `cargo clippy` и юнит-тест порядка кандидатов.
+- [x] 1.2 Реализовать `resolve_click_target` в `src/capture.rs` (кандидаты из списка T0 + свежий перезапрос `SCShareableContent`, рендер кандидата через `SCContentFilter::initWithDesktopIndependentWindow` + `SCScreenshotManager`, сравнение патча с замороженным кадром, прежний фолбэк) и подключить его в клик-путь `src/overlay.rs`; проверить `cargo clippy` и юнит-тест порядка кандидатов.
 
 ## 2. Скил
 

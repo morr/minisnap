@@ -7,12 +7,15 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode, CGImage};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGDisplayCopyDisplayMode,
+    CGDisplayMode, CGImage, CGImageAlphaInfo, CGContext, CGRectContainsPoint,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
-    SCCaptureResolutionType,
+    SCCaptureResolutionType, SCWindow,
 };
 
 /// Height of the primary screen (origin at (0,0)) in points. ScreenCaptureKit
@@ -267,10 +270,275 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
     })
 }
 
+/// Pixel rect of the window the user actually sees under `point` in the
+/// frozen frame `frozen` (whose display spans `display_frame` in SCKit
+/// points), cropped from that frame.
+///
+/// The T0 window list is only candidates: ScreenCaptureKit picks up freshly
+/// created windows with a lag (a game restarted by a dev loop is visible on
+/// screen seconds before it shows up in the list), and the list order can
+/// disagree with the compositor, so the first containing entry may be a
+/// window that is actually behind or invisible. Each candidate is verified
+/// by rendering it alone and comparing its pixels at the point with the
+/// frozen frame; the first match is the answer. A total miss falls back to
+/// the plain list-order hit-test, then to the whole frame.
+pub fn resolve_click_target(
+    t0_windows: &[T0Window],
+    point: CGPoint,
+    display_frame: CGRect,
+    frozen: &CGImage,
+) -> CGRect {
+    let scale = image_scale(frozen, display_frame);
+    let fallback = |frames: &[CGRect]| {
+        match geometry::topmost_window_at(frames, point) {
+            Some(i) => geometry::window_frame_to_pixel_rect(frames[i], display_frame, scale),
+            None => CGRect::new(
+                CGPoint::ZERO,
+                CGSize::new(
+                    CGImage::width(Some(frozen)) as f64,
+                    CGImage::height(Some(frozen)) as f64,
+                ),
+            ),
+        }
+    };
+    let t0_frames: Vec<CGRect> = t0_windows.iter().map(|w| w.frame).collect();
+    // Fresh content covers windows created after the T0 snapshot and
+    // provides the live window objects needed for rendering.
+    let fresh = shareable_content().ok();
+    let fresh_pairs: Vec<(u32, CGRect)> = fresh
+        .as_ref()
+        .map(|content| {
+            // SAFETY: plain property access on live shareable content.
+            unsafe { content.windows() }
+                .iter()
+                .map(|w| {
+                    // SAFETY: plain property access on a live SCWindow.
+                    unsafe { (w.windowID(), w.frame()) }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let fresh_windows = fresh.as_ref().map(|content| unsafe { content.windows() });
+    for (id, frame) in candidate_frames(t0_windows, &fresh_pairs, point) {
+        let Some(list) = &fresh_windows else {
+            continue;
+        };
+        let Some(window) = list.iter().find(|w| unsafe { w.windowID() } == id) else {
+            continue;
+        };
+        if renders_as_seen(&window, frame, point, display_frame, frozen) {
+            return geometry::window_frame_to_pixel_rect(frame, display_frame, scale);
+        }
+    }
+    fallback(&t0_frames)
+}
+
+/// Frames of click candidates in probe order: containing T0 windows in
+/// their list order first, then fresh windows the T0 list missed (matched
+/// by id), preserving the fresh list order. Capped — each candidate costs a
+/// window render.
+fn candidate_frames(
+    t0_windows: &[T0Window],
+    fresh: &[(u32, CGRect)],
+    point: CGPoint,
+) -> Vec<(u32, CGRect)> {
+    let contains = |frame: CGRect| {
+        frame.size.width > 0.0 && frame.size.height > 0.0 && CGRectContainsPoint(frame, point)
+    };
+    let mut out: Vec<(u32, CGRect)> = t0_windows
+        .iter()
+        .filter(|w| contains(w.frame))
+        .map(|w| (w.window_id, w.frame))
+        .collect();
+    for (id, frame) in fresh {
+        if contains(*frame) && !out.iter().any(|(seen, _)| seen == id) {
+            out.push((*id, *frame));
+        }
+    }
+    out.truncate(5);
+    out
+}
+
+/// Does the window's own content match the frozen frame at `point`? The
+/// window is rendered alone (no shadow); a match means nothing else is
+/// drawn over it there, so it is the window the user sees.
+fn renders_as_seen(
+    window: &SCWindow,
+    frame: CGRect,
+    point: CGPoint,
+    display_frame: CGRect,
+    frozen: &CGImage,
+) -> bool {
+    let Some(render) = render_window(window) else {
+        return false;
+    };
+    let disp_scale = image_scale(frozen, display_frame);
+    let win_scale = image_scale(&render, frame);
+    let Some(a) = patch_at(frozen, point, display_frame, disp_scale) else {
+        return false;
+    };
+    let Some(b) = patch_at(&render, point, frame, win_scale) else {
+        return false;
+    };
+    patches_match(&a, &b)
+}
+
+/// Actual pixel-per-point scale of an image covering `frame`.
+fn image_scale(image: &CGImage, frame: CGRect) -> f64 {
+    if frame.size.width <= 0.0 {
+        return 1.0;
+    }
+    CGImage::width(Some(image)) as f64 / frame.size.width
+}
+
+/// Render one window alone at its current on-screen content, without its
+/// shadow. Blocking until the image arrives; the SCK completion arrives on
+/// a private queue, so this must not be called from the queue it dispatches
+/// on.
+fn render_window(window: &SCWindow) -> Option<Retained<CGImage>> {
+    // SAFETY: plain init on a freshly allocated filter; the desktop-
+    // independent filter renders the window alone, ignoreShadows drops its
+    // shadow so the image maps 1:1 onto the window frame.
+    let filter = unsafe {
+        SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
+    };
+    // SAFETY: plain constructor.
+    let config = unsafe { SCStreamConfiguration::new() };
+    // SAFETY: plain property setters on a freshly created configuration.
+    unsafe {
+        config.setCaptureResolution(SCCaptureResolutionType::Best);
+        config.setShowsCursor(false);
+        config.setIgnoreShadowsSingleWindow(true);
+    }
+    let (tx, rx) = mpsc::channel::<Option<Retained<CGImage>>>();
+    let handler = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let result = if !error.is_null() || image.is_null() {
+            None
+        } else {
+            // SAFETY: SCScreenshotManager passes a +1 retained image.
+            Some(unsafe { Retained::retain(image) }.expect("non-null screenshot image"))
+        };
+        let _ = tx.send(result);
+    });
+    // SAFETY: class method with an owned completion handler.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &config,
+            Some(&handler),
+        );
+    }
+    rx.recv().ok().flatten()
+}
+
+/// RGBA8 bytes of a small patch of `image` centered on `point` (in `frame`'s
+/// point space at `scale`); `None` when the patch would run off the image.
+fn patch_at(image: &CGImage, point: CGPoint, frame: CGRect, scale: f64) -> Option<Vec<u8>> {
+    const RADIUS: f64 = 3.0;
+    let side = 2.0 * RADIUS + 1.0;
+    let cx = (point.x - frame.origin.x) * scale;
+    let cy = (point.y - frame.origin.y) * scale;
+    let x0 = (cx - RADIUS).floor().max(0.0);
+    let y0 = (cy - RADIUS).floor().max(0.0);
+    if x0 + side > CGImage::width(Some(image)) as f64
+        || y0 + side > CGImage::height(Some(image)) as f64
+    {
+        return None;
+    }
+    // SAFETY: the sub-rect lies inside the image.
+    let cropped = CGImage::with_image_in_rect(
+        Some(image),
+        CGRect::new(CGPoint::new(x0, y0), CGSize::new(side, side)),
+    )?;
+    let space = CGColorSpace::new_device_rgb()?;
+    // SAFETY: plain CGBitmapContextCreate with a null data pointer; CG
+    // allocates and owns the backing store, read through
+    // CGBitmapContextGetData after drawing.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            side as usize,
+            side as usize,
+            8,
+            side as usize * 4,
+            Some(&*space),
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }?;
+    CGContext::draw_image(
+        Some(&ctx),
+        CGRect::new(CGPoint::ZERO, CGSize::new(side, side)),
+        Some(&cropped),
+    );
+    // SAFETY: the context owns a valid RGBA8 buffer of this size.
+    let data = CGBitmapContextGetData(Some(&ctx)) as *const u8;
+    if data.is_null() {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(data, side as usize * side as usize * 4) }.to_vec())
+}
+
+/// Close-enough patch comparison: mean per-channel deviation under a small
+/// tolerance. The same content through the same capture pipeline differs by
+/// a few units at most; different windows differ by a lot. Fully
+/// transparent pixels carry no content and are skipped.
+fn patches_match(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() || a.is_empty() {
+        return false;
+    }
+    let mut sum = 0u64;
+    let mut used = 0u64;
+    for (ca, cb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        if ca[3] == 0 || cb[3] == 0 {
+            continue;
+        }
+        sum += (i32::from(ca[0]) - i32::from(cb[0])).unsigned_abs() as u64
+            + (i32::from(ca[1]) - i32::from(cb[1])).unsigned_abs() as u64
+            + (i32::from(ca[2]) - i32::from(cb[2])).unsigned_abs() as u64;
+        used += 1;
+    }
+    used > 0 && (sum as f64) / (used as f64 * 3.0) < 16.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use objc2_foundation::{NSDictionary, NSString};
+
+    #[test]
+    fn click_candidates_t0_order_first_then_fresh_missed() {
+        let point = CGPoint::new(100.0, 100.0);
+        let inside = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 200.0));
+        let outside = CGRect::new(CGPoint::new(500.0, 500.0), CGSize::new(50.0, 50.0));
+        let win = |id: u32, frame: CGRect| T0Window {
+            frame,
+            window_id: id,
+            title: None,
+        };
+        let t0 = vec![win(1, inside), win(2, outside), win(3, inside)];
+        let fresh = vec![(2, outside), (4, inside), (1, inside)];
+        // T0 containing windows keep their list order; fresh adds only what
+        // the T0 list missed (4); 2 is outside the point and 1 is a dupe.
+        assert_eq!(
+            candidate_frames(&t0, &fresh, point),
+            vec![(1, inside), (3, inside), (4, inside)]
+        );
+    }
+
+    #[test]
+    fn click_candidates_capped_at_five() {
+        let point = CGPoint::new(50.0, 50.0);
+        let inside = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 200.0));
+        let t0: Vec<T0Window> = (0..8)
+            .map(|i| T0Window {
+                frame: inside,
+                window_id: i,
+                title: None,
+            })
+            .collect();
+        let out = candidate_frames(&t0, &[], point);
+        assert_eq!(out.len(), 5);
+    }
 
     #[test]
     #[ignore = "requires Screen Recording permission for the calling process"]
