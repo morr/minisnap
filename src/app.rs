@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
     NSStatusItem,
 };
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::CGPoint;
 use objc2_foundation::{
     NSDefaultRunLoopMode, NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
 };
@@ -46,8 +46,6 @@ const TICK_INTERVAL: f64 = 0.05;
 enum MainJob {
     CaptureReady {
         result: Result<crate::capture::T0Capture, String>,
-        screen_frame: CGRect,
-        scale: f64,
         /// Open the editor window after the usual output.
         edit: bool,
     },
@@ -192,12 +190,9 @@ define_class!(
             loop {
                 let next = self.ivars().jobs_rx.borrow_mut().try_recv().ok();
                 match next {
-                    Some(MainJob::CaptureReady {
-                        result,
-                        screen_frame,
-                        scale,
-                        edit,
-                    }) => self.capture_ready(result, screen_frame, scale, edit),
+                    Some(MainJob::CaptureReady { result, edit }) => {
+                        self.capture_ready(result, edit)
+                    }
                     Some(MainJob::OpenEditor { path }) => self.open_editor(path),
                     None => break,
                 }
@@ -674,9 +669,9 @@ impl AppController {
         }
     }
 
-    /// Start the frozen-area capture: pick the display under the cursor and
-    /// log the T0 data (overlay and screenshot come next). With `edit`, the
-    /// shot opens in the editor window after the usual output.
+    /// Start the frozen-area capture: freeze every display at T0 and open
+    /// the overlay on the one under the cursor. With `edit`, the shot opens
+    /// in the editor window after the usual output.
     fn start_capture(&self, edit: bool) {
         // No permission — no capture: explain instead (7.2). The preflight
         // here also re-checks after the user granted the permission in
@@ -691,12 +686,6 @@ impl AppController {
             return;
         }
         let mtm = MainThreadMarker::from(self);
-        let Some(screen) = crate::capture::screen_under_cursor(mtm) else {
-            eprintln!("capture: no screens found");
-            return;
-        };
-        let screen_frame = screen.frame();
-        let scale = screen.backingScaleFactor();
         let primary_height = crate::capture::primary_screen_height(mtm);
         let mouse = NSEvent::mouseLocation();
         let mouse_sckit = crate::capture::geometry::point_to_sckit(
@@ -704,38 +693,21 @@ impl AppController {
             primary_height,
         );
         eprintln!(
-            "capture: screen under cursor frame=({:.0},{:.0} {}x{}) scale={} mouse_sckit=({:.0},{:.0})",
-            screen_frame.origin.x,
-            screen_frame.origin.y,
-            screen_frame.size.width,
-            screen_frame.size.height,
-            scale,
-            mouse_sckit.x,
-            mouse_sckit.y
+            "capture: mouse_sckit=({:.0},{:.0})",
+            mouse_sckit.x, mouse_sckit.y
         );
 
         let jobs_tx = self.ivars().jobs_tx.clone();
         std::thread::spawn(move || {
             objc2::rc::autoreleasepool(|_pool| {
                 let result = crate::capture::capture_t0(mouse_sckit);
-                let _ = jobs_tx.send(MainJob::CaptureReady {
-                    result,
-                    screen_frame,
-                    scale,
-                    edit,
-                });
+                let _ = jobs_tx.send(MainJob::CaptureReady { result, edit });
             });
         });
     }
 
     /// T0 data arrived: enter the frozen-frame overlay mode. Main thread.
-    fn capture_ready(
-        &self,
-        result: Result<crate::capture::T0Capture, String>,
-        screen_frame: CGRect,
-        scale: f64,
-        edit: bool,
-    ) {
+    fn capture_ready(&self, result: Result<crate::capture::T0Capture, String>, edit: bool) {
         let Ok(t0) = result else {
             if let Err(e) = &result {
                 eprintln!("capture: {e}");
@@ -752,32 +724,31 @@ impl AppController {
             (config.save_dir.clone(), config.retention)
         };
         let jobs_tx = self.ivars().jobs_tx.clone();
-        overlay.show(
-            t0,
-            screen_frame,
-            scale,
-            Box::new(move |outcome| match outcome {
-                OverlayOutcome::Selected { pixel_rect, image } => {
-                    let Some(image) = crate::output::crop(&image, pixel_rect) else {
-                        eprintln!("output: empty selection rect {pixel_rect:?}");
-                        return;
-                    };
-                    if let Err(e) = crate::output::copy_to_pasteboard(&image) {
-                        eprintln!("output: pasteboard: {e}");
-                    }
-                    match crate::output::save_to_file(&image, &save_dir, retention, scale) {
-                        Ok(path) => {
-                            eprintln!("output: saved {}", path.display());
-                            if edit {
-                                let _ = jobs_tx.send(MainJob::OpenEditor { path });
-                            }
-                        }
-                        Err(e) => eprintln!("output: save: {e}"),
-                    }
+        overlay.show(t0, Box::new(move |outcome| match outcome {
+            OverlayOutcome::Selected {
+                pixel_rect,
+                image,
+                scale,
+            } => {
+                let Some(image) = crate::output::crop(&image, pixel_rect) else {
+                    eprintln!("output: empty selection rect {pixel_rect:?}");
+                    return;
+                };
+                if let Err(e) = crate::output::copy_to_pasteboard(&image) {
+                    eprintln!("output: pasteboard: {e}");
                 }
-                OverlayOutcome::Cancelled => {}
-            }),
-        );
+                match crate::output::save_to_file(&image, &save_dir, retention, scale) {
+                    Ok(path) => {
+                        eprintln!("output: saved {}", path.display());
+                        if edit {
+                            let _ = jobs_tx.send(MainJob::OpenEditor { path });
+                        }
+                    }
+                    Err(e) => eprintln!("output: save: {e}"),
+                }
+            }
+            OverlayOutcome::Cancelled => {}
+        }));
     }
 }
 

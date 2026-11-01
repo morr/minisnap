@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
-use objc2_app_kit::{NSEvent, NSScreen};
+use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode, CGImage};
 use objc2_foundation::{NSArray, NSError};
@@ -14,23 +14,6 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
     SCCaptureResolutionType,
 };
-
-/// Find the screen that contains the mouse cursor; fall back to the main
-/// screen, then to the first screen.
-pub fn screen_under_cursor(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
-    let mouse = NSEvent::mouseLocation();
-    let mx = mouse.x;
-    let my = mouse.y;
-    for screen in NSScreen::screens(mtm).iter() {
-        let frame = screen.frame();
-        let in_x = mx >= frame.origin.x && mx < frame.origin.x + frame.size.width;
-        let in_y = my >= frame.origin.y && my < frame.origin.y + frame.size.height;
-        if in_x && in_y {
-            return Some(screen);
-        }
-    }
-    NSScreen::mainScreen(mtm).or_else(|| NSScreen::screens(mtm).iter().next())
-}
 
 /// Height of the primary screen (origin at (0,0)) in points. ScreenCaptureKit
 /// reports coordinates in the global top-left-origin space whose Y axis is
