@@ -107,9 +107,13 @@ fn draw_element(ctx: &CGContext, base: &CGImage, element: &Element) {
         ElementKind::Text { origin, text, color, size } => {
             super::text::draw_text(ctx, *origin, text, *color, *size);
         }
-        ElementKind::Callout { tip, anchor, text, color, size } => {
-            // A small wedge pointer from the text block to the target.
-            draw_arrow(ctx, *anchor, *tip, *color, *size / 3.0);
+        ElementKind::Callout { tip, anchor, text, color, size, width } => {
+            // The pointer emerges from the text block's edge nearest the
+            // target and keeps the stroke width it was drawn with. While the
+            // text is still empty (the two-phase preview), the tail stays at
+            // the drawn base — the arrow renders exactly like a plain arrow.
+            let tail = callout_tail(*tip, *anchor, text, *size);
+            draw_arrow(ctx, tail, *tip, *color, *width);
             super::text::draw_text(ctx, *anchor, text, *color, *size);
         }
         ElementKind::Blur { rect } => {
@@ -321,6 +325,25 @@ impl ArrowFrame {
             p.y + self.u.y * along + self.n.y * off,
         )
     }
+}
+
+/// Where a callout's pointer starts: the point of the text block's rect
+/// nearest the tip, so the arrow always emerges from the block's edge facing
+/// its target. An empty block (the two-phase preview, whose anchor still is
+/// the drawn base) leaves the tail at the anchor.
+pub(crate) fn callout_tail(
+    tip: super::Point,
+    anchor: super::Point,
+    text: &str,
+    size: f64,
+) -> super::Point {
+    let Some(m) = super::text::measure_block(text, size) else {
+        return anchor;
+    };
+    super::Point::new(
+        tip.x.clamp(anchor.x, anchor.x + m.width),
+        tip.y.clamp(anchor.y, anchor.y + m.height),
+    )
 }
 
 /// The arrow silhouette, Monosnap-style: the body is a wedge that starts
@@ -597,6 +620,29 @@ mod tests {
     fn pixel(bytes: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
         let i = (y * w + x) * 4;
         [bytes[i], bytes[i + 1], bytes[i + 2]]
+    }
+
+    #[test]
+    fn callout_tail_tracks_the_text_block_edge() {
+        // Empty text (the two-phase preview): the tail stays at the anchor,
+        // which then is the arrow's drawn base.
+        assert_eq!(
+            callout_tail(Point::new(100.0, 50.0), Point::new(20.0, 30.0), "", 32.0),
+            Point::new(20.0, 30.0)
+        );
+
+        // With text, the tail is the text block's point nearest the tip: a
+        // tip right of the block lands on its right edge.
+        let m = super::super::text::measure_block("WW", 32.0).expect("measured");
+        assert_eq!(
+            callout_tail(Point::new(100.0, 30.0), Point::new(10.0, 20.0), "WW", 32.0),
+            Point::new(10.0 + m.width, 30.0)
+        );
+        // A tip below-right clamps onto the block's bottom-right corner.
+        assert_eq!(
+            callout_tail(Point::new(100.0, 80.0), Point::new(10.0, 20.0), "WW", 32.0),
+            Point::new(10.0 + m.width, 20.0 + m.height)
+        );
     }
 
     #[test]

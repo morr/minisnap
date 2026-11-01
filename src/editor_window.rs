@@ -110,8 +110,13 @@ const MIN_DRAG_PX: f64 = 4.0;
 /// Font size of new text and callout elements, in image pixels.
 const DEFAULT_TEXT_SIZE_PX: f64 = 32.0;
 
-/// Offset of a new callout's text block from its tip, in image pixels.
+/// Gap between a new callout's text block and the arrow base it sits beside,
+/// in image pixels.
 const CALLOUT_TEXT_OFFSET_PX: f64 = 16.0;
+
+/// Minimum width of the callout field editor, in view points: only wide
+/// enough for the caret, so an empty field never reaches over the arrow.
+const CALLOUT_EDITOR_MIN_WIDTH_PT: f64 = 30.0;
 
 /// Width of the field editor for new (empty) text, in view points.
 const TEXT_EDITOR_WIDTH_PT: f64 = 200.0;
@@ -248,6 +253,8 @@ struct PendingCallout {
     tip: Point,
     color: Rgba,
     size: f64,
+    /// The stroke the arrow was drawn with (the width slider's value).
+    width: f64,
 }
 
 /// Color presets offered by the popover; magenta is the default.
@@ -1028,6 +1035,13 @@ define_class!(
             self.commit_text_editor();
         }
 
+        #[unsafe(method(controlTextDidChange:))]
+        fn __control_text_did_change(&self, _notification: &NSNotification) {
+            // The callout editor follows its growing text so it never runs
+            // over the arrow; other editors are static until they commit.
+            self.refit_callout_editor();
+        }
+
         #[unsafe(method(control:textView:doCommandBySelector:))]
         unsafe fn __control_text_view_do_command(
             &self,
@@ -1258,6 +1272,7 @@ impl EditorView {
                     text: String::new(),
                     color: pending.color,
                     size: pending.size,
+                    width: pending.width,
                 },
             };
             render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&pending_el));
@@ -1425,13 +1440,15 @@ impl EditorView {
                 rect: Rect::new(point.x, point.y, 0.0, 0.0),
             }),
             // The callout draws its arrow by drag, from the base to the
-            // tip; the text follows in the second phase, at mouse-up.
+            // tip, exactly like the arrow tool (same color, same stroke
+            // width); the text follows in the second phase, at mouse-up.
             Some(Tool::Callout) => Some(ElementKind::Callout {
                 tip: point,
                 anchor: point,
                 text: String::new(),
                 color: ivars.color.get(),
                 size: DEFAULT_TEXT_SIZE_PX,
+                width: ivars.stroke_width.get(),
             }),
             // The text tool starts editing on the click (below).
             Some(Tool::Text) => None,
@@ -1600,12 +1617,13 @@ impl EditorView {
                 // A callout splits into two phases: the drawn arrow stays
                 // up as a pending preview while the text is entered at its
                 // base; the element lands (or is dropped) with the text.
-                if let ElementKind::Callout { anchor, tip, color, size, text: _ } = kind {
+                if let ElementKind::Callout { anchor, tip, color, size, width, text: _ } = kind {
                     *ivars.pending_callout.borrow_mut() = Some(PendingCallout {
                         base: anchor,
                         tip,
                         color,
                         size,
+                        width,
                     });
                     self.begin_text_edit(TextTarget::New {
                         origin: anchor,
@@ -1851,27 +1869,70 @@ impl EditorView {
         (frame.size.width / iw as f64, frame.size.height / ih as f64)
     }
 
-    /// View-space rect for the field editor over a text block whose
-    /// top-left sits at `origin` (image pixels), holding `text` (may be
-    /// empty) at `size` image pixels.
-    fn text_editor_frame(&self, origin: Point, text: &str, size: f64) -> CGRect {
-        let frame = self.frame_rect();
-        let (sx, sy) = self.view_scale();
+    /// View-space size of the field editor for a text block holding `text`
+    /// (may be empty) at `size` image pixels. A callout editor never pads to
+    /// the text tool's 200 pt minimum: it stays as wide as its text, so the
+    /// side-of-the-arrow placement holds for the field too.
+    fn text_editor_size(&self, text: &str, size: f64, callout: bool) -> (f64, f64) {
+        let (_, sy) = self.view_scale();
         let font_pt = (size * sy).max(9.0);
-        let (width, height) = if text.is_empty() {
-            (TEXT_EDITOR_WIDTH_PT, font_pt * 1.6 + 6.0)
+        let min_pt = if callout {
+            CALLOUT_EDITOR_MIN_WIDTH_PT
+        } else {
+            TEXT_EDITOR_WIDTH_PT
+        };
+        if text.is_empty() {
+            (min_pt, font_pt * 1.6 + 6.0)
         } else {
             match text::measure_block(text, size) {
                 Some(m) => (
-                    (m.width * sx).max(TEXT_EDITOR_WIDTH_PT) + 12.0,
+                    (m.width * self.view_scale().0).max(min_pt) + 12.0,
                     m.height * sy + 6.0,
                 ),
-                None => (TEXT_EDITOR_WIDTH_PT, font_pt * 1.6 + 6.0),
+                None => (min_pt, font_pt * 1.6 + 6.0),
             }
-        };
+        }
+    }
+
+    /// View-space rect for the field editor over a text block whose
+    /// top-left sits at `origin` (image pixels), holding `text` (may be
+    /// empty) at `size` image pixels.
+    fn text_editor_frame(&self, origin: Point, text: &str, size: f64, callout: bool) -> CGRect {
+        let frame = self.frame_rect();
+        let (sx, sy) = self.view_scale();
+        let (width, height) = self.text_editor_size(text, size, callout);
         let x = frame.origin.x + origin.x * sx - 3.0;
         let y_top = frame.origin.y + frame.size.height - origin.y * sy;
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
+    }
+
+    /// The base image's pixel rect — the space every element coordinate and
+    /// every frame clamp lives in.
+    fn image_frame(&self) -> Option<Rect> {
+        let shot = self.ivars().shot.borrow();
+        let base = shot.as_ref()?.doc.base();
+        Some(Rect::new(
+            0.0,
+            0.0,
+            CGImage::width(Some(base)) as f64,
+            CGImage::height(Some(base)) as f64,
+        ))
+    }
+
+    /// Where the pending callout's text block — or its field editor — sits
+    /// (in image pixels): `callout_anchor` against the pending arrow, with
+    /// `block` already in image pixels.
+    fn pending_callout_anchor(&self, block: Size) -> Option<Point> {
+        let pending = self.ivars().pending_callout.borrow();
+        let pending = pending.as_ref()?;
+        let frame = self.image_frame()?;
+        Some(callout_anchor(
+            pending.base,
+            pending.tip,
+            block.width,
+            block.height,
+            frame,
+        ))
     }
 
     /// Open the field editor for `target`: a transparent text field over
@@ -1891,17 +1952,19 @@ impl EditorView {
                 color,
             } => {
                 let size = DEFAULT_TEXT_SIZE_PX;
+                // A new callout opens its field exactly where the text will
+                // land: beside the pending arrow's base, away from the tip.
                 let anchor = if callout {
-                    Point::new(
-                        origin.x + CALLOUT_TEXT_OFFSET_PX,
-                        (origin.y - size * 1.5).max(0.0),
-                    )
+                    let (w_pt, h_pt) = self.text_editor_size("", size, true);
+                    let (sx, sy) = self.view_scale();
+                    self.pending_callout_anchor(Size::new(w_pt / sx, h_pt / sy))
+                        .unwrap_or(origin)
                 } else {
                     origin
                 };
                 (
                     String::new(),
-                    self.text_editor_frame(anchor, "", size),
+                    self.text_editor_frame(anchor, "", size, true),
                     color,
                     size,
                 )
@@ -1915,10 +1978,15 @@ impl EditorView {
                     return;
                 };
                 match &el.kind {
-                    ElementKind::Text { origin, text, color, size }
-                    | ElementKind::Callout { anchor: origin, text, color, size, tip: _ } => (
+                    ElementKind::Text { origin, text, color, size } => (
                         text.clone(),
-                        self.text_editor_frame(*origin, text, *size),
+                        self.text_editor_frame(*origin, text, *size, false),
+                        *color,
+                        *size,
+                    ),
+                    ElementKind::Callout { anchor: origin, text, color, size, .. } => (
+                        text.clone(),
+                        self.text_editor_frame(*origin, text, *size, true),
                         *color,
                         *size,
                     ),
@@ -1994,9 +2062,9 @@ impl EditorView {
                 }
                 let size = DEFAULT_TEXT_SIZE_PX;
                 let kind = if callout {
-                    let (tip, base) = match ivars.pending_callout.borrow_mut().take() {
-                        Some(pending) => (pending.tip, pending.base),
-                        None => (origin, origin),
+                    let (tip, base, width) = match ivars.pending_callout.borrow_mut().take() {
+                        Some(pending) => (pending.tip, pending.base, pending.width),
+                        None => (origin, origin, ivars.stroke_width.get()),
                     };
                     let base_image = shot.doc.base();
                     let frame = Rect::new(
@@ -2005,12 +2073,16 @@ impl EditorView {
                         CGImage::width(Some(base_image)) as f64,
                         CGImage::height(Some(base_image)) as f64,
                     );
+                    let (w, h) = text::measure_block(&text, size)
+                        .map(|m| (m.width, m.height))
+                        .unwrap_or((size * 4.0, size * 1.25));
                     ElementKind::Callout {
                         tip,
-                        anchor: callout_anchor(base, &text, size, frame),
+                        anchor: callout_anchor(base, tip, w, h, frame),
                         text,
                         color,
                         size,
+                        width,
                     }
                 } else {
                     ElementKind::Text {
@@ -2049,6 +2121,44 @@ impl EditorView {
         }
         drop(shot_slot);
         self.redraw();
+    }
+
+    /// Keep a callout field editor in step with its growing text: a new
+    /// callout re-anchors its block beside the base, away from the tip, so
+    /// the text never runs over the arrow; a re-edit keeps its authored
+    /// anchor and only grows the field. Other editors keep their frame.
+    fn refit_callout_editor(&self) {
+        let ivars = self.ivars();
+        let Some(field) = ivars.text_editor.borrow().clone() else {
+            return;
+        };
+        // Shift+Enter leaves a line separator (U+2028) until the commit
+        // normalizes it; measure it as the newline it will become.
+        let text = field.stringValue().to_string().replace('\u{2028}', "\n");
+        let (anchor, size) = match ivars.text_target.get() {
+            Some(TextTarget::New { callout: true, .. }) => {
+                let size = DEFAULT_TEXT_SIZE_PX;
+                let (w_pt, h_pt) = self.text_editor_size(&text, size, true);
+                let (sx, sy) = self.view_scale();
+                let Some(anchor) = self.pending_callout_anchor(Size::new(w_pt / sx, h_pt / sy))
+                else {
+                    return;
+                };
+                (anchor, size)
+            }
+            Some(TextTarget::Existing { id }) => {
+                let shot = ivars.shot.borrow();
+                let Some(el) = shot.as_ref().and_then(|shot| shot.doc.element(id)) else {
+                    return;
+                };
+                match &el.kind {
+                    ElementKind::Callout { anchor, size, .. } => (*anchor, *size),
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        field.setFrame(self.text_editor_frame(anchor, &text, size, true));
     }
 
     /// Drop the open field editor without committing (a new shot arrived)
@@ -2703,24 +2813,44 @@ fn stroke_width_of(kind: &ElementKind) -> Option<f64> {
         ElementKind::Arrow { width, .. }
         | ElementKind::Rect { width, .. }
         | ElementKind::Line { width, .. }
-        | ElementKind::Pen { width, .. } => Some(*width),
+        | ElementKind::Pen { width, .. }
+        | ElementKind::Callout { width, .. } => Some(*width),
         _ => None,
     }
 }
 
-/// Top-left of a new callout's text block: above the base, clamped so the
-/// whole block stays inside the frame (in image pixels).
-fn callout_anchor(base: Point, text: &str, size: f64, frame: Rect) -> Point {
-    let (w, h) = text::measure_block(text, size)
-        .map(|m| (m.width, m.height))
-        .unwrap_or((size * 4.0, size * 1.25));
+/// Top-left of a new callout's text block (in image pixels): beside the
+/// arrow's base, on the side away from the tip, so the growing text never
+/// runs over the pointer. Along the dominant axis the block clears the base
+/// by `CALLOUT_TEXT_OFFSET_PX`; across it, the block is centered on the
+/// base. The whole block is clamped inside the frame (4 px margin) — near an
+/// edge the block shifts inward, even if that brings it over the arrow.
+fn callout_anchor(base: Point, tip: Point, block_w: f64, block_h: f64, frame: Rect) -> Point {
     let margin = 4.0;
-    let max_x = (frame.max_x() - w - margin).max(margin);
-    let max_y = (frame.max_y() - h - margin).max(margin);
-    Point::new(
-        (base.x - w / 2.0).clamp(margin, max_x),
-        (base.y - h - 6.0).clamp(margin, max_y),
-    )
+    let gap = CALLOUT_TEXT_OFFSET_PX;
+    let max_x = (frame.max_x() - block_w - margin).max(margin);
+    let max_y = (frame.max_y() - block_h - margin).max(margin);
+    let (dx, dy) = (tip.x - base.x, tip.y - base.y);
+    let (x, y) = if dx.abs() >= dy.abs() {
+        // A mostly horizontal arrow: the block goes left or right of the
+        // base, vertically centered on it.
+        let x = if dx >= 0.0 {
+            base.x - gap - block_w
+        } else {
+            base.x + gap
+        };
+        (x, base.y - block_h / 2.0)
+    } else {
+        // A mostly vertical arrow: the block goes above or below the base,
+        // horizontally centered on it.
+        let y = if dy >= 0.0 {
+            base.y - gap - block_h
+        } else {
+            base.y + gap
+        };
+        (base.x - block_w / 2.0, y)
+    };
+    Point::new(x.clamp(margin, max_x), y.clamp(margin, max_y))
 }
 
 /// The crop/resize frame rect while dragging `spot` from the original rect
@@ -3554,5 +3684,56 @@ mod tests {
         assert!(prompt.contains("ArrowParams::DEFAULT"));
         assert!(prompt.contains("/tmp"));
         assert!(prompt.contains("cargo test"));
+    }
+
+    #[test]
+    fn callout_anchor_sits_beside_the_base_away_from_the_tip() {
+        let frame = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let base = Point::new(200.0, 150.0);
+        let (w, h) = (100.0, 40.0);
+
+        // A right-pointing arrow: the block goes left of the base,
+        // vertically centered on it.
+        let anchor = callout_anchor(base, Point::new(260.0, 150.0), w, h, frame);
+        assert_eq!(anchor, Point::new(200.0 - 16.0 - w, 150.0 - h / 2.0));
+
+        // Left-pointing: the block goes right of the base.
+        let anchor = callout_anchor(base, Point::new(140.0, 150.0), w, h, frame);
+        assert_eq!(anchor, Point::new(200.0 + 16.0, 150.0 - h / 2.0));
+
+        // Down-pointing: the block goes above the base, horizontally
+        // centered on it.
+        let anchor = callout_anchor(base, Point::new(200.0, 220.0), w, h, frame);
+        assert_eq!(anchor, Point::new(200.0 - w / 2.0, 150.0 - 16.0 - h));
+
+        // Up-pointing: below the base.
+        let anchor = callout_anchor(base, Point::new(200.0, 80.0), w, h, frame);
+        assert_eq!(anchor, Point::new(200.0 - w / 2.0, 150.0 + 16.0));
+    }
+
+    #[test]
+    fn callout_anchor_shifts_inward_at_frame_edges() {
+        let frame = Rect::new(0.0, 0.0, 120.0, 200.0);
+        // A left-pointing arrow near the left edge would push the block
+        // past the right edge; the clamp shifts it fully inside.
+        let anchor = callout_anchor(
+            Point::new(30.0, 100.0),
+            Point::new(5.0, 100.0),
+            100.0,
+            40.0,
+            frame,
+        );
+        assert_eq!(anchor, Point::new(16.0, 80.0));
+
+        // An up-pointing arrow near the bottom edge: the block below the
+        // base does not fit and is clamped inside.
+        let anchor = callout_anchor(
+            Point::new(60.0, 180.0),
+            Point::new(60.0, 120.0),
+            100.0,
+            40.0,
+            frame,
+        );
+        assert_eq!(anchor, Point::new(10.0, 156.0));
     }
 }

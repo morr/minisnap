@@ -103,6 +103,11 @@ pub struct Element {
     pub kind: ElementKind,
 }
 
+/// Pointer width for journals written before callouts carried one.
+fn default_pointer_width() -> f64 {
+    4.0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ElementKind {
     /// Wedge arrow from `a` (thin tail) to `b` (head).
@@ -137,13 +142,17 @@ pub enum ElementKind {
         size: f64,
     },
     /// Text with a pointer: `tip` points at the target, `anchor` is the
-    /// top-left corner of the text block.
+    /// top-left corner of the text block, `width` strokes the pointer. The
+    /// serde default keeps journals written before the width field existed
+    /// loadable.
     Callout {
         tip: Point,
         anchor: Point,
         text: String,
         color: Rgba,
         size: f64,
+        #[serde(default = "default_pointer_width")]
+        width: f64,
     },
     /// Pixelated region of the base frame.
     Blur { rect: Rect },
@@ -390,13 +399,14 @@ fn set_element_color(kind: &mut ElementKind, color: Rgba) {
 }
 
 /// Restyle the stroke width of an element; kinds without a stroke (text,
-/// callout, blur) stay as they are.
+/// blur) stay as they are. A callout's stroke is its pointer arrow.
 fn set_element_width(kind: &mut ElementKind, width: f64) {
     match kind {
         ElementKind::Arrow { width: w, .. }
         | ElementKind::Rect { width: w, .. }
         | ElementKind::Line { width: w, .. }
-        | ElementKind::Pen { width: w, .. } => *w = width,
+        | ElementKind::Pen { width: w, .. }
+        | ElementKind::Callout { width: w, .. } => *w = width,
         _ => {}
     }
 }
@@ -692,6 +702,7 @@ mod tests {
                 text: "hi".into(),
                 color: [1.0, 0.0, 1.0, 1.0],
                 size: 14.0,
+                width: 4.0,
             },
         }));
         doc.apply(Command::MovePoint(2, Endpoint::A, pt(8.0, 9.0)));
@@ -763,8 +774,8 @@ mod tests {
         assert!(doc.redo());
         assert_eq!(width(&doc), 5.0);
 
-        // Another element's change breaks the run; a no-stroke target (a
-        // callout's font size is not the slider's) stays untouched.
+        // Another element's change breaks the run; a callout's pointer is a
+        // stroke the slider styles (its font size stays untouched).
         doc.apply(Command::AddElement(Element {
             id: 2,
             kind: ElementKind::Callout {
@@ -773,13 +784,17 @@ mod tests {
                 text: "hi".into(),
                 color: [1.0, 0.0, 1.0, 1.0],
                 size: 14.0,
+                width: 4.0,
             },
         }));
         doc.apply_width(2, 8.0);
         doc.apply_width(1, 7.0);
         assert_eq!(doc.applied_log().len(), 5);
         match &doc.element(2).expect("callout").kind {
-            ElementKind::Callout { size, .. } => assert_eq!(*size, 14.0),
+            ElementKind::Callout { size, width, .. } => {
+                assert_eq!(*size, 14.0);
+                assert_eq!(*width, 8.0);
+            }
             other => panic!("expected callout, got {other:?}"),
         }
 

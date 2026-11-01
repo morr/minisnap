@@ -63,7 +63,7 @@ pub fn hit_element(element: &Element, point: Point) -> Option<Hit> {
             let bounds = text_bounds(*origin, text, *size)?;
             bounds.contains(point).then_some(Hit::Body(element.id))
         }
-        ElementKind::Callout { tip, anchor, text, size, .. } => {
+        ElementKind::Callout { tip, anchor, text, size, width, .. } => {
             // Clicking the text block selects it (and later edits it), even
             // where it overlaps the anchor's end zone.
             let bounds = text_bounds(*anchor, text, *size)?;
@@ -73,7 +73,11 @@ pub fn hit_element(element: &Element, point: Point) -> Option<Hit> {
             if let Some(end) = hit_end(*tip, *anchor, point) {
                 return Some(Hit::End(element.id, end));
             }
-            near_segment(point, *anchor, *tip, TOLERANCE).then_some(Hit::Body(element.id))
+            // The pointer hit-tests exactly like a plain arrow: the real
+            // silhouette from the text block's edge to the tip.
+            let tail = super::render::callout_tail(*tip, *anchor, text, *size);
+            let outline = super::render::arrow_outline(tail, *tip, *width);
+            near_ring(point, &outline, TOLERANCE).then_some(Hit::Body(element.id))
         }
         ElementKind::Blur { rect } => {
             rect.standardize().contains(point).then_some(Hit::Body(element.id))
@@ -311,6 +315,7 @@ mod tests {
                 text: "WW".into(),
                 color: [1.0, 0.0, 1.0, 1.0],
                 size: 32.0,
+                width: 4.0,
             },
         };
         // On the text block: body, even right next to the anchor.
@@ -320,8 +325,9 @@ mod tests {
         // Near the tip and near the anchor (left of the text block): ends.
         assert_eq!(hit_element(&el, pt(98.0, 22.0)), Some(Hit::End(5, Endpoint::A)));
         assert_eq!(hit_element(&el, pt(6.0, 24.0)), Some(Hit::End(5, Endpoint::B)));
-        // On the pointer line between them: body.
-        assert_eq!(hit_element(&el, pt(55.0, 20.0)), Some(Hit::Body(5)));
+        // On the pointer body, clear of the block's edge and the tip's end
+        // zone: body.
+        assert_eq!(hit_element(&el, pt(80.0, 21.0)), Some(Hit::Body(5)));
     }
 
     #[test]
