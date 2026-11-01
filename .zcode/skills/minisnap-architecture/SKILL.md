@@ -21,7 +21,9 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler` |
 | `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки | `crop`, `copy_to_pasteboard`, `save_to_file`, `encode_png_atomic`, `latest_shot`, `sorted_shots`, `enforce_retention` |
 | `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` | `play_shutter`, `shutter_sound_paths`, `sound_disabled_by_system`, `PLAYER` |
-| `src/editor_window.rs` | окно редактора: тулбар, инструменты, ввод текста, кроп/ресайз | `EditorWindow`, `Tool`, `Drag`, `EditorIvars`, `FrameEdit`, `PendingCallout` |
+| `src/editor_window.rs` | окно редактора и канвас: инструменты, ввод текста, кроп/ресайз; тулбару — снимок состояния и обработка его событий | `EditorWindow`, `Tool`, `Drag`, `EditorIvars`, `FrameEdit`, `PendingCallout` |
+| `src/editor_toolbar.rs` | тулбар и хром окна редактора: полоса-панель `ToolbarView`, слайдер, поповер палитры, метка файла, дебаг-тюнер; interface — `set_state(ToolbarState)` / `ToolbarEvent` | `ToolbarView`, `ToolbarState`, `ToolbarEvent`, `Tool`, `WidthSliderView`, `toolbar_state` |
+| `src/plates.rs` | общая механика подсвеченных подложек (плит) и hover для тулбара и палитры | `plate`, `disc`, `center_toolbar_layers`, `animate_plate_changes` |
 | `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса по чистому оригиналу | `Element`, `ElementKind`, `Command`, `EditorDoc`, `Point`/`Rect`/`Rgba` |
 | `src/editor/render.rs` | рендер элементов и композита, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `pixelate_region` |
 | `src/editor/hit_test.rs` | попадания клика по элементам, границы текстовых блоков | `Hit`, `top_hit`, `text_bounds` |

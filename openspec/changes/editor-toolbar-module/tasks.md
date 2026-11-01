@@ -22,7 +22,7 @@
 
 ## 6. Domain-skills pass
 
-- [ ] 6.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (карта модулей: `editor_toolbar.rs`, `plates.rs`; инварианты: interface ToolbarView, где живёт механика plates/hover) и `.zcode/skills/minisnap-architecture/SKILL.md` (карта модулей — два новых файла верхнего уровня). Проверка: текст скиллов соответствует коду.
+- [x] 6.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (карта модулей: `editor_toolbar.rs`, `plates.rs`; инварианты: interface ToolbarView, где живёт механика plates/hover) и `.zcode/skills/minisnap-architecture/SKILL.md` (карта модулей — два новых файла верхнего уровня). Проверка: текст скиллов соответствует коду.
 
 ## Workflow follow-up
 
