@@ -2,7 +2,7 @@
 
 ## 1. Закрытие по ⌘W
 
-- [ ] 1.1 В `src/editor_window.rs` расширить ветку матча `keyDown:` канвы `EditorView` с `12 if Command` до `12 | 13 if Command` (⌘Q и ⌘W — закрытие окна) и поправить комментарий ветки («⌘Q closes the viewer» → «⌘Q/⌘W close the viewer»). Верификация: `cargo build` и `cargo clippy` без ошибок и предупреждений в затронутом коде.
+- [x] 1.1 В `src/editor_window.rs` расширить ветку матча `keyDown:` канвы `EditorView` с `12 if Command` до `12 | 13 if Command` (⌘Q и ⌘W — закрытие окна) и поправить комментарий ветки («⌘Q closes the viewer» → «⌘Q/⌘W close the viewer»). Верификация: `cargo build` и `cargo clippy` без ошибок и предупреждений в затронутом коде.
 
 ## 2. Синхронизация документации и живая проверка
 

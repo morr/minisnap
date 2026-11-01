@@ -805,8 +805,8 @@ define_class!(
                         window.close();
                     }
                 }
-                // ⌘Q closes the viewer; the app stays in the tray.
-                12 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
+                // ⌘Q/⌘W close the viewer; the app stays in the tray.
+                12 | 13 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
                     if let Some(window) = self.window() {
                         window.close();
                     }
