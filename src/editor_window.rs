@@ -21,7 +21,7 @@ use objc2_app_kit::{
     NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
     NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
@@ -57,12 +57,20 @@ const TOOLBAR_HEIGHT: f64 = 36.0;
 /// reference strip.
 const BAR_TOP_PAD: f64 = 9.0;
 
-/// Leading padding of the toolbar row, in points: the cluster of three
-/// visible traffic lights ends at ~64 pt (the yellow button's right
-/// edge), plus a gap so the controls next in the row never run under it.
-/// The miniaturize and zoom buttons are hidden today; the pad is where
-/// they come back (editor-system-buttons).
-const BAR_LEADING_PAD: f64 = 70.0;
+/// Leading padding of the toolbar row, in points: the traffic lights'
+/// hosting view ends at 70 pt (the zoom button's right frame edge), plus
+/// the 15 pt gap the user asked for between the system buttons and the
+/// leafing arrows.
+const BAR_LEADING_PAD: f64 = 85.0;
+
+/// Vertical distance from the window's top edge to the toolbar icon row's
+/// axis, in points: the panel pads the row down from its top edge, and the
+/// row centers on the nominal button half-height.
+const TOOLBAR_ROW_AXIS_FROM_TOP: f64 = BAR_TOP_PAD + TOOLBAR_BUTTON_SIZE.height / 2.0;
+
+/// How far the system traffic lights sit above the toolbar icon axis, in
+/// points: the titlebar parks their centers higher than the row.
+const TRAFFIC_LIGHTS_AXIS_OFFSET: f64 = 4.0;
 
 /// Trailing padding of the toolbar row, in points.
 const BAR_TRAILING_PAD: f64 = 12.0;
@@ -147,20 +155,33 @@ const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
 
-/// Toolbar tag of the color-swatch button: its layer background is the
-/// current color, so hover styling skips it.
+/// Toolbar tag of the color-swatch button: the current color lives on the
+/// disc sublayer, so the button's own layer carries the shared hover plate.
 const COLOR_BUTTON_TAG: isize = -1;
 
-/// Toolbar button side, in points: the hover tile of the reference
-/// toolbar — measured off the zcode screenshot, calibrated by the 12 pt
-/// traffic lights (tile 22×22, uniform 6 pt step). The glyph stays
-/// smaller inside it, so the plate reads with air around the icon.
+/// Toolbar button side, in points: the layout cell of a toolbar button
+/// (constraints the stack partially ignores; the button frame lands
+/// near it either way).
 const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(22.0, 22.0);
+
+/// Hover-container side, in points: the plate sublayer that lights up on
+/// hover (and carries the active-tool accent). Deliberately larger than
+/// the button cell — the container grows around the icon, which stays at
+/// its glyph size, centered in the container.
+const TOOLBAR_PLATE_SIZE: f64 = 26.0;
+
+/// Layer names of the toolbar button's own sublayers: the plate every
+/// button carries and the swatch's color disc. Matching by name keeps the
+/// system's private button sublayers (the glyph image on recent macOS)
+/// untouched — reframing those blew the glyphs up to the plate size.
+const PLATE_LAYER_NAME: &str = "minisnap-toolbar-plate";
+const DISC_LAYER_NAME: &str = "minisnap-swatch-disc";
 
 /// Spacing between adjacent toolbar controls, in points: the uniform
 /// step of the reference toolbar (all gaps equal, the leafing pair
-/// included), measured off the zcode screenshot.
-const BAR_SPACING: f64 = 6.0;
+/// included), measured off the zcode screenshot, then widened by 4 pt
+/// on the user's request.
+const BAR_SPACING: f64 = 10.0;
 
 /// Spacing around the zone dividers and between the tool groups, in
 /// points: the wider gap that separates the toolbar's zones.
@@ -2578,6 +2599,12 @@ impl EditorView {
             label.setStringValue(&NSString::from_str(&file_name));
         }
         self.refit_window();
+        // The stack settles the buttons' frames during refit; re-center the
+        // plates (and the swatch disc) on the settled bounds and refresh the
+        // tint/plate state, so the tiles read as equal squares in any
+        // window size.
+        self.update_tool_highlight();
+        self.update_color_swatch();
     }
 
     /// Show the previous (-1) or next (1) shot of the save folder by time;
@@ -2607,9 +2634,9 @@ impl EditorView {
     }
 
     /// Restyle the controls under the cursor: a faint wash on the hovered
-    /// toolbar button, a brighter outline on the hovered color swatch,
-    /// nothing on the others. The active tool's button and the swatch fill
-    /// own their backgrounds and are skipped. The toolbar panel lives in
+    /// toolbar button — the icon buttons and the color swatch alike, all
+    /// equal-width tiles — nothing on the others. The active tool's button
+    /// owns its accent background and is skipped. The toolbar panel lives in
     /// the editor window and the palette presets in the popover's own
     /// window, so the event's window decides which surface is under the
     /// cursor; `None` (the cursor left both) clears both.
@@ -2656,29 +2683,33 @@ impl EditorView {
         );
         animate_plate_changes(|| {
             for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-                if Some(*tag) == active || *tag == COLOR_BUTTON_TAG {
+                if Some(*tag) == active {
                     continue;
                 }
-                if let Some(layer) = button.layer() {
+                if let Some(plate) = Self::toolbar_plate(button) {
                     let bg: Option<&NSColor> = if Some(*tag) == toolbar_hit {
                         Some(&hover)
                     } else {
                         None
                     };
-                    layer.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
+                    plate.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
                 }
+                Self::center_toolbar_layers(button);
             }
-            // The toolbar swatch shows the current color as its fill; its
-            // hover feedback is the outline.
+            // The swatch rides the same hover plate as the icon buttons, so
+            // every toolbar control highlights with an equal square tile;
+            // the outline itself stays at rest (it only keeps light presets
+            // visible against the light column).
             if let Some(button) = self.ivars().color_button.borrow().as_ref() {
-                if let Some(disc) = Self::swatch_disc(button) {
-                    let hover_ring = if toolbar_hit == Some(COLOR_BUTTON_TAG) {
-                        &ring_hover
+                if let Some(plate) = Self::toolbar_plate(button) {
+                    let bg: Option<&NSColor> = if toolbar_hit == Some(COLOR_BUTTON_TAG) {
+                        Some(&hover)
                     } else {
-                        &ring
+                        None
                     };
-                    disc.setBorderColor(Some(&hover_ring.CGColor()));
+                    plate.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
                 }
+                Self::center_toolbar_layers(button);
             }
             for button in self.palette_swatch_buttons() {
                 if let Some(layer) = button.layer() {
@@ -2696,7 +2727,9 @@ impl EditorView {
     /// Tag of the toolbar-panel button under a window-space point. The
     /// buttons are matched by frame, not by `hitTest`: the system-hosted
     /// buttons of recent macOS skip the classic hit-testing path (hover
-    /// silently found nothing), while their frames are plain geometry.
+    /// silently found nothing), while their frames are plain geometry. The
+    /// frame inflates to the plate size, so the hover trigger area covers
+    /// the whole visible container, not just the narrower button cell.
     fn panel_button_at(&self, point: CGPoint) -> Option<isize> {
         let inside = |rect: CGRect| {
             point.x >= rect.origin.x
@@ -2704,13 +2737,22 @@ impl EditorView {
                 && point.y >= rect.origin.y
                 && point.y <= rect.origin.y + rect.size.height
         };
+        let hit_rect = |button: &NSButton| {
+            let frame = button.convertRect_toView(button.bounds(), None);
+            let cx = frame.origin.x + frame.size.width / 2.0;
+            let cy = frame.origin.y + frame.size.height / 2.0;
+            CGRect::new(
+                CGPoint::new(cx - TOOLBAR_PLATE_SIZE / 2.0, cy - TOOLBAR_PLATE_SIZE / 2.0),
+                CGSize::new(TOOLBAR_PLATE_SIZE, TOOLBAR_PLATE_SIZE),
+            )
+        };
         for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            if inside(button.convertRect_toView(button.bounds(), None)) {
+            if inside(hit_rect(button)) {
                 return Some(*tag);
             }
         }
         if let Some(button) = self.ivars().color_button.borrow().as_ref() {
-            if inside(button.convertRect_toView(button.bounds(), None)) {
+            if inside(hit_rect(button)) {
                 return Some(COLOR_BUTTON_TAG);
             }
         }
@@ -2763,28 +2805,88 @@ impl EditorView {
         // instant (not a layer property).
         animate_plate_changes(|| {
             for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-                if Some(*tag) == active {
-                    let bg = accent.colorWithAlphaComponent(ACTIVE_WASH);
-                    if let Some(layer) = button.layer() {
-                        layer.setBackgroundColor(Some(&bg.CGColor()));
-                    }
-                    button.setContentTintColor(Some(&accent));
-                } else {
-                    if let Some(layer) = button.layer() {
-                        layer.setBackgroundColor(None);
-                    }
-                    button.setContentTintColor(Some(&icon));
+                if let Some(plate) = Self::toolbar_plate(button) {
+                    let bg: Option<Retained<NSColor>> = if Some(*tag) == active {
+                        Some(accent.colorWithAlphaComponent(ACTIVE_WASH))
+                    } else {
+                        None
+                    };
+                    plate.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
                 }
+                button.setContentTintColor(if Some(*tag) == active {
+                    Some(&accent)
+                } else {
+                    Some(&icon)
+                });
+                Self::center_toolbar_layers(button);
             }
         });
     }
 
-    /// The swatch button's color disc: the one sublayer its layer carries.
-    fn swatch_disc(button: &NSButton) -> Option<Retained<CALayer>> {
+    /// The swatch button's color disc, found by its layer name.
+    fn named_sublayer(button: &NSButton, name: &str) -> Option<Retained<CALayer>> {
         let layer = button.layer()?;
-        // SAFETY: plain layer-tree read, no external invariants.
+        // SAFETY: plain layer-tree reads, no external invariants.
         let layers = unsafe { layer.sublayers() }?;
-        Some(layers.objectAtIndexedSubscript(0))
+        let count = unsafe { layers.count() };
+        for i in 0..count {
+            let sublayer = layers.objectAtIndexedSubscript(i);
+            if let Some(named) = sublayer.name() {
+                if named.to_string() == name {
+                    return Some(sublayer);
+                }
+            }
+        }
+        None
+    }
+
+    /// The swatch button's color disc.
+    fn swatch_disc(button: &NSButton) -> Option<Retained<CALayer>> {
+        Self::named_sublayer(button, DISC_LAYER_NAME)
+    }
+
+    /// A toolbar button's hover/active plate, found by its layer name.
+    fn toolbar_plate(button: &NSButton) -> Option<Retained<CALayer>> {
+        Self::named_sublayer(button, PLATE_LAYER_NAME)
+    }
+
+    /// Center a plate (and, on the swatch, the color disc) inside the
+    /// button's settled bounds: the stack lays the button out at its
+    /// fitting size, so the sublayers center on whatever the frame actually
+    /// is. The button's other sublayers — including the system's private
+    /// ones that host the glyph on recent macOS — are left alone.
+    fn center_toolbar_layers(button: &NSButton) {
+        let Some(layer) = button.layer() else {
+            return;
+        };
+        let bounds = layer.bounds();
+        // SAFETY: plain layer-tree reads, no external invariants.
+        let layers = unsafe { layer.sublayers() };
+        let Some(layers) = layers else {
+            return;
+        };
+        let count = unsafe { layers.count() };
+        for i in 0..count {
+            let sublayer = layers.objectAtIndexedSubscript(i);
+            let side = if let Some(named) = sublayer.name() {
+                match named.to_string().as_str() {
+                    PLATE_LAYER_NAME => Some(TOOLBAR_PLATE_SIZE),
+                    DISC_LAYER_NAME => Some(SWATCH_DISC),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(side) = side {
+                sublayer.setFrame(CGRect::new(
+                    CGPoint::new(
+                        (bounds.size.width - side) / 2.0,
+                        (bounds.size.height - side) / 2.0,
+                    ),
+                    CGSize::new(side, side),
+                ));
+            }
+        }
     }
 
     /// Show the current color on the toolbar swatch circle.
@@ -2796,6 +2898,9 @@ impl EditorView {
         let Some(disc) = Self::swatch_disc(button) else {
             return;
         };
+        // Re-center the disc and the plate on the button's settled bounds
+        // (the stack may have re-laid the row since the last pass).
+        Self::center_toolbar_layers(button);
         let [r, g, b, a] = self.ivars().color.get();
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
         disc.setBackgroundColor(Some(&color.CGColor()));
@@ -3093,10 +3198,10 @@ fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
 
 /// A toolbar button showing `image` as a template (tinted like the SF
 /// Symbols), with an empty title and the given tag. Bezel-less: the hover
-/// wash and the active-tool accent are layer backgrounds. Toolbar buttons
-/// never take first responder: no focus ring, keys stay with the canvas.
-/// `title` becomes the tooltip and the accessibility label — an icon-only
-/// button has no visible text for either to fall back on.
+/// wash and the active-tool accent light the plate sublayer. Toolbar
+/// buttons never take first responder: no focus ring, keys stay with the
+/// canvas. `title` becomes the tooltip and the accessibility label — an
+/// icon-only button has no visible text for either to fall back on.
 fn icon_button(
     mtm: MainThreadMarker,
     image: Retained<NSImage>,
@@ -3120,11 +3225,24 @@ fn icon_button(
     button.setBordered(false);
     button.setWantsLayer(true);
     if let Some(layer) = button.layer() {
-        layer.setCornerRadius(5.0);
+        // The hover/active plate is its own fixed-size sublayer rather than
+        // the button layer's background: the toolbar stack lays arranged
+        // views out by their fitting size and pays no mind to the size
+        // constraints below — the button comes out taller than wide (the
+        // glyph's intrinsic height), and a layer background would read as
+        // a rectangle. The plate is deliberately larger than the cell: the
+        // container grows around the glyph, which stays centered at its
+        // own size. Named, so the centering pass never touches the
+        // system's private button sublayers.
+        let plate = CALayer::new();
+        plate.setCornerRadius(6.0);
+        plate.setName(Some(&NSString::from_str(PLATE_LAYER_NAME)));
+        layer.addSublayer(&plate);
     }
-    // The 28×28 tile rides on constraints: the toolbar stack sizes
-    // arranged views by autolayout and hugs a frame-only button down to
-    // its glyph — the hover plate shrank with it.
+    // The cell size rides on constraints: they hold the width (the stack
+    // honors it) and pin the nominal size for accessibility; the height
+    // the stack actually gives is the glyph's fitting size, which is why
+    // the plate is a separate centered sublayer instead of a background.
     button.setTranslatesAutoresizingMaskIntoConstraints(false);
     button
         .widthAnchor()
@@ -3514,6 +3632,48 @@ impl EditorWindow {
         window.setBackgroundColor(Some(&window_bg));
         // Toolbar hover styling rides on mouse-moved events.
         window.setAcceptsMouseMovedEvents(true);
+        // The traffic lights: the titlebar parks their centers above the
+        // toolbar icon row's axis; slide their hosting view down so the
+        // circles share the row axis. The shift rides the container's
+        // frame converted through content coordinates (handles the
+        // titlebar's flipped geometry); we never re-lay the titlebar, so
+        // the offset holds across refits.
+        if let (Some(close), Some(content)) = (
+            window.standardWindowButton(NSWindowButton::CloseButton),
+            window.contentView(),
+        ) {
+            // SAFETY: plain view-tree reads, no external invariants.
+            let host = unsafe { close.superview() };
+            if let Some(host) = host {
+                let in_content = host.convertRect_toView(host.bounds(), Some(&content));
+                let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
+                let center_y = in_content.origin.y + in_content.size.height / 2.0;
+                let dy = axis_y - center_y;
+                eprintln!(
+                    "TLS in_content=({:.1},{:.1},{:.1},{:.1}) axis={:.1} center={:.1} dy={:.1}",
+                    in_content.origin.x,
+                    in_content.origin.y,
+                    in_content.size.width,
+                    in_content.size.height,
+                    axis_y,
+                    center_y,
+                    dy
+                );
+                if dy != 0.0 {
+                    // SAFETY: plain view-tree reads, no external invariants.
+                    let superview = unsafe { host.superview() };
+                    if let Some(superview) = superview {
+                        let target = CGRect::new(
+                            CGPoint::new(in_content.origin.x, in_content.origin.y + dy),
+                            in_content.size,
+                        );
+                        let target_in_superview =
+                            content.convertRect_toView(target, Some(&superview));
+                        host.setFrame(target_in_superview);
+                    }
+                }
+            }
+        }
         // The window lives in the app controller for the whole process;
         // closing only hides it, the next shot reuses it (no second window).
         // SAFETY: plain setter on the freshly created window.
@@ -3605,16 +3765,11 @@ impl EditorWindow {
         color_button.setWantsLayer(true);
         // The visible disc is an inset sublayer at the scale of the icon
         // glyphs; the button itself keeps the toolbar buttons' target size,
-        // so the swatch reads as one more button. The bright outline keeps
-        // dark presets (black, blue) distinguishable from the panel at
-        // boundary contrast; on hover the outline brightens instead of the
-        // fill (the fill is the color itself).
+        // so the swatch reads as one more button and hovers with the same
+        // plate as they do. The bright outline keeps dark presets (black,
+        // blue) distinguishable from the panel at boundary contrast; it
+        // stays at rest on hover, since the shared plate already marks it.
         let disc = CALayer::new();
-        let inset = (TOOLBAR_BUTTON_SIZE.width - SWATCH_DISC) / 2.0;
-        disc.setFrame(CGRect::new(
-            CGPoint::new(inset, inset),
-            CGSize::new(SWATCH_DISC, SWATCH_DISC),
-        ));
         disc.setCornerRadius(SWATCH_DISC / 2.0);
         disc.setBorderWidth(1.0);
         disc.setBorderColor(Some(
@@ -3626,8 +3781,16 @@ impl EditorWindow {
             )
             .CGColor(),
         ));
+        disc.setName(Some(&NSString::from_str(DISC_LAYER_NAME)));
+        // The hover plate — the same named sublayer the icon buttons carry,
+        // so the swatch highlights with an equal square container; the
+        // disc rides on top of it.
+        let swatch_plate = CALayer::new();
+        swatch_plate.setCornerRadius(6.0);
+        swatch_plate.setName(Some(&NSString::from_str(PLATE_LAYER_NAME)));
         if let Some(layer) = color_button.layer() {
             layer.addSublayer(&disc);
+            layer.addSublayer(&swatch_plate);
         }
         // The swatch has no intrinsic size (borderless button, empty
         // title): its size must ride on constraints, or the toolbar
