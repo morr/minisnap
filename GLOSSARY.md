@@ -30,9 +30,9 @@
 ## Захват
 
 - **Презентация цели (target presentation)** — единая процедура показа цели
-  оверлея: apply_target, подмена кадра, sampler, veils, fade-in рамки; общий
-  путь для `show()` и переключения на другой дисплей. План: change
-  `overlay-target-presentation`.
-- **SurfaceMap** — спаривание поверхностей T0 с экранами; считается один раз
-  за сессию оверлея, а не на каждое движение курсора. План: change
-  `overlay-target-presentation`.
+  оверлея: apply_target, подмена кадра, sampler, veils, fade-in рамки;
+  общий путь для `show()` и переключения на другой дисплей
+  (`OverlayView::present_target` в `src/overlay.rs`).
+- **SurfaceMap** — спаривание поверхностей T0 с экранами (приватный
+  `mod presentation` в `src/overlay.rs`); считается один раз за сессию
+  оверлея, а не на каждое движение курсора.
