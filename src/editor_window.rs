@@ -31,8 +31,8 @@ use crate::editor::{
     OpenShot, Point, Rect, Rgba, Size,
 };
 use crate::editor_toolbar::{
-    arrow_tuner_panel, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH, STROKE_MAX,
-    STROKE_MIN, ToolbarEvent, ToolbarState, ToolbarView, Tool, TOOLBAR_HEIGHT,
+    arrow_tuner_panel, stroke_width_of, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH,
+    STROKE_MAX, STROKE_MIN, ToolbarEvent, ToolbarState, ToolbarView, Tool, TOOLBAR_HEIGHT,
 };
 
 /// Checkerboard cell of the transparent-backdrop fill, in points: the
@@ -1290,39 +1290,28 @@ impl EditorView {
         self.setNeedsDisplayInRect(self.bounds());
     }
 
-    /// Snapshot the toolbar state from the document and the window side: a
-    /// selected stroke-bearing element pins the slider — and the width for
-    /// new elements — to its own width, other selections leave both as
-    /// they are. (The pure reduction `toolbar_state` in
-    /// `editor_toolbar` owns the same rules; this reads the live ivars.)
+    /// Snapshot the toolbar state from the live document and ivars through
+    /// the pure reduction. A selected stroke-bearing element pins the
+    /// slider — and, as ever, the width for new elements — to its own.
     fn toolbar_state(&self) -> ToolbarState {
         let ivars = self.ivars();
         let shot = ivars.shot.borrow();
-        let (can_undo, can_redo, file_label) = shot
-            .as_ref()
-            .map(|shot| (shot.doc.can_undo(), shot.doc.can_redo(), shot.file_name()))
-            .unwrap_or((false, false, String::new()));
-        let selected_width = ivars.selection.get().and_then(|id| {
+        let state = crate::editor_toolbar::toolbar_state(
+            shot.as_ref().map(|shot| &shot.doc),
             shot.as_ref()
-                .and_then(|shot| shot.doc.element(id))
-                .and_then(|el| stroke_width_of(&el.kind))
-        });
-        let stroke_width = match selected_width {
-            Some(width) => {
-                let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
-                ivars.stroke_width.set(clamped);
-                clamped
-            }
-            None => ivars.stroke_width.get(),
-        };
-        ToolbarState {
-            tool: ivars.tool.get(),
-            stroke_width,
-            color: ivars.color.get(),
-            can_undo,
-            can_redo,
-            file_label,
+                .map(|shot| shot.file_name())
+                .unwrap_or_default(),
+            ivars.tool.get(),
+            ivars.stroke_width.get(),
+            ivars.color.get(),
+            ivars.selection.get(),
+        );
+        if state.stroke_width != ivars.stroke_width.get() {
+            // The slider pinned to a stroked selection: its width becomes
+            // the width for new elements, like every redraw has done.
+            ivars.stroke_width.set(state.stroke_width);
         }
+        state
     }
 
     /// Scale factors from image pixels to view points.
@@ -2075,19 +2064,6 @@ impl EditorView {
 /// Distance between two points.
 fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
-}
-
-/// The stroke width of an element the width slider styles; None for kinds
-/// without one (text, callout, blur).
-fn stroke_width_of(kind: &ElementKind) -> Option<f64> {
-    match kind {
-        ElementKind::Arrow { width, .. }
-        | ElementKind::Rect { width, .. }
-        | ElementKind::Line { width, .. }
-        | ElementKind::Pen { width, .. }
-        | ElementKind::Callout { width, .. } => Some(*width),
-        _ => None,
-    }
 }
 
 /// Top-left of a new callout's text block (in image pixels): beside the

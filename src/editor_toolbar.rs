@@ -32,7 +32,7 @@ use objc2_foundation::{NSDate, NSString, NSNotification, NSRectEdge};
 use objc2_quartz_core::CALayer;
 
 use crate::editor::render;
-use crate::editor::{Point, Rgba};
+use crate::editor::{Command, EditorDoc, Element, ElementKind, Point, Rgba};
 use crate::plates::{
     animate_plate_changes, center_toolbar_layers, disc, plate, DISC_LAYER_NAME, HOVER_BG,
     PLATE_LAYER_NAME, SWATCH_DISC, SWATCH_RING, SWATCH_RING_HOVER, TOOLBAR_PLATE_SIZE,
@@ -522,6 +522,51 @@ pub struct ToolbarState {
     pub can_redo: bool,
     /// The open shot's file name in the bar.
     pub file_label: String,
+}
+
+/// The pure reduction from the document state to the toolbar snapshot:
+/// what the strip displays is a function of the journal (undo/redo
+/// availability), the selection (a stroke-bearing element pins the slider
+/// to its own width, clamped into the slider's range) and the window-side
+/// pass-throughs (tool, current width for new elements, color, file
+/// name). No document — no history, an empty label.
+pub fn toolbar_state(
+    doc: Option<&EditorDoc>,
+    file_label: String,
+    tool: Option<Tool>,
+    stroke_width: f64,
+    color: Rgba,
+    selection: Option<u64>,
+) -> ToolbarState {
+    let (can_undo, can_redo) = doc
+        .map(|doc| (doc.can_undo(), doc.can_redo()))
+        .unwrap_or((false, false));
+    let stroke_width = selection
+        .and_then(|id| doc.and_then(|doc| doc.element(id)))
+        .and_then(|el| stroke_width_of(&el.kind))
+        .map(|width| width.clamp(STROKE_MIN, STROKE_MAX))
+        .unwrap_or(stroke_width);
+    ToolbarState {
+        tool,
+        stroke_width,
+        color,
+        can_undo,
+        can_redo,
+        file_label,
+    }
+}
+
+/// The stroke width of an element the width slider styles; None for kinds
+/// without one (text, callout, blur).
+pub(crate) fn stroke_width_of(kind: &ElementKind) -> Option<f64> {
+    match kind {
+        ElementKind::Arrow { width, .. }
+        | ElementKind::Rect { width, .. }
+        | ElementKind::Line { width, .. }
+        | ElementKind::Pen { width, .. }
+        | ElementKind::Callout { width, .. } => Some(*width),
+        _ => None,
+    }
 }
 
 /// The window-side sink for toolbar events.
@@ -1817,6 +1862,126 @@ pub(crate) fn arrow_tuner_panel(mtm: MainThreadMarker, view: &ToolbarView) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_core_graphics::CGBitmapContextCreateImage;
+
+    /// A tiny document with a real (blank) base image, so the reduction
+    /// and the journal run without a window.
+    fn test_doc() -> EditorDoc {
+        let ctx = render::bitmap_context(4, 4).expect("bitmap context");
+        let image = CGBitmapContextCreateImage(Some(&ctx)).expect("bitmap image");
+        EditorDoc::new(Retained::from(image))
+    }
+
+    fn arrow_element(id: u64, width: f64) -> Element {
+        Element {
+            id,
+            kind: ElementKind::Arrow {
+                a: Point::new(1.0, 1.0),
+                b: Point::new(5.0, 5.0),
+                color: [0.0, 0.0, 0.0, 1.0],
+                width,
+            },
+        }
+    }
+
+    #[test]
+    fn reduction_tracks_undo_redo_from_the_journal() {
+        let mut doc = test_doc();
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        assert!(!state.can_undo);
+        assert!(!state.can_redo);
+
+        let id = doc.next_element_id();
+        doc.apply(Command::AddElement(arrow_element(id, 4.0)));
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        assert!(state.can_undo);
+        assert!(!state.can_redo);
+
+        doc.undo();
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        assert!(!state.can_undo);
+        assert!(state.can_redo);
+
+        doc.redo();
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        assert!(state.can_undo);
+        assert!(!state.can_redo);
+    }
+
+    #[test]
+    fn reduction_pins_slider_to_stroked_selection() {
+        let mut doc = test_doc();
+        let id = doc.next_element_id();
+        doc.apply(Command::AddElement(arrow_element(id, 7.0)));
+        let state = toolbar_state(
+            Some(&doc),
+            "shot.png".to_string(),
+            Some(Tool::Arrow),
+            3.0,
+            [0.0, 0.0, 1.0, 1.0],
+            Some(id),
+        );
+        // The selection's own width wins over the width for new elements.
+        assert_eq!(state.stroke_width, 7.0);
+        assert_eq!(state.tool, Some(Tool::Arrow));
+        assert_eq!(state.color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(state.file_label, "shot.png");
+        assert!(state.can_undo);
+    }
+
+    #[test]
+    fn reduction_clamps_the_pinned_width_into_the_slider_range() {
+        let mut doc = test_doc();
+        let high = doc.next_element_id();
+        doc.apply(Command::AddElement(arrow_element(high, 99.0)));
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high));
+        assert_eq!(state.stroke_width, STROKE_MAX);
+
+        doc.undo();
+        let low = doc.next_element_id();
+        doc.apply(Command::AddElement(arrow_element(low, 0.2)));
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low));
+        assert_eq!(state.stroke_width, STROKE_MIN);
+    }
+
+    #[test]
+    fn reduction_leaves_width_alone_without_a_stroked_selection() {
+        let mut doc = test_doc();
+        // A text element carries no stroke: the slider keeps its value.
+        let id = doc.next_element_id();
+        doc.apply(Command::AddElement(Element {
+            id,
+            kind: ElementKind::Text {
+                origin: Point::new(1.0, 1.0),
+                text: "hi".to_string(),
+                color: [0.0, 0.0, 0.0, 1.0],
+                size: 32.0,
+            },
+        }));
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id));
+        assert_eq!(state.stroke_width, 5.5);
+
+        // No selection at all: same story.
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None);
+        assert_eq!(state.stroke_width, 5.5);
+    }
+
+    #[test]
+    fn reduction_without_a_document_has_no_history_and_no_label() {
+        let state = toolbar_state(
+            None,
+            String::new(),
+            Some(Tool::Pen),
+            DEFAULT_STROKE_WIDTH,
+            [1.0; 4],
+            Some(7),
+        );
+        assert!(!state.can_undo);
+        assert!(!state.can_redo);
+        assert_eq!(state.file_label, "");
+        // A selection without a document cannot pin anything.
+        assert_eq!(state.stroke_width, DEFAULT_STROKE_WIDTH);
+    }
 
     #[test]
     fn arrow_prompt_carries_every_param_and_the_steps() {
