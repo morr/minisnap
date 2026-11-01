@@ -62,8 +62,9 @@ const BAR_LEADING_PAD: f64 = 70.0;
 /// Trailing padding of the toolbar row, in points.
 const BAR_TRAILING_PAD: f64 = 12.0;
 
-/// Gap between the image card and the window's top, right and bottom
-/// edges, in points; the card touches the toolbar column on the left.
+/// Gap between the image card and the window's left, right and bottom
+/// edges, in points; the card touches the toolbar strip on top, so the
+/// air around the buttons stays even.
 const CARD_GAP: f64 = 4.0;
 
 /// The image card: a rounded panel a step lighter than the window, the
@@ -1120,16 +1121,17 @@ impl EditorView {
             .unwrap_or((0, 0))
     }
 
-    /// The image card area: the canvas inset by the card gap on all four
-    /// sides. The card's own paint (fill, border, rounding) lives in
-    /// `draw`; this is the geometry the frame centers in.
+    /// The image card area: the canvas inset by the card gap on the
+    /// sides and the bottom, touching the toolbar strip on top. The
+    /// card's own paint (fill, border, rounding) lives in `draw`; this is
+    /// the geometry the frame centers in.
     fn card_rect(&self) -> CGRect {
         let bounds = self.bounds();
         CGRect::new(
-            CGPoint::new(CARD_GAP, CARD_GAP),
+            CGPoint::new(CARD_GAP, 0.0),
             CGSize::new(
                 (bounds.size.width - 2.0 * CARD_GAP).max(0.0),
-                (bounds.size.height - 2.0 * CARD_GAP).max(0.0),
+                (bounds.size.height - CARD_GAP).max(0.0),
             ),
         )
     }
@@ -2378,14 +2380,19 @@ impl EditorView {
         let content_size = NSScreen::mainScreen(mtm)
             .map(|screen| screen.visibleFrame().size)
             .map(|visible| {
-                fit_size(iw as f64 / density, ih as f64 / density, visible.width, visible.height)
+                fit_size(
+                    iw as f64 / density,
+                    ih as f64 / density,
+                    visible.width - 2.0 * CARD_GAP,
+                    visible.height - TOOLBAR_HEIGHT - CARD_GAP,
+                )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
         // The window wraps the frame: the toolbar strip on top, the card
-        // gap on the other three sides. The width never drops below the
-        // toolbar's minimum.
+        // touching it from below, the card gap on the other three sides.
+        // The width never drops below the toolbar's minimum.
         let width = (content_size.width + 2.0 * CARD_GAP).max(self.ivars().min_width.get());
-        let height = TOOLBAR_HEIGHT + content_size.height + 2.0 * CARD_GAP;
+        let height = TOOLBAR_HEIGHT + content_size.height + CARD_GAP;
         self.ivars().frame_size.set(content_size);
         if self.ivars().placed.get() {
             // Keep the window's top-left corner where it was: AppKit's frame
