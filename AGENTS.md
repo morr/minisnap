@@ -39,6 +39,23 @@ instance launched from that worktree — closing its windows only hides it
 into the tray, so a leftover worktree build would keep running alongside
 the main checkout's app.
 
+Telling instances apart. Minisnap has no single-instance guard, and every
+instance looks the same on screen — the same tray icon and menu, hidden
+editor titles, the same `Preferences` window, the same shared config — so
+the only reliable identity of a running instance is its executable path.
+Before touching a running minisnap, enumerate it with
+`ps -axo pid,comm | grep minisnap` and map each PID to its checkout: a
+path under the repo root is the main checkout's build, under
+`.worktrees/<branch>` is that worktree's. After launching an instance,
+re-run the check and record which PID you are driving; quit instances only
+by such a matched PID, never by name. Do not attribute windows or hotkey
+presses by eye: global hotkeys belong to whichever instance registered the
+combination first, so with two instances running the hotkey drives the
+older one — the user's main instance, not the build you just launched.
+While driving a worktree instance keep it the only running one: quit the
+main-checkout instance first if it is up, and bring it back afterwards
+(`open /Users/morr/develop/minisnap/target/release/minisnap.app`).
+
 ## OpenSpec workflow
 
 This project is developed through OpenSpec: every feature starts as a change
@@ -50,6 +67,11 @@ tasks) and is implemented task by task from that change's `tasks.md`.
   stack conventions).
 - Slash commands: `/opsx:propose` a new change, `/opsx:apply` to implement
   its tasks, `/opsx:archive` when the change is done.
+- `/opsx:archive` also means merge and worktree cleanup: when a change was
+  implemented in a worktree branch, archiving it includes merging that branch
+  into master (a fast-forward is enough — the branch grows from master) and
+  removing the worktree (`git worktree remove .worktrees/<branch>`; the
+  branch ref stays).
 - During apply, work strictly from the change's task list; if a task needs
   work beyond what its spec describes, surface it instead of silently
   widening the change.
