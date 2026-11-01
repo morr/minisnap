@@ -973,10 +973,37 @@ impl OverlayView {
         }
     }
 
-    /// Cursor moved without a button: guides + loupe in idle mode.
+    /// Cursor moved without a button: with the cursor over another
+    /// display — switch the capture target to it (the overlay is the key
+    /// window, so mouseMoved keeps arriving even over a veiled screen, and
+    /// the global position comes from `NSEvent::mouseLocation`); on the
+    /// current display — guides + loupe in idle mode. During a drag the
+    /// method exits early: no switching mid-selection, the rectangle is
+    /// clamped to the display edge.
     fn handle_mouse_moved(&self, event: &NSEvent) {
         let ivars = self.ivars();
         if !ivars.active.get() || ivars.state.get() != OverlayState::Idle {
+            return;
+        }
+        let mouse = NSEvent::mouseLocation();
+        let switch_to = {
+            let surfaces = ivars.surfaces.borrow();
+            (0..surfaces.len())
+                .filter(|index| *index != ivars.target.get())
+                .find(|index| {
+                    surfaces
+                        .get(*index)
+                        .and_then(Self::matched_screen)
+                        .is_some_and(|(frame, _)| {
+                            mouse.x >= frame.origin.x
+                                && mouse.x < frame.origin.x + frame.size.width
+                                && mouse.y >= frame.origin.y
+                                && mouse.y < frame.origin.y + frame.size.height
+                        })
+                })
+        };
+        if let Some(index) = switch_to {
+            self.switch_to_surface(index);
             return;
         }
         let point = crate::capture::geometry::clamp_point(
