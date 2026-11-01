@@ -21,7 +21,7 @@ use objc2_app_kit::{
     NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
@@ -381,6 +381,21 @@ define_class!(
         #[unsafe(method(canBecomeKeyWindow))]
         fn __can_become_key_window(&self) -> bool {
             true
+        }
+
+        // editor-system-buttons experiment: the system hosts the traffic
+        // lights and calls these window methods on a real click — the
+        // override below replaces the standard behavior for this subclass.
+        #[unsafe(method(zoom:))]
+        fn __zoom(&self, sender: Option<&AnyObject>) {
+            eprintln!("minisnap: zoom: override fired -> toggleFullScreen:");
+            self.toggleFullScreen(sender);
+        }
+
+        #[unsafe(method(performMiniaturize:))]
+        fn __perform_miniaturize(&self, sender: Option<&AnyObject>) {
+            eprintln!("minisnap: performMiniaturize: override fired -> orderOut:");
+            self.orderOut(sender);
         }
     }
 );
@@ -3461,7 +3476,9 @@ impl EditorWindow {
                 ),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::FullSizeContentView
-                    | NSWindowStyleMask::Closable,
+                    | NSWindowStyleMask::Closable
+                    | NSWindowStyleMask::Miniaturizable
+                    | NSWindowStyleMask::Resizable,
                 NSBackingStoreType::Buffered,
                 false,
             )
@@ -3472,15 +3489,6 @@ impl EditorWindow {
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
-        // An accessory app has no dock icon: a miniaturized window would be
-        // unreachable, and zoom is meaningless — the window is refit to
-        // every shot anyway. Hide both standard buttons; close stays.
-        // Bringing the three lights alive is editor-system-buttons.
-        for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
-            if let Some(button) = window.standardWindowButton(role) {
-                button.setHidden(true);
-            }
-        }
         // The light appearance everywhere: the popover and every system
         // control resolve against it.
         if let Some(aqua) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }) {
