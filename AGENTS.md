@@ -34,6 +34,10 @@ Exception: windows the user explicitly opened themselves before the action —
 leave those as the user left them. The editor window and the overlay float
 above everything and ignore app deactivation, so a window left over from the
 previous step steals focus and shows up in the next verification screenshot.
+If the work happens in a worktree and is finished, quit the minisnap
+instance launched from that worktree — closing its windows only hides it
+into the tray, so a leftover worktree build would keep running alongside
+the main checkout's app.
 
 ## OpenSpec workflow
 
