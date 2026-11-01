@@ -2,7 +2,7 @@
 
 ## 1. Код
 
-- [ ] 1.1 Убрать из `visible_windows` в `src/capture.rs` own-pid фильтр (проверку `app.processID() == own_pid` и вычисление `own_pid`); убедиться, что `cargo build` проходит и список окон T0 теперь включает видимые собственные окна — проверить `grep -n own_pid src/capture.rs` (совпадений нет) и `cargo clippy`.
+- [x] 1.1 Убрать из `visible_windows` в `src/capture.rs` own-pid фильтр (проверку `app.processID() == own_pid` и вычисление `own_pid`); убедиться, что `cargo build` проходит и список окон T0 теперь включает видимые собственные окна — проверить `grep -n own_pid src/capture.rs` (совпадений нет) и `cargo clippy`.
 
 ## 2. Скил
 

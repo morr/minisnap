@@ -109,10 +109,10 @@ pub fn pick_display(
     first
 }
 
-/// Regular visible windows of other apps, front-to-back: layer 0 only, our
-/// own process excluded. Used for click-to-window hit-testing at T0.
+/// Regular visible windows, front-to-back: layer 0 only, an owning app
+/// required. Minisnap's own on-screen windows take part like any other app's.
+/// Used for click-to-window hit-testing at T0.
 pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
-    let own_pid = std::process::id() as i32;
     let mut windows = Vec::new();
     for window in unsafe { content.windows() }.iter() {
         // SAFETY: plain property access on live SCWindow/SCRunningApplication
@@ -130,11 +130,7 @@ pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
         if layer != 0 || !on_screen {
             continue;
         }
-        let Some(app) = app else {
-            continue;
-        };
-        // SAFETY: plain property access on a live SCRunningApplication object.
-        if unsafe { app.processID() } == own_pid {
+        if app.is_none() {
             continue;
         }
         windows.push(T0Window {
