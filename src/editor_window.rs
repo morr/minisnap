@@ -1,7 +1,7 @@
 //! The editor window: one reusable `NSWindow` showing the open shot — the
 //! base frame plus annotations, drawn with CoreGraphics into a custom
-//! `NSView`, with an annotation toolbar above the canvas. Selection markers
-//! are drawn on top in the canvas and never become part of a saved
+//! `NSView`, with an annotation toolbar in the left column. Selection
+//! markers are drawn on top in the canvas and never become part of a saved
 //! composite.
 
 use std::cell::{Cell, RefCell};
@@ -13,19 +13,17 @@ use objc2::{
     MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox, NSBoxType, NSButton,
-    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSPopover,
-    NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
+    NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType,
+    NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate,
+    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
+    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSPasteboard, NSPasteboardTypeString,
+    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSVisualEffectMaterial,
-    NSVisualEffectView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowStyleMask,
-    NSWorkspace,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
+    NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
-use objc2_app_kit::NSLayoutConstraintOrientation;
 use objc2_quartz_core::CALayer;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -46,27 +44,43 @@ const CHECKER_CELL_PT: f64 = 8.0;
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
 
-/// Toolbar strip height, in points.
-const TOOLBAR_HEIGHT: f64 = 33.0;
+/// Background of the whole window and the toolbar column: the flat light
+/// gray (#F2F2F2) of the zcode chrome — no vibrancy anywhere.
+const WINDOW_BG: [f64; 4] = [242.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 1.0];
 
-/// The top strip the toolbar reserves: the full-height bar itself. The
-/// canvas fills everything below it.
-const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
+/// Toolbar strip height, in points: the reference's roomier air above
+/// the buttons and the shorter one between them and the card below.
+const TOOLBAR_HEIGHT: f64 = 36.0;
 
-/// Leading padding of the toolbar stack inside the bar, in points: room
-/// for the system traffic lights, whose cluster ends at ~26 pt (the red
-/// button's right edge), plus a gap so controls never run under them.
-const BAR_LEADING_PAD: f64 = 40.0;
+/// Air above the toolbar buttons, in points: the top padding of the
+/// reference strip.
+const BAR_TOP_PAD: f64 = 9.0;
 
-/// Trailing padding of the toolbar stack inside the bar, in points.
+/// Leading padding of the toolbar row, in points: the cluster of three
+/// visible traffic lights ends at ~64 pt (the yellow button's right
+/// edge), plus a gap so the controls next in the row never run under it.
+/// The miniaturize and zoom buttons are hidden today; the pad is where
+/// they come back (editor-system-buttons).
+const BAR_LEADING_PAD: f64 = 70.0;
+
+/// Trailing padding of the toolbar row, in points.
 const BAR_TRAILING_PAD: f64 = 12.0;
 
-/// The hairline separating the toolbar strip from the canvas: white at a
-/// low alpha over the vibrancy bar.
-const BAR_HAIRLINE: [f64; 4] = [1.0, 1.0, 1.0, 0.12];
+/// Gap between the image card and the window's left, right and bottom
+/// edges, in points; the card touches the toolbar strip on top, so the
+/// air around the buttons stays even.
+const CARD_GAP: f64 = 4.0;
 
-/// The vertical dividers between the toolbar zones: white at a low alpha.
-const BAR_DIVIDER: [f64; 4] = [1.0, 1.0, 1.0, 0.15];
+/// The image card: a rounded panel a step lighter than the window, the
+/// "window in a window" the reference design reads as.
+const CARD_BG: [f64; 4] = [248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0, 1.0];
+
+/// Border of the image card: one point of light gray marking the card
+/// against the window background.
+const CARD_BORDER: [f64; 4] = [224.0 / 255.0, 224.0 / 255.0, 224.0 / 255.0, 1.0];
+
+/// Corner radius of the image card, in points.
+const CARD_RADIUS: f64 = 8.0;
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -96,9 +110,10 @@ const SLIDER_TRACK_HEIGHT: f64 = 3.0;
 /// Wash behind the active tool's button: the system accent at this alpha.
 const ACTIVE_WASH: f64 = 0.25;
 
-/// The part of the slider track ahead of the knob's reach: a faint white
-/// line reading as recessed.
-const TRACK_UNFILLED: f64 = 0.22;
+/// The part of the slider track ahead of the knob's reach: a faint black
+/// line reading as recessed on the light column (the dark theme's white
+/// one blended into the light bar).
+const TRACK_UNFILLED: f64 = 0.15;
 
 /// Alpha of the slider knob's soft shadow.
 const KNOB_SHADOW: f64 = 0.35;
@@ -135,25 +150,28 @@ const PAGE_NEXT_TAG: isize = -3;
 /// current color, so hover styling skips it.
 const COLOR_BUTTON_TAG: isize = -1;
 
-/// Toolbar button side, in points: the minimum pointer target a toolbar
-/// icon button is expected to meet; the glyph stays smaller inside it, so
-/// the hover and active plates read with air around the icon.
-const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(28.0, 28.0);
+/// Toolbar button side, in points: the hover tile of the reference
+/// toolbar — measured off the zcode screenshot, calibrated by the 12 pt
+/// traffic lights (tile 22×22, uniform 6 pt step). The glyph stays
+/// smaller inside it, so the plate reads with air around the icon.
+const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(22.0, 22.0);
 
-/// Spacing between adjacent toolbar controls, in points: enough air that
-/// the plates of neighboring buttons never read as one strip.
-const BAR_SPACING: f64 = 8.0;
+/// Spacing between adjacent toolbar controls, in points: the uniform
+/// step of the reference toolbar (all gaps equal, the leafing pair
+/// included), measured off the zcode screenshot.
+const BAR_SPACING: f64 = 6.0;
 
 /// Spacing around the zone dividers and between the tool groups, in
 /// points: the wider gap that separates the toolbar's zones.
 const BAR_ZONE_SPACING: f64 = 12.0;
 
-/// Tint of an inactive toolbar symbol: near-white, readable on the dark
-/// HUD panel regardless of the system appearance.
-const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+/// Tint of an inactive toolbar symbol: near-black (#262626), readable on
+/// the light column whatever the surrounding colors are.
+const ICON_TINT: [f64; 4] = [38.0 / 255.0, 38.0 / 255.0, 38.0 / 255.0, 1.0];
 
-/// Hover background of a toolbar button: a faint white wash.
-const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
+/// Hover background of a toolbar button: a faint black wash, the light
+/// counterpart of the dark theme's white wash.
+const HOVER_BG: [f64; 4] = [0.0, 0.0, 0.0, 0.06];
 
 /// Diameter of a color swatch's visible circle, in points: the disc sits
 /// inset in the swatch button, at the scale of the icon glyphs, so the
@@ -164,15 +182,15 @@ const SWATCH_DISC: f64 = 18.0;
 /// minimum pointer target a pointer-driven control is expected to meet.
 const PALETTE_SWATCH_SIZE: f64 = 24.0;
 
-/// Resting outline of a color swatch: bright enough to mark the darkest
-/// presets (black, blue) against the dark HUD panel at the 3:1 boundary
-/// contrast graphics are expected to reach, faint enough not to read as a
-/// highlight.
-const SWATCH_RING: [f64; 4] = [1.0, 1.0, 1.0, 0.5];
+/// Resting outline of a color swatch: dark enough to mark the lightest
+/// presets (white, yellow) against the light column and popover at the 3:1
+/// boundary contrast graphics are expected to reach, faint enough not to
+/// read as a highlight.
+const SWATCH_RING: [f64; 4] = [0.0, 0.0, 0.0, 0.15];
 
-/// Hover outline of a color swatch: the ring brightens on hover instead of
+/// Hover outline of a color swatch: the ring darkens on hover instead of
 /// the fill — the fill is the color itself.
-const SWATCH_RING_HOVER: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+const SWATCH_RING_HOVER: [f64; 4] = [0.0, 0.0, 0.0, 0.3];
 
 /// Crossfade length of toolbar plate changes (hover, tool highlight), in
 /// seconds. Short enough that feedback stays responsive; the database rule
@@ -373,10 +391,11 @@ impl KeyableWindow {
 }
 
 define_class!(
-    /// The floating toolbar panel: a vibrancy pill that drags the window
-    /// when a click lands on its free surface. Controls consume their own
-    /// clicks, so they never reach this handler.
-    #[unsafe(super(NSVisualEffectView))]
+    /// The left toolbar column: an invisible surface that drags the window
+    /// when a click lands on its free area — the canvas behind it paints
+    /// the light gray both the column and the window read as. Controls
+    /// consume their own clicks, so they never reach this handler.
+    #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     struct ToolbarPanel;
 
@@ -590,8 +609,9 @@ impl WidthSliderView {
         }
         let knob_x = self.knob_x(w);
         let track_y = h / 2.0 - SLIDER_TRACK_HEIGHT / 2.0;
-        // The recessed track behind the fill.
-        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, TRACK_UNFILLED);
+        // The recessed track behind the fill: black at a low alpha, so it
+        // stays visible on the light column.
+        CGContext::set_rgb_fill_color(Some(&cg), 0.0, 0.0, 0.0, TRACK_UNFILLED);
         CGContext::fill_rect(
             Some(&cg),
             CGRect::new(
@@ -663,9 +683,6 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
-    /// The file-name label in the toolbar (the window title is hidden,
-    /// the bar carries the name instead).
-    file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -724,7 +741,6 @@ define_class!(
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
-                file_label: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -1123,14 +1139,30 @@ impl EditorView {
             .unwrap_or((0, 0))
     }
 
-    /// The shot's frame centered in the canvas, in view points.
-    fn frame_rect(&self) -> CGRect {
+    /// The image card area: the canvas inset by the card gap on the
+    /// sides and the bottom (origin Y grows upward — the gap sits at the
+    /// window's bottom edge), touching the toolbar strip on top. The
+    /// card's own paint (fill, border, rounding) lives in `draw`; this is
+    /// the geometry the frame centers in.
+    fn card_rect(&self) -> CGRect {
         let bounds = self.bounds();
+        CGRect::new(
+            CGPoint::new(CARD_GAP, CARD_GAP),
+            CGSize::new(
+                (bounds.size.width - 2.0 * CARD_GAP).max(0.0),
+                (bounds.size.height - CARD_GAP).max(0.0),
+            ),
+        )
+    }
+
+    /// The shot's frame centered in the card, in view points.
+    fn frame_rect(&self) -> CGRect {
+        let card = self.card_rect();
         let size = self.ivars().frame_size.get();
         CGRect::new(
             CGPoint::new(
-                (bounds.size.width - size.width) / 2.0,
-                (bounds.size.height - size.height) / 2.0,
+                card.origin.x + (card.size.width - size.width) / 2.0,
+                card.origin.y + (card.size.height - size.height) / 2.0,
             ),
             size,
         )
@@ -1179,15 +1211,48 @@ impl EditorView {
             return;
         }
 
+        // The card: a rounded panel a step lighter than the window — the
+        // "window in a window" the reference reads as. The checker and
+        // the shot live inside its border; the canvas paints nothing
+        // else, so the window background and the system corner rounding
+        // stay untouched.
+        let card = self.card_rect();
+        CGContext::save_g_state(Some(&cg));
+        // SAFETY: class convenience constructor of a bezier path; the
+        // drawing calls that follow touch only the current graphics
+        // context.
+        let card_path = unsafe {
+            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, CARD_RADIUS, CARD_RADIUS)
+        };
+        let card_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+            CARD_BG[0],
+            CARD_BG[1],
+            CARD_BG[2],
+            CARD_BG[3],
+        );
+        card_bg.setFill();
+        card_path.fill();
+        let card_border = NSColor::colorWithSRGBRed_green_blue_alpha(
+            CARD_BORDER[0],
+            CARD_BORDER[1],
+            CARD_BORDER[2],
+            CARD_BORDER[3],
+        );
+        card_border.setStroke();
+        card_path.setLineWidth(1.0);
+        card_path.stroke();
+        card_path.addClip();
         // Backdrop: the light checkerboard image editors draw behind
-        // transparent areas — the frame floats on it, centered.
+        // transparent areas — the frame floats on it, centered in the
+        // card.
         let mut cache = ivars.checker.borrow_mut();
         let checker = cache.get_or_insert_with(checker_color);
         checker.setFill();
-        CGContext::fill_rect(Some(&cg), bounds);
+        CGContext::fill_rect(Some(&cg), card);
         drop(cache);
 
         let Some(shot) = shot_guard.as_ref() else {
+            CGContext::restore_g_state(Some(&cg));
             return;
         };
         let base = shot.doc.base();
@@ -1279,21 +1344,23 @@ impl EditorView {
         }
         CGContext::restore_g_state(Some(&cg));
 
+        // The crop/resize frame overlay: the dim, the border and the
+        // handles stay inside the card clip.
+        if ivars.frame_edit.borrow().is_some() {
+            self.draw_frame_overlay(&cg, &card, sx, sy);
+        }
+        CGContext::restore_g_state(Some(&cg));
+
         // Selection markers on top, in screen points so they stay constant
         // sized; they never reach a saved composite.
         if let Some(id) = ivars.selection.get() {
             self.draw_markers(&cg, shot, id);
         }
-
-        // The crop/resize frame overlay on top of everything.
-        if ivars.frame_edit.borrow().is_some() {
-            self.draw_frame_overlay(&cg, &bounds, sx, sy);
-        }
     }
 
     /// The crop/resize frame: dimmed frame surroundings, white border,
-    /// nine handle dots.
-    fn draw_frame_overlay(&self, cg: &CGContext, bounds: &CGRect, sx: f64, sy: f64) {
+    /// nine handle dots — all within the card.
+    fn draw_frame_overlay(&self, cg: &CGContext, card: &CGRect, sx: f64, sy: f64) {
         let Some(rect) = self.current_frame_rect() else {
             return;
         };
@@ -1302,18 +1369,30 @@ impl EditorView {
         let vw = rect.width * sx;
         let vh = rect.height * sy;
         let y0 = frame.origin.y + frame.size.height - rect.max_y() * sy;
-        // Dim everything outside the frame.
+        // Dim everything outside the frame, inside the card.
         CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 0.45);
         let dim = [
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(bounds.size.width, y0.max(0.0))),
             CGRect::new(
-                CGPoint::new(0.0, y0 + vh),
-                CGSize::new(bounds.size.width, (bounds.size.height - y0 - vh).max(0.0)),
+                CGPoint::new(card.origin.x, card.origin.y),
+                CGSize::new(card.size.width, (y0 - card.origin.y).max(0.0)),
             ),
-            CGRect::new(CGPoint::new(0.0, y0), CGSize::new(vx.max(0.0), vh)),
+            CGRect::new(
+                CGPoint::new(card.origin.x, y0 + vh),
+                CGSize::new(
+                    card.size.width,
+                    (card.origin.y + card.size.height - y0 - vh).max(0.0),
+                ),
+            ),
+            CGRect::new(
+                CGPoint::new(card.origin.x, y0),
+                CGSize::new((vx - card.origin.x).max(0.0), vh),
+            ),
             CGRect::new(
                 CGPoint::new(vx + vw, y0),
-                CGSize::new((bounds.size.width - vx - vw).max(0.0), vh),
+                CGSize::new(
+                    (card.origin.x + card.size.width - vx - vw).max(0.0),
+                    vh,
+                ),
             ),
         ];
         for r in dim {
@@ -1330,9 +1409,14 @@ impl EditorView {
         let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
-            let cx = (frame.origin.x + point.x * sx).clamp(r, (bounds.size.width - r).max(r));
-            let cy = (frame.origin.y + frame.size.height - point.y * sy)
-                .clamp(r, (bounds.size.height - r).max(r));
+            let cx = (frame.origin.x + point.x * sx).clamp(
+                card.origin.x + r,
+                (card.origin.x + card.size.width - r).max(card.origin.x + r),
+            );
+            let cy = (frame.origin.y + frame.size.height - point.y * sy).clamp(
+                card.origin.y + r,
+                (card.origin.y + card.size.height - r).max(card.origin.y + r),
+            );
             let marker = CGRect::new(
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
@@ -2268,10 +2352,14 @@ impl EditorView {
         // The default-button weight: Enter applies the frame, the button is
         // the frame mode's confirmation.
         ok.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
-        // An accent plate instead of the default bezel; the title renders
-        // white on it in the window's dark appearance.
+        // An accent plate instead of the default bezel; the button keeps
+        // the dark appearance so its title renders white on the accent in
+        // the light window.
         ok.setBordered(false);
         ok.setWantsLayer(true);
+        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
+            ok.setAppearance(Some(&dark));
+        }
         if let Some(layer) = ok.layer() {
             layer.setCornerRadius(6.0);
             layer.setBackgroundColor(Some(&NSColor::controlAccentColor().CGColor()));
@@ -2414,14 +2502,16 @@ impl EditorView {
                 fit_size(
                     iw as f64 / density,
                     ih as f64 / density,
-                    visible.width,
-                    visible.height - TOOLBAR_RESERVED,
+                    visible.width - 2.0 * CARD_GAP,
+                    visible.height - TOOLBAR_HEIGHT - CARD_GAP,
                 )
             })
             .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
-        // The refit never shrinks below the toolbar's minimum width.
-        let width = content_size.width.max(self.ivars().min_width.get());
-        let height = content_size.height + TOOLBAR_RESERVED;
+        // The window wraps the frame: the toolbar strip on top, the card
+        // touching it from below, the card gap on the other three sides.
+        // The width never drops below the toolbar's minimum.
+        let width = (content_size.width + 2.0 * CARD_GAP).max(self.ivars().min_width.get());
+        let height = TOOLBAR_HEIGHT + content_size.height + CARD_GAP;
         self.ivars().frame_size.set(content_size);
         if self.ivars().placed.get() {
             // Keep the window's top-left corner where it was: AppKit's frame
@@ -2443,8 +2533,8 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: file-name label, size,
-    /// full redraw.
+    /// Show (or replace) the shot in the window: density, selection reset,
+    /// full refit.
     fn display_shot(&self, shot: OpenShot) {
         let file_name = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
@@ -2453,9 +2543,6 @@ impl EditorView {
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().density.set(name_density(&file_name));
         self.ivars().selection.set(None);
-        if let Some(label) = self.ivars().file_label.borrow().as_ref() {
-            label.setStringValue(&NSString::from_str(&file_name));
-        }
         self.refit_window();
     }
 
@@ -2572,11 +2659,28 @@ impl EditorView {
         });
     }
 
-    /// Tag of the toolbar-panel button under a window-space point.
+    /// Tag of the toolbar-panel button under a window-space point. The
+    /// buttons are matched by frame, not by `hitTest`: the system-hosted
+    /// buttons of recent macOS skip the classic hit-testing path (hover
+    /// silently found nothing), while their frames are plain geometry.
     fn panel_button_at(&self, point: CGPoint) -> Option<isize> {
-        let panel = self.ivars().toolbar_panel.borrow().clone()?;
-        let hit = panel.hitTest(panel.convertPoint_fromView(point, None))?;
-        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+        let inside = |rect: CGRect| {
+            point.x >= rect.origin.x
+                && point.x <= rect.origin.x + rect.size.width
+                && point.y >= rect.origin.y
+                && point.y <= rect.origin.y + rect.size.height
+        };
+        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+            if inside(button.convertRect_toView(button.bounds(), None)) {
+                return Some(*tag);
+            }
+        }
+        if let Some(button) = self.ivars().color_button.borrow().as_ref() {
+            if inside(button.convertRect_toView(button.bounds(), None)) {
+                return Some(COLOR_BUTTON_TAG);
+            }
+        }
+        None
     }
 
     /// Tag of the palette preset under a window-space point, if the
@@ -2932,22 +3036,17 @@ fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
         .expect("configured symbol")
 }
 
-/// A vertical divider between the toolbar zones: a 1×18 pt view with a
-/// low-alpha white layer. Not a button, so the hover pass ignores it. The
-/// size rides on constraints: the toolbar stack sizes arranged views by
-/// autolayout and would collapse a frame-only view.
+/// A vertical divider between the toolbar zones: a 1×18 pt view in the
+/// system separator color, so it adapts to the light column. Not a button,
+/// so the hover pass ignores it. The size rides on constraints: the
+/// toolbar stack sizes arranged views by autolayout and would collapse a
+/// frame-only view.
 fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
     let view = NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO);
     view.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
-        layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            BAR_DIVIDER[0],
-            BAR_DIVIDER[1],
-            BAR_DIVIDER[2],
-            BAR_DIVIDER[3],
-        )
-        .CGColor()));
+        layer.setBackgroundColor(Some(&NSColor::separatorColor().CGColor()));
     }
     view.widthAnchor()
         .constraintEqualToConstant(1.0)
@@ -2987,9 +3086,20 @@ fn icon_button(
     button.setBordered(false);
     button.setWantsLayer(true);
     if let Some(layer) = button.layer() {
-        layer.setCornerRadius(7.0);
+        layer.setCornerRadius(5.0);
     }
-    button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
+    // The 28×28 tile rides on constraints: the toolbar stack sizes
+    // arranged views by autolayout and hugs a frame-only button down to
+    // its glyph — the hover plate shrank with it.
+    button.setTranslatesAutoresizingMaskIntoConstraints(false);
+    button
+        .widthAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.width)
+        .setActive(true);
+    button
+        .heightAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
+        .setActive(true);
     let name = NSString::from_str(title);
     button.setToolTip(Some(&name));
     button.setAccessibilityLabel(Some(&name));
@@ -3332,7 +3442,7 @@ impl EditorWindow {
                 KeyableWindow::alloc(mtm),
                 CGRect::new(
                     CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_HEIGHT),
                 ),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::FullSizeContentView
@@ -3343,23 +3453,34 @@ impl EditorWindow {
         };
         // Electron-style hidden inset: a titled window with a transparent,
         // hidden titlebar — the system traffic lights draw over the toolbar
-        // strip, which stays the only top chrome of the window.
+        // column, which stays the only chrome of the window.
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
         // An accessory app has no dock icon: a miniaturized window would be
         // unreachable, and zoom is meaningless — the window is refit to
         // every shot anyway. Hide both standard buttons; close stays.
+        // Bringing the three lights alive is editor-system-buttons.
         for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
             if let Some(button) = window.standardWindowButton(role) {
                 button.setHidden(true);
             }
         }
-        // The dark HUD panel, the tints and the label all resolve against
-        // the dark appearance.
-        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
-            window.setAppearance(Some(&dark));
+        // The light appearance everywhere: the popover and every system
+        // control resolve against it.
+        if let Some(aqua) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }) {
+            window.setAppearance(Some(&aqua));
         }
+        // The flat light gray both the toolbar strip and the card margins
+        // read as. The window paints it — the canvas stays clear of the
+        // window background, so the system corner rounding survives.
+        let window_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+            WINDOW_BG[0],
+            WINDOW_BG[1],
+            WINDOW_BG[2],
+            WINDOW_BG[3],
+        );
+        window.setBackgroundColor(Some(&window_bg));
         // Toolbar hover styling rides on mouse-moved events.
         window.setAcceptsMouseMovedEvents(true);
         // The window lives in the app controller for the whole process;
@@ -3369,16 +3490,10 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // The toolbar strip across the top: a full-width vibrancy bar
-        // carrying the ◄/► leafing buttons, the file name (the window
-        // title is hidden), the tools, the color swatch with its
-        // preset popover and the stroke-width slider.
+        // The toolbar column along the left edge: an invisible surface
+        // carrying the controls; the canvas behind it paints the light
+        // gray the column reads as.
         let panel = ToolbarPanel::new(mtm);
-        panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        // No corner radius of its own: the window supplies the system
-        // rounding, and the bar's bottom edge must stay square against
-        // the canvas.
-        panel.setWantsLayer(true);
         // Hover styling: one tracking area over the panel, owned by the
         // canvas view — it holds the button list and the active tool.
         let tracking = unsafe {
@@ -3398,6 +3513,9 @@ impl EditorWindow {
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(BAR_SPACING);
         let mut tool_buttons = Vec::new();
+        // The ◄/► leafing pair rides right of the traffic lights' leading
+        // pad, tight together like the back/forward pair of the reference.
+        let mut leaf_buttons = Vec::new();
         for (tag, symbol, title) in [
             (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
             (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
@@ -3409,21 +3527,12 @@ impl EditorWindow {
                 button.setAction(Some(sel!(pageClicked:)));
             }
             toolbar.addArrangedSubview(&button);
+            leaf_buttons.push(button.clone());
             tool_buttons.push((tag, button));
         }
-        let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-        // Long file names truncate instead of stretching the window's
-        // minimum width.
-        file_label.setContentCompressionResistancePriority_forOrientation(
-            250.0,
-            NSLayoutConstraintOrientation::Horizontal,
-        );
-        toolbar.addArrangedSubview(&file_label);
-        // Zones: leafing + file name | color + width | tools,
-        // separated by 1 pt dividers with a wider gap around them.
-        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
+        // Zones: leafing | color + width | tools, separated by 1 pt
+        // dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leaf_buttons[1]);
         let leading_sep = bar_separator(mtm);
         toolbar.addArrangedSubview(&leading_sep);
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leading_sep);
@@ -3484,19 +3593,6 @@ impl EditorWindow {
             color_button.setTarget(Some(&view));
             color_button.setAction(Some(sel!(colorClicked:)));
         }
-        // The swatch and the slider join the stack after the tools —
-        // they close the right-hand zone.
-        // The slider sizes itself through its intrinsicContentSize — the
-        // toolbar stack reads it for layout.
-        let slider = WidthSliderView::new(mtm);
-        // SAFETY: target is this canvas view, alive for the process; the
-        // action reads `doubleValue` off the sender.
-        unsafe {
-            slider.set_target(Some(&*view));
-            slider.set_action(Some(sel!(widthChanged:)));
-        }
-        // The color and the width follow the file name: they dress the
-        // element being drawn before the tools start.
         // The slider sizes itself through its intrinsicContentSize — the
         // toolbar stack reads it for layout.
         let slider = WidthSliderView::new(mtm);
@@ -3533,13 +3629,13 @@ impl EditorWindow {
         }
 
         // Layout: the toolbar strip across the top, the canvas filling
-        // everything below it. The flexible min-Y margin keeps the bar
-        // pinned to the top when the window grows; the canvas grows into
-        // the freed space.
+        // everything below it. The canvas paints nothing outside the card,
+        // so the window background — the flat light gray — shows around
+        // it and under the transparent strip.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The window cannot shrink below the bar: the stack's fitting
-        // width plus its leading and trailing padding.
+        // The window cannot shrink below the bar: the leading pad for the
+        // traffic lights, the row's fitting width, the trailing pad.
         let min_width = toolbar.fittingSize().width + BAR_LEADING_PAD + BAR_TRAILING_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
@@ -3552,39 +3648,19 @@ impl EditorWindow {
                 | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
         content.addSubview(&panel);
-        // The hairline under the bar: one point of white at a low alpha,
-        // stretching with the bar.
-        // SAFETY: designated initializer with a plain frame.
-        let hairline = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
-        hairline.setWantsLayer(true);
-        if let Some(layer) = hairline.layer() {
-            layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                BAR_HAIRLINE[0],
-                BAR_HAIRLINE[1],
-                BAR_HAIRLINE[2],
-                BAR_HAIRLINE[3],
-            )
-            .CGColor()));
-        }
-        hairline.setFrame(CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(size.width, 1.0),
-        ));
-        hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-        panel.addSubview(&hairline);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(BAR_LEADING_PAD, 0.0),
-            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
+            CGPoint::new(
+                BAR_LEADING_PAD,
+                TOOLBAR_HEIGHT - BAR_TOP_PAD - TOOLBAR_BUTTON_SIZE.height / 2.0
+                    - SLIDER_HEIGHT / 2.0,
+            ),
+            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, SLIDER_HEIGHT),
         ));
-        toolbar.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
+        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
         panel.addSubview(&toolbar);
-        let canvas_height = size.height - TOOLBAR_RESERVED;
         view.setFrame(CGRect::new(
             CGPoint::ZERO,
-            CGSize::new(size.width, canvas_height),
+            CGSize::new(size.width, size.height - TOOLBAR_HEIGHT),
         ));
         view.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -3610,7 +3686,6 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
-        *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
         *view.ivars().toolbar_panel.borrow_mut() = Some(panel);
         view.update_tool_highlight();
