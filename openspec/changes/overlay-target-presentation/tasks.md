@@ -2,7 +2,7 @@
 
 ## 1. SurfaceMap — спаривание один раз за сессию
 
-- [ ] 1.1 В `src/overlay.rs` появляется приватный `mod presentation` с
+- [x] 1.1 В `src/overlay.rs` появляется приватный `mod presentation` с
   `ScreenPair` и `SurfaceMap` (`for_surfaces` / `from_frames` / `screen_of` /
   `switch_candidate`) по design; ivars-слот `surface_map`. `show()` строит
   карту и отказывает без пары у стартовой цели; `switch_to_surface` берёт
