@@ -453,6 +453,32 @@ impl OverlayView {
         Retained::from(&window)
     }
 
+    /// Tear down the current veils and cover every screen except the
+    /// current target's display (`ivars.screen_frame`). A veil click
+    /// cancels the mode.
+    fn rebuild_veils(&self) {
+        let ivars = self.ivars();
+        {
+            let mut old_veils = ivars.veils.borrow_mut();
+            for veil in old_veils.drain(..) {
+                veil.orderOut(None);
+            }
+        }
+        let mtm = MainThreadMarker::new().expect("overlay on main thread");
+        let target_frame = ivars.screen_frame.get();
+        let mut veils = Vec::new();
+        for screen in NSScreen::screens(mtm).iter() {
+            let frame = screen.frame();
+            if frame.origin == target_frame.origin && frame.size == target_frame.size {
+                continue;
+            }
+            let veil = Self::make_veil(mtm, frame, self);
+            veil.orderFrontRegardless();
+            veils.push(veil);
+        }
+        *ivars.veils.borrow_mut() = veils;
+    }
+
     /// Place the four dimming strips around `hole` (display-local points);
     /// `None` hides them (no active selection yet).
     fn update_dim(&self, hole: Option<CGRect>) {
@@ -1067,27 +1093,9 @@ impl OverlayView {
             .as_ref()
             .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
 
-        // Veils for the other displays: take down the previous session's,
-        // then cover every screen except the captured one. A veil click
-        // cancels the mode.
-        {
-            let mut old_veils = ivars.veils.borrow_mut();
-            for veil in old_veils.drain(..) {
-                veil.orderOut(None);
-            }
-        }
-        let mtm = MainThreadMarker::new().expect("overlay on main thread");
-        let mut veils = Vec::new();
-        for screen in NSScreen::screens(mtm).iter() {
-            let frame = screen.frame();
-            if frame.origin == screen_frame.origin && frame.size == screen_frame.size {
-                continue;
-            }
-            let veil = Self::make_veil(mtm, frame, self);
-            veil.orderFrontRegardless();
-            veils.push(veil);
-        }
-        *ivars.veils.borrow_mut() = veils;
+        // Veils for the other displays: cover every screen except the
+        // captured one. A veil click cancels the mode.
+        self.rebuild_veils();
 
         if let Some(window) = ivars.window.borrow().as_ref() {
             window.setCollectionBehavior(
@@ -1157,6 +1165,122 @@ impl OverlayView {
             ivars.windows.borrow().len(),
             ivars.veils.borrow().len()
         );
+    }
+
+    /// Switch the capture target to the surface `index`: move the window
+    /// onto its screen, swap the frozen frame, rebuild the loupe sampler
+    /// and the veils, reset the HUD to idle and restart the border
+    /// fade-in/pulse. Refuses a surface without a live screen behind it
+    /// and re-entrant calls (mode not active or finishing, the current
+    /// target). Returns whether the switch happened.
+    fn switch_to_surface(&self, index: usize) -> bool {
+        let ivars = self.ivars();
+        if !ivars.active.get() || ivars.finishing.get() {
+            return false;
+        }
+        if index == ivars.target.get() {
+            return false;
+        }
+        let screen = {
+            let surfaces = ivars.surfaces.borrow();
+            surfaces
+                .get(index)
+                .and_then(Self::matched_screen)
+        };
+        let Some((screen_frame, scale)) = screen else {
+            eprintln!("overlay: no live screen for surface {index}, target kept");
+            return false;
+        };
+        self.apply_target(index, screen_frame, scale);
+        ivars.target.set(index);
+
+        // Reset the interaction state: idle, HUD down, no dimming.
+        ivars.state.set(OverlayState::Idle);
+        self.update_dim(None);
+        ivars.loupe.setHidden(true);
+        ivars.size_label.setHidden(true);
+        ivars.axis_v_dark.setHidden(true);
+        ivars.axis_v_light.setHidden(true);
+        ivars.axis_h_dark.setHidden(true);
+        ivars.axis_h_light.setHidden(true);
+
+        // Layers follow the new display: root/frame geometry, the frozen
+        // bitmap and HUD sharpness (displays differ in size and backing
+        // scale). Without disabling actions Core Animation tweens the
+        // swap, and the frame visibly cross-fades.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        ivars.root_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
+        let frame_layer = &ivars.frame_layer;
+        frame_layer.setContentsScale(scale);
+        frame_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
+        if let Some(image) = ivars.image.borrow().as_ref() {
+            let image: &CGImage = image;
+            // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
+            // expects it as AnyObject.
+            let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(image).cast::<AnyObject>()) };
+            // SAFETY: contents setter with a valid image object.
+            unsafe { frame_layer.setContents(Some(as_any)) };
+        }
+        let hud_layers: [&CALayer; 10] = [
+            &ivars.loupe,
+            &ivars.loupe_grid,
+            &ivars.loupe_cross,
+            &ivars.loupe_frame_light,
+            &ivars.loupe_frame_dark,
+            &ivars.axis_v_dark,
+            &ivars.axis_v_light,
+            &ivars.axis_h_dark,
+            &ivars.axis_h_light,
+            &ivars.size_label,
+        ];
+        for layer in hud_layers {
+            layer.setContentsScale(scale);
+        }
+        self.rebuild_border_path();
+        CATransaction::commit();
+
+        // Loupe sampler for the new frame.
+        let (w_px, h_px) = ivars.image_size_px.get();
+        let source = ivars.image.borrow();
+        *ivars.sampler.borrow_mut() = source
+            .as_ref()
+            .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
+        drop(source);
+
+        // Veils flip sides: the new target is uncovered, the previous one
+        // is covered.
+        self.rebuild_veils();
+
+        // The window moves to the new target's screen and stays key.
+        if let Some(window) = ivars.window.borrow().as_ref() {
+            window.setFrame_display(screen_frame, false);
+            window.makeKeyAndOrderFront(None);
+        }
+
+        // Border: reset invisible without animation, fade in, arm the idle
+        // pulse (same scheme as show()).
+        let border = &ivars.border;
+        border.removeAllAnimations();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        border.setHidden(false);
+        border.setOpacity(0.0);
+        CATransaction::commit();
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(BORDER_FADE_IN_DUR);
+        border.setOpacity(1.0);
+        CATransaction::commit();
+        Self::start_border_pulse(border);
+
+        eprintln!(
+            "overlay: target switched to surface {index} on screen ({:.0},{:.0} {}x{}) scale={scale}",
+            screen_frame.origin.x,
+            screen_frame.origin.y,
+            screen_frame.size.width,
+            screen_frame.size.height
+        );
+        true
     }
 
     /// Cursor position in display-local points (bottom-left origin).
