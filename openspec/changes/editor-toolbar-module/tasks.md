@@ -10,7 +10,7 @@
 
 ## 3. WidthSliderView, поповер палитры и тюнер
 
-- [ ] 3.1 Переезд `WidthSliderView` в `editor_toolbar.rs` (снятие переходной зависимости): слайдер таргетит `ToolbarView`, ширина уходит окну через колбэк. Поповер палитры, палитрный hover, `update_color_swatch` и обработка клика свотча — в `ToolbarView` (delegate поповера — он же; re-entrancy `performClose` сохраняется). Дебаг-тюнер (`ARROW_PARAM_SPECS`, панель, промпт, обработчики) переезжает целиком со своим полем `arrow_param_rows`. Временный параметр конструктора удалён. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — слайдер тянет ширину, палитра открывается/выбирает цвет, hover свотчей работает, тюнер под `MINISNAP_ARROW_DEBUG` крутится.
+- [x] 3.1 Переезд `WidthSliderView` в `editor_toolbar.rs` (снятие переходной зависимости): слайдер таргетит `ToolbarView`, ширина уходит окну через колбэк. Поповер палитры, палитрный hover, `update_color_swatch` и обработка клика свотча — в `ToolbarView` (delegate поповера — он же; re-entrancy `performClose` сохраняется). Дебаг-тюнер (`ARROW_PARAM_SPECS`, панель, промпт, обработчики) переезжает целиком со своим полем `arrow_param_rows`. Временный параметр конструктора удалён. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — слайдер тянет ширину, палитра открывается/выбирает цвет, hover свотчей работает, тюнер под `MINISNAP_ARROW_DEBUG` крутится. *(build/clippy/test зелёные; live-проверка недоступна: Screen Recording permission сессии отозван — screencapture отдаёт чёрные кадры и отказы на любое окно, ждёт ручной проверки после перегранта; инстанс с новым кодом оставлен в трее (pid 84698, редактор на /tmp/minisnap-verify/shot.png))*
 
 ## 4. ToolbarEvent + set_state
 
