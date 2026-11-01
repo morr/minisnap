@@ -103,4 +103,26 @@ mod tests {
         // The key is absent on a default system; the read must simply answer.
         let _ = sound_disabled_by_system();
     }
+
+    #[test]
+    fn disable_sound_key_is_honored_and_restored() {
+        use objc2_core_foundation::{
+            CFPreferencesAppSynchronize, CFPreferencesSetAppValue, CFRetained, CFPropertyList, Type,
+        };
+
+        let key = CFString::from_str("disable-sound");
+        let domain = CFString::from_str("com.apple.screencapture");
+        // SAFETY: CFBoolean is a legal CFPropertyList type, the unchecked cast
+        // only relabels the same object.
+        let flag: CFRetained<CFPropertyList> =
+            unsafe { CFRetained::cast_unchecked(CFBoolean::new(true).retain()) };
+        unsafe { CFPreferencesSetAppValue(&key, Some(&flag), &domain) };
+        CFPreferencesAppSynchronize(&domain);
+        assert!(sound_disabled_by_system());
+
+        // Restore the default system state: the key absent again.
+        unsafe { CFPreferencesSetAppValue(&key, None, &domain) };
+        CFPreferencesAppSynchronize(&domain);
+        assert!(!sound_disabled_by_system());
+    }
 }
