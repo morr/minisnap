@@ -14,11 +14,11 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
-    NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox,
-    NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent,
-    NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSPasteboard, NSPasteboardTypeString, NSPopover,
-    NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
+    NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType,
+    NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate,
+    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
+    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSPasteboard, NSPasteboardTypeString,
+    NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
     NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
@@ -64,6 +64,17 @@ const BAR_TRAILING_PAD: f64 = 12.0;
 /// Gap between the image card and the window's top, right and bottom
 /// edges, in points; the card touches the toolbar column on the left.
 const CARD_GAP: f64 = 4.0;
+
+/// The image card: a rounded panel a step lighter than the window, the
+/// "window in a window" the reference design reads as.
+const CARD_BG: [f64; 4] = [248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0, 1.0];
+
+/// Border of the image card: one point of light gray marking the card
+/// against the window background.
+const CARD_BORDER: [f64; 4] = [224.0 / 255.0, 224.0 / 255.0, 224.0 / 255.0, 1.0];
+
+/// Corner radius of the image card, in points.
+const CARD_RADIUS: f64 = 8.0;
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -128,19 +139,16 @@ const PAGE_NEXT_TAG: isize = -3;
 /// current color, so hover styling skips it.
 const COLOR_BUTTON_TAG: isize = -1;
 
-/// Toolbar button side, in points: the minimum pointer target a toolbar
-/// icon button is expected to meet; the glyph stays smaller inside it, so
-/// the hover and active plates read with air around the icon.
-const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(28.0, 28.0);
+/// Toolbar button side, in points: the hover tile of the reference
+/// toolbar — measured off the zcode screenshot, calibrated by the 12 pt
+/// traffic lights (tile 22×22, uniform 6 pt step). The glyph stays
+/// smaller inside it, so the plate reads with air around the icon.
+const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(22.0, 22.0);
 
-/// Spacing between adjacent toolbar controls, in points: the tight
-/// packing of the reference toolbar, where the hover plates of neighbors
-/// nearly touch.
-const BAR_SPACING: f64 = 4.0;
-
-/// Spacing inside the ◄/► leafing pair, in points: the pair reads as one
-/// tight cluster, like the back/forward pair of the reference toolbar.
-const LEAF_PAIR_SPACING: f64 = 4.0;
+/// Spacing between adjacent toolbar controls, in points: the uniform
+/// step of the reference toolbar (all gaps equal, the leafing pair
+/// included), measured off the zcode screenshot.
+const BAR_SPACING: f64 = 6.0;
 
 /// Spacing around the zone dividers and between the tool groups, in
 /// points: the wider gap that separates the toolbar's zones.
@@ -1181,18 +1189,48 @@ impl EditorView {
             return;
         }
 
+        // The card: a rounded panel a step lighter than the window — the
+        // "window in a window" the reference reads as. The checker and
+        // the shot live inside its border; the canvas paints nothing
+        // else, so the window background and the system corner rounding
+        // stay untouched.
+        let card = self.card_rect();
+        CGContext::save_g_state(Some(&cg));
+        // SAFETY: class convenience constructor of a bezier path; the
+        // drawing calls that follow touch only the current graphics
+        // context.
+        let card_path = unsafe {
+            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, CARD_RADIUS, CARD_RADIUS)
+        };
+        let card_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+            CARD_BG[0],
+            CARD_BG[1],
+            CARD_BG[2],
+            CARD_BG[3],
+        );
+        card_bg.setFill();
+        card_path.fill();
+        let card_border = NSColor::colorWithSRGBRed_green_blue_alpha(
+            CARD_BORDER[0],
+            CARD_BORDER[1],
+            CARD_BORDER[2],
+            CARD_BORDER[3],
+        );
+        card_border.setStroke();
+        card_path.setLineWidth(1.0);
+        card_path.stroke();
+        card_path.addClip();
         // Backdrop: the light checkerboard image editors draw behind
         // transparent areas — the frame floats on it, centered in the
-        // card. The canvas paints nothing else: the window background
-        // (the flat light gray) owns everything outside the card, so the
-        // system corner rounding survives.
+        // card.
         let mut cache = ivars.checker.borrow_mut();
         let checker = cache.get_or_insert_with(checker_color);
         checker.setFill();
-        CGContext::fill_rect(Some(&cg), self.card_rect());
+        CGContext::fill_rect(Some(&cg), card);
         drop(cache);
 
         let Some(shot) = shot_guard.as_ref() else {
+            CGContext::restore_g_state(Some(&cg));
             return;
         };
         let base = shot.doc.base();
@@ -1283,21 +1321,23 @@ impl EditorView {
         }
         CGContext::restore_g_state(Some(&cg));
 
+        // The crop/resize frame overlay: the dim, the border and the
+        // handles stay inside the card clip.
+        if ivars.frame_edit.borrow().is_some() {
+            self.draw_frame_overlay(&cg, &card, sx, sy);
+        }
+        CGContext::restore_g_state(Some(&cg));
+
         // Selection markers on top, in screen points so they stay constant
         // sized; they never reach a saved composite.
         if let Some(id) = ivars.selection.get() {
             self.draw_markers(&cg, shot, id);
         }
-
-        // The crop/resize frame overlay on top of everything.
-        if ivars.frame_edit.borrow().is_some() {
-            self.draw_frame_overlay(&cg, &bounds, sx, sy);
-        }
     }
 
     /// The crop/resize frame: dimmed frame surroundings, white border,
-    /// nine handle dots.
-    fn draw_frame_overlay(&self, cg: &CGContext, bounds: &CGRect, sx: f64, sy: f64) {
+    /// nine handle dots — all within the card.
+    fn draw_frame_overlay(&self, cg: &CGContext, card: &CGRect, sx: f64, sy: f64) {
         let Some(rect) = self.current_frame_rect() else {
             return;
         };
@@ -1306,18 +1346,30 @@ impl EditorView {
         let vw = rect.width * sx;
         let vh = rect.height * sy;
         let y0 = frame.origin.y + frame.size.height - rect.max_y() * sy;
-        // Dim everything outside the frame.
+        // Dim everything outside the frame, inside the card.
         CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 0.45);
         let dim = [
-            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(bounds.size.width, y0.max(0.0))),
             CGRect::new(
-                CGPoint::new(0.0, y0 + vh),
-                CGSize::new(bounds.size.width, (bounds.size.height - y0 - vh).max(0.0)),
+                CGPoint::new(card.origin.x, card.origin.y),
+                CGSize::new(card.size.width, (y0 - card.origin.y).max(0.0)),
             ),
-            CGRect::new(CGPoint::new(0.0, y0), CGSize::new(vx.max(0.0), vh)),
+            CGRect::new(
+                CGPoint::new(card.origin.x, y0 + vh),
+                CGSize::new(
+                    card.size.width,
+                    (card.origin.y + card.size.height - y0 - vh).max(0.0),
+                ),
+            ),
+            CGRect::new(
+                CGPoint::new(card.origin.x, y0),
+                CGSize::new((vx - card.origin.x).max(0.0), vh),
+            ),
             CGRect::new(
                 CGPoint::new(vx + vw, y0),
-                CGSize::new((bounds.size.width - vx - vw).max(0.0), vh),
+                CGSize::new(
+                    (card.origin.x + card.size.width - vx - vw).max(0.0),
+                    vh,
+                ),
             ),
         ];
         for r in dim {
@@ -1334,9 +1386,14 @@ impl EditorView {
         let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
-            let cx = (frame.origin.x + point.x * sx).clamp(r, (bounds.size.width - r).max(r));
-            let cy = (frame.origin.y + frame.size.height - point.y * sy)
-                .clamp(r, (bounds.size.height - r).max(r));
+            let cx = (frame.origin.x + point.x * sx).clamp(
+                card.origin.x + r,
+                (card.origin.x + card.size.width - r).max(card.origin.x + r),
+            );
+            let cy = (frame.origin.y + frame.size.height - point.y * sy).clamp(
+                card.origin.y + r,
+                (card.origin.y + card.size.height - r).max(card.origin.y + r),
+            );
             let marker = CGRect::new(
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
@@ -2882,7 +2939,7 @@ fn icon_button(
     button.setBordered(false);
     button.setWantsLayer(true);
     if let Some(layer) = button.layer() {
-        layer.setCornerRadius(7.0);
+        layer.setCornerRadius(5.0);
     }
     // The 28×28 tile rides on constraints: the toolbar stack sizes
     // arranged views by autolayout and hugs a frame-only button down to
@@ -3326,7 +3383,6 @@ impl EditorWindow {
             leaf_buttons.push(button.clone());
             tool_buttons.push((tag, button));
         }
-        toolbar.setCustomSpacing_afterView(LEAF_PAIR_SPACING, &leaf_buttons[0]);
         // Zones: leafing | color + width | tools, separated by 1 pt
         // dividers with a wider gap around them.
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leaf_buttons[1]);
