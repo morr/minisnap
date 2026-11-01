@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventMask,
     NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
     NSGraphicsContext, NSImage, NSScreen, NSTextField, NSTextFieldDelegate, NSTextView,
-    NSView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowStyleMask,
+    NSView, NSWindow, NSWindowTitleVisibility, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -32,7 +32,7 @@ use crate::editor::{
 };
 use crate::editor_toolbar::{
     arrow_tuner_panel, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH, STROKE_MAX,
-    STROKE_MIN, ToolbarEvent, ToolbarView, Tool, TOOLBAR_HEIGHT, TOOLBAR_ROW_AXIS_FROM_TOP,
+    STROKE_MIN, ToolbarEvent, ToolbarState, ToolbarView, Tool, TOOLBAR_HEIGHT,
 };
 
 /// Checkerboard cell of the transparent-backdrop fill, in points: the
@@ -1281,30 +1281,48 @@ impl EditorView {
     fn redraw(&self) {
         // The redraw follows every state change a selection can ride on
         // (mouse-up commits, undo/redo), so it doubles as the hook that
-        // keeps the slider handle pointing at the selection's width.
-        self.sync_width_slider();
+        // keeps the toolbar in step with the selection (the slider handle
+        // rides the selection's width).
+        let state = self.toolbar_state();
+        if let Some(toolbar) = self.toolbar() {
+            toolbar.set_state(state);
+        }
         self.setNeedsDisplayInRect(self.bounds());
     }
 
-    /// Point the stroke-width slider — and the default width for new
-    /// elements — at the selected element's width, when the element is one
-    /// the slider styles. Selections of other kinds leave both as they are.
-    fn sync_width_slider(&self) {
-        let Some(slider) = self.toolbar().map(|toolbar| toolbar.width_slider()) else {
-            return;
-        };
-        let width = self.ivars().selection.get().and_then(|id| {
-            self.ivars()
-                .shot
-                .borrow()
-                .as_ref()
+    /// Snapshot the toolbar state from the document and the window side: a
+    /// selected stroke-bearing element pins the slider — and the width for
+    /// new elements — to its own width, other selections leave both as
+    /// they are. (The pure reduction `toolbar_state` in
+    /// `editor_toolbar` owns the same rules; this reads the live ivars.)
+    fn toolbar_state(&self) -> ToolbarState {
+        let ivars = self.ivars();
+        let shot = ivars.shot.borrow();
+        let (can_undo, can_redo, file_label) = shot
+            .as_ref()
+            .map(|shot| (shot.doc.can_undo(), shot.doc.can_redo(), shot.file_name()))
+            .unwrap_or((false, false, String::new()));
+        let selected_width = ivars.selection.get().and_then(|id| {
+            shot.as_ref()
                 .and_then(|shot| shot.doc.element(id))
                 .and_then(|el| stroke_width_of(&el.kind))
         });
-        let Some(width) = width else { return };
-        let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
-        slider.set_double_value(clamped);
-        self.ivars().stroke_width.set(clamped);
+        let stroke_width = match selected_width {
+            Some(width) => {
+                let clamped = width.clamp(STROKE_MIN, STROKE_MAX);
+                ivars.stroke_width.set(clamped);
+                clamped
+            }
+            None => ivars.stroke_width.get(),
+        };
+        ToolbarState {
+            tool: ivars.tool.get(),
+            stroke_width,
+            color: ivars.color.get(),
+            can_undo,
+            can_redo,
+            file_label,
+        }
     }
 
     /// Scale factors from image pixels to view points.
@@ -1810,7 +1828,6 @@ impl EditorView {
             eprintln!("editor: failed to apply the frame: {err}");
         }
         ivars.tool.set(None);
-        self.sync_tool_highlight();
         self.redraw();
         self.refit_window();
     }
@@ -1819,7 +1836,6 @@ impl EditorView {
     fn cancel_frame_edit(&self) {
         self.exit_frame_edit();
         self.ivars().tool.set(None);
-        self.sync_tool_highlight();
         self.redraw();
     }
 
@@ -1908,61 +1924,11 @@ impl EditorView {
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().density.set(name_density(&file_name));
         self.ivars().selection.set(None);
-        if let Some(toolbar) = self.toolbar() {
-            toolbar.set_file_label(&file_name);
-        }
         self.refit_window();
-        // The lights' alignment runs after the refit: at window setup the
-        // standard buttons have no superview yet (the titlebar builds out
-        // lazily), and the titlebar relayouts on resize.
-        self.align_traffic_lights();
-        // The stack settles the buttons' frames during refit; re-center the
-        // plates (and the swatch disc) on the settled bounds and refresh the
-        // tint/plate state, so the tiles read as equal squares in any
-        // window size.
-        self.sync_tool_highlight();
-        self.update_color_swatch();
-    }
-
-    /// Slide the system traffic lights' hosting view vertically so their
-    /// centers share the toolbar icon row's axis (`TOOLBAR_ROW_AXIS_FROM_TOP`
-    /// from the top edge; the titlebar parks them higher). The shift rides
-    /// the container's frame converted through content coordinates, which
-    /// absorbs the titlebar's flipped geometry; the titlebar is never
-    /// re-laid by us, so the offset holds until the next relayout — hence
-    /// the call on every displayed shot. Before the window is first shown
-    /// the buttons have no superview and the pass is a no-op.
-    fn align_traffic_lights(&self) {
-        let Some(window) = self.window() else {
-            return;
-        };
-        let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
-            return;
-        };
-        let Some(content) = window.contentView() else {
-            return;
-        };
-        // SAFETY: plain view-tree reads, no external invariants.
-        let Some(host) = (unsafe { close.superview() }) else {
-            return;
-        };
-        let in_content = host.convertRect_toView(host.bounds(), Some(&content));
-        let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
-        let center_y = in_content.origin.y + in_content.size.height / 2.0;
-        let dy = axis_y - center_y;
-        if dy == 0.0 {
-            return;
-        }
-        // SAFETY: plain view-tree reads, no external invariants.
-        let Some(superview) = (unsafe { host.superview() }) else {
-            return;
-        };
-        let target = CGRect::new(
-            CGPoint::new(in_content.origin.x, in_content.origin.y + dy),
-            in_content.size,
-        );
-        let target_in_superview = content.convertRect_toView(target, Some(&superview));
-        host.setFrame(target_in_superview);
+        // refit ends in a redraw, and the redraw pushes the toolbar state:
+        // the file label, the tint, the swatch and the lights' alignment
+        // (which must follow the refit — the titlebar relayouts on resize)
+        // all ride on that single push.
     }
 
     /// Show the previous (-1) or next (1) shot of the save folder by time;
@@ -2002,14 +1968,14 @@ impl EditorView {
     fn handle_toolbar_event(&self, event: ToolbarEvent) {
         match event {
             ToolbarEvent::ToolToggled(tool) => {
-                // Clicking the active tool again deselects it.
+                // Clicking the active tool again deselects it; the redraw
+                // at the end of each path repaints the highlight.
                 let next = if self.ivars().tool.get() == Some(tool) {
                     None
                 } else {
                     Some(tool)
                 };
                 self.ivars().tool.set(next);
-                self.sync_tool_highlight();
                 // The crop/resize tools bring up their adjustable frame;
                 // anything else (including deselecting the frame tool)
                 // tears it down.
@@ -2050,7 +2016,6 @@ impl EditorView {
             }
             ToolbarEvent::PresetSelected(color) => {
                 self.ivars().color.set(color);
-                self.update_color_swatch();
                 // A picked preset recolors the selected element (blur,
                 // which has no color, is skipped so undo never holds a
                 // no-op step).
@@ -2105,19 +2070,6 @@ impl EditorView {
         }
     }
 
-    /// Repaint the toolbar's active-tool highlight for the current tool.
-    fn sync_tool_highlight(&self) {
-        if let Some(toolbar) = self.toolbar() {
-            toolbar.update_tool_highlight(self.ivars().tool.get());
-        }
-    }
-
-    /// Show the current color on the toolbar swatch circle.
-    fn update_color_swatch(&self) {
-        if let Some(toolbar) = self.toolbar() {
-            toolbar.show_color(self.ivars().color.get());
-        }
-    }
 }
 
 /// Distance between two points.
@@ -2339,8 +2291,7 @@ impl EditorWindow {
         }
 
         *view.ivars().toolbar.borrow_mut() = Some(toolbar.clone());
-        view.sync_tool_highlight();
-        view.update_color_swatch();
+        view.redraw();
 
         EditorWindow { window, view }
     }

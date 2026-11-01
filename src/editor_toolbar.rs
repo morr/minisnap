@@ -24,7 +24,7 @@ use objc2_app_kit::{
     NSLayoutConstraintOrientation, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation,
-    NSView, NSViewController,
+    NSView, NSViewController, NSWindowButton,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGContext};
@@ -501,6 +501,29 @@ impl WidthSliderView {
     }
 }
 
+/// A snapshot of everything the toolbar displays, pushed as one value.
+/// The window computes it from the document state (the pure reduction is
+/// `toolbar_state`) and the strip repaints from it — it never pokes at
+/// individual controls from outside.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolbarState {
+    /// The active annotation tool (None: viewing mode).
+    pub tool: Option<Tool>,
+    /// The width the stroke-width slider shows: the selected element's
+    /// width when it is one the slider styles, else the width for new
+    /// elements.
+    pub stroke_width: f64,
+    /// The color the swatch disc shows (and new elements draw with).
+    pub color: Rgba,
+    /// Whether the journal can undo (a knob for the day undo gets a
+    /// button).
+    pub can_undo: bool,
+    /// Whether the journal can redo.
+    pub can_redo: bool,
+    /// The open shot's file name in the bar.
+    pub file_label: String,
+}
+
 /// The window-side sink for toolbar events.
 type OnEvent = Box<dyn Fn(ToolbarEvent)>;
 
@@ -963,22 +986,26 @@ impl ToolbarView {
         self.ivars().min_width.get()
     }
 
-    /// The stroke-width slider the strip hosts. Transitional: the window
-    /// still syncs the slider's knob with the selection until the slider
-    /// moves behind `set_state`.
-    pub fn width_slider(&self) -> Retained<WidthSliderView> {
-        self.ivars().width_slider.borrow().clone().expect("slider built")
-    }
-
-    /// Show the open shot's file name in the bar.
-    pub fn set_file_label(&self, name: &str) {
+    /// The single input: repaint the whole strip from the snapshot. The
+    /// traffic-lights alignment runs here too — it must follow every
+    /// window relayout, and the window pushes a fresh state after each
+    /// refit, so the pass rides along.
+    pub fn set_state(&self, state: ToolbarState) {
         if let Some(label) = self.ivars().file_label.borrow().as_ref() {
-            label.setStringValue(&NSString::from_str(name));
+            label.setStringValue(&NSString::from_str(&state.file_label));
         }
+        self.update_tool_highlight(state.tool);
+        self.show_color(state.color);
+        // The slider skips an equal value, so a push never re-enters the
+        // width handler as a phantom drag.
+        if let Some(slider) = self.ivars().width_slider.borrow().as_ref() {
+            slider.set_double_value(state.stroke_width);
+        }
+        self.align_traffic_lights();
     }
 
     /// Show the color on the toolbar swatch circle.
-    pub fn show_color(&self, color: [f64; 4]) {
+    fn show_color(&self, color: [f64; 4]) {
         let button = self.ivars().color_button.borrow().clone();
         let Some(button) = button.as_ref() else {
             return;
@@ -995,7 +1022,7 @@ impl ToolbarView {
     }
 
     /// Accent-wash the active tool's button, white-tint the others.
-    pub fn update_tool_highlight(&self, active: Option<Tool>) {
+    fn update_tool_highlight(&self, active: Option<Tool>) {
         self.ivars().active_tool.set(active);
         let accent: Retained<NSColor> = NSColor::controlAccentColor();
         let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -1023,6 +1050,48 @@ impl ToolbarView {
                 center_toolbar_layers(button);
             }
         });
+    }
+
+    /// Slide the system traffic lights' hosting view vertically so their
+    /// centers share the toolbar icon row's axis (`TOOLBAR_ROW_AXIS_FROM_TOP`
+    /// from the top edge; the titlebar parks them higher). The shift rides
+    /// the container's frame converted through content coordinates, which
+    /// absorbs the titlebar's flipped geometry; the titlebar is never
+    /// re-laid by us, so the offset holds until the next relayout — hence
+    /// the call on every state push (the window pushes after each refit).
+    /// Before the window is first shown the buttons have no superview and
+    /// the pass is a no-op.
+    fn align_traffic_lights(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
+            return;
+        };
+        let Some(content) = window.contentView() else {
+            return;
+        };
+        // SAFETY: plain view-tree reads, no external invariants.
+        let Some(host) = (unsafe { close.superview() }) else {
+            return;
+        };
+        let in_content = host.convertRect_toView(host.bounds(), Some(&content));
+        let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
+        let center_y = in_content.origin.y + in_content.size.height / 2.0;
+        let dy = axis_y - center_y;
+        if dy == 0.0 {
+            return;
+        }
+        // SAFETY: plain view-tree reads, no external invariants.
+        let Some(superview) = (unsafe { host.superview() }) else {
+            return;
+        };
+        let target = CGRect::new(
+            CGPoint::new(in_content.origin.x, in_content.origin.y + dy),
+            in_content.size,
+        );
+        let target_in_superview = content.convertRect_toView(target, Some(&superview));
+        host.setFrame(target_in_superview);
     }
 
     /// Restyle the controls under the cursor. Two surfaces are served
