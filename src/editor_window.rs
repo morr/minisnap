@@ -24,7 +24,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSDate, NSString, NSNotification};
 
-use crate::editor::drag::{DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX};
+use crate::editor::drag::{
+    DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX,
+};
 use crate::editor::text;
 use crate::editor::{
     name_density, render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba, Size,

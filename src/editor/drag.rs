@@ -47,7 +47,7 @@ pub(crate) enum Drag {
 }
 
 /// Which grabbable spot of the crop/resize frame is under the cursor.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum FrameSpot {
     Nw,
     N,
@@ -153,7 +153,13 @@ pub(crate) fn frame_rect(orig: Rect, spot: FrameSpot, start: Point, cur: Point) 
 /// by `CALLOUT_TEXT_OFFSET_PX`; across it, the block is centered on the
 /// base. The whole block is clamped inside the frame (4 px margin) — near an
 /// edge the block shifts inward, even if that brings it over the arrow.
-pub(crate) fn callout_anchor(base: Point, tip: Point, block_w: f64, block_h: f64, frame: Rect) -> Point {
+pub(crate) fn callout_anchor(
+    base: Point,
+    tip: Point,
+    block_w: f64,
+    block_h: f64,
+    frame: Rect,
+) -> Point {
     let margin = 4.0;
     let gap = CALLOUT_TEXT_OFFSET_PX;
     let max_x = (frame.max_x() - block_w - margin).max(margin);
@@ -212,7 +218,7 @@ pub(crate) const DEFAULT_TEXT_SIZE_PX: f64 = 32.0;
 
 /// What the open field editor is editing; also the payload of
 /// `Signal::BeginText`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TextTarget {
     /// A brand-new text or callout element; the color is frozen at the
     /// click, so a mid-edit palette change cannot rewrite it.
@@ -227,6 +233,7 @@ pub(crate) enum TextTarget {
 
 /// What a mouse-down decided about the element selection. The selection
 /// itself stays window state — the markers and the toolbar ride on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Select {
     /// The click was consumed without touching the selection.
     Keep,
@@ -237,6 +244,7 @@ pub(crate) enum Select {
 }
 
 /// An AppKit follow-up the window owes the interaction.
+#[derive(Debug, PartialEq)]
 pub(crate) enum Signal {
     /// Open the field editor for this target (a brand-new text/callout
     /// element or an existing element's re-edit).
@@ -775,55 +783,512 @@ fn id_is_textlike(elements: &[Element], id: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::hit_test::text_bounds;
 
-    #[test]
-    fn callout_anchor_sits_beside_the_base_away_from_the_tip() {
-        let frame = Rect::new(0.0, 0.0, 400.0, 300.0);
-        let base = Point::new(200.0, 150.0);
-        let (w, h) = (100.0, 40.0);
+    const RED: Rgba = [1.0, 0.0, 0.0, 1.0];
 
-        // A right-pointing arrow: the block goes left of the base,
-        // vertically centered on it.
-        let anchor = callout_anchor(base, Point::new(260.0, 150.0), w, h, frame);
-        assert_eq!(anchor, Point::new(200.0 - 16.0 - w, 150.0 - h / 2.0));
+    fn pt(x: f64, y: f64) -> Point {
+        Point::new(x, y)
+    }
 
-        // Left-pointing: the block goes right of the base.
-        let anchor = callout_anchor(base, Point::new(140.0, 150.0), w, h, frame);
-        assert_eq!(anchor, Point::new(200.0 + 16.0, 150.0 - h / 2.0));
+    /// A viewing-mode context: no tool, no frame, empty document.
+    fn ctx(elements: &[Element]) -> DownCtx<'_> {
+        DownCtx {
+            tool: None,
+            color: RED,
+            stroke_width: 4.0,
+            elements,
+            frame: None,
+            handle_tolerance: Point::new(8.0, 8.0),
+        }
+    }
 
-        // Down-pointing: the block goes above the base, horizontally
-        // centered on it.
-        let anchor = callout_anchor(base, Point::new(200.0, 220.0), w, h, frame);
-        assert_eq!(anchor, Point::new(200.0 - w / 2.0, 150.0 - 16.0 - h));
+    fn tool_ctx(mut base: DownCtx<'_>, tool: Tool) -> DownCtx<'_> {
+        base.tool = Some(tool);
+        base
+    }
 
-        // Up-pointing: below the base.
-        let anchor = callout_anchor(base, Point::new(200.0, 80.0), w, h, frame);
-        assert_eq!(anchor, Point::new(200.0 - w / 2.0, 150.0 + 16.0));
+    fn rect_element(id: u64) -> Element {
+        Element {
+            id,
+            kind: ElementKind::Rect {
+                rect: Rect::new(20.0, 40.0, 40.0, 30.0),
+                color: RED,
+                width: 4.0,
+            },
+        }
+    }
+
+    fn line_element(id: u64) -> Element {
+        Element {
+            id,
+            kind: ElementKind::Line {
+                a: pt(10.0, 10.0),
+                b: pt(50.0, 50.0),
+                color: RED,
+                width: 4.0,
+            },
+        }
+    }
+
+    fn text_element(id: u64) -> Element {
+        Element {
+            id,
+            kind: ElementKind::Text {
+                origin: pt(5.0, 80.0),
+                text: "WW".into(),
+                color: RED,
+                size: 32.0,
+            },
+        }
+    }
+
+    fn assert_add(command: Option<Command>, id: u64) -> Element {
+        match command {
+            Some(Command::AddElement(el)) => {
+                assert_eq!(el.id, id, "the machine must use the passed id");
+                el
+            }
+            other => panic!("expected AddElement, got {other:?}"),
+        }
     }
 
     #[test]
-    fn callout_anchor_shifts_inward_at_frame_edges() {
-        let frame = Rect::new(0.0, 0.0, 120.0, 200.0);
-        // A left-pointing arrow near the left edge would push the block
-        // past the right edge; the clamp shifts it fully inside.
-        let anchor = callout_anchor(
-            Point::new(30.0, 100.0),
-            Point::new(5.0, 100.0),
-            100.0,
-            40.0,
-            frame,
-        );
-        assert_eq!(anchor, Point::new(16.0, 80.0));
+    fn short_drag_with_any_draw_tool_is_a_click_without_an_element() {
+        for tool in [Tool::Arrow, Tool::Rect, Tool::Line, Tool::Pen, Tool::Blur, Tool::Callout] {
+            let mut machine = DragMachine::new();
+            let elements: Vec<Element> = Vec::new();
+            let outcome = machine.down(tool_ctx(ctx(&elements), tool), pt(10.0, 10.0));
+            assert_eq!(outcome.selection, Select::Clear);
+            machine.drag_to(pt(12.0, 11.0));
+            let outcome = machine.up(pt(12.0, 11.0), 1).expect("drag was active");
+            assert_eq!(outcome.command, None, "a 2 px drag is a plain click");
+            assert_eq!(outcome.signal, None, "no text phase for a short callout");
+            assert!(
+                machine.preview(&elements).extras.is_empty(),
+                "nothing previews after a click"
+            );
+        }
+    }
 
-        // An up-pointing arrow near the bottom edge: the block below the
-        // base does not fit and is clamped inside.
-        let anchor = callout_anchor(
-            Point::new(60.0, 180.0),
-            Point::new(60.0, 120.0),
-            100.0,
-            40.0,
-            frame,
+    #[test]
+    fn real_drag_commits_the_drawn_element_with_the_passed_id() {
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Arrow), pt(10.0, 10.0));
+        machine.drag_to(pt(50.0, 60.0));
+        let outcome = machine.up(pt(50.0, 60.0), 7).expect("drag was active");
+        let el = assert_add(outcome.command, 7);
+        match el.kind {
+            ElementKind::Arrow { a, b, color, width } => {
+                assert_eq!((a.x, a.y), (10.0, 10.0));
+                assert_eq!((b.x, b.y), (50.0, 60.0));
+                assert_eq!(color, RED);
+                assert_eq!(width, 4.0);
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+        // The fresh element stays unselected: no markers after drawing.
+        assert_eq!(outcome.signal, None);
+    }
+
+    #[test]
+    fn move_element_needs_a_real_drag_and_reports_the_delta() {
+        let elements = vec![rect_element(3)];
+        // Two pixels: a click, not a move.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(ctx(&elements), pt(21.0, 55.0));
+        assert_eq!(outcome.selection, Select::Element(3));
+        machine.drag_to(pt(23.0, 55.0));
+        let outcome = machine.up(pt(23.0, 55.0), 1).expect("drag was active");
+        assert_eq!(outcome.command, None, "a 2 px drag moves nothing");
+
+        // Forty pixels: one MoveElement with the whole delta.
+        let mut machine = DragMachine::new();
+        machine.down(ctx(&elements), pt(21.0, 55.0));
+        machine.drag_to(pt(45.0, 56.0));
+        machine.drag_to(pt(61.0, 55.0));
+        let outcome = machine.up(pt(61.0, 55.0), 1).expect("drag was active");
+        match outcome.command {
+            Some(Command::MoveElement(id, delta)) => {
+                assert_eq!(id, 3);
+                assert_eq!((delta.x, delta.y), (40.0, 0.0));
+            }
+            other => panic!("expected MoveElement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn endpoint_drag_moves_only_that_end() {
+        let elements = vec![line_element(5)];
+        let mut machine = DragMachine::new();
+        // The B end zone of the line (within 10 px of (50, 50)).
+        let outcome = machine.down(ctx(&elements), pt(49.0, 49.0));
+        assert_eq!(outcome.selection, Select::Element(5));
+        machine.drag_to(pt(80.0, 20.0));
+        let outcome = machine.up(pt(80.0, 20.0), 1).expect("drag was active");
+        match outcome.command {
+            Some(Command::MovePoint(id, endpoint, to)) => {
+                assert_eq!(id, 5);
+                assert_eq!(endpoint, Endpoint::B);
+                assert_eq!(to, pt(80.0, 20.0));
+            }
+            other => panic!("expected MovePoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewing_press_on_empty_space_signals_window_drag() {
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        let outcome = machine.down(ctx(&elements), pt(100.0, 100.0));
+        assert_eq!(outcome.selection, Select::Clear);
+        assert!(matches!(outcome.signal, Some(Signal::DragWindow)));
+        // No drag state behind the press: mouse-up is a no-op.
+        assert!(machine.up(pt(110.0, 110.0), 1).is_none());
+    }
+
+    #[test]
+    fn text_tool_starts_new_text_on_empty_and_over_shapes() {
+        let elements = vec![rect_element(2)];
+        // On the empty frame: the text editor opens, the selection clears.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(100.0, 100.0));
+        assert_eq!(outcome.selection, Select::Clear);
+        assert!(matches!(
+            outcome.signal,
+            Some(Signal::BeginText(TextTarget::New { callout: false, .. }))
+        ));
+        // Over a non-text element: a new text still starts, but the
+        // selection is untouched.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(21.0, 55.0));
+        assert_eq!(outcome.selection, Select::Keep);
+        assert!(matches!(
+            outcome.signal,
+            Some(Signal::BeginText(TextTarget::New { callout: false, .. }))
+        ));
+        assert!(machine.up(pt(21.0, 55.0), 1).is_none());
+    }
+
+    #[test]
+    fn click_on_a_text_element_edits_it_only_for_text_tools() {
+        let elements = vec![text_element(4)];
+        let bounds = text_bounds(pt(5.0, 80.0), "WW", 32.0).expect("bounds");
+        let inside = pt(5.0 + bounds.width / 2.0, 80.0 + bounds.height / 2.0);
+        // A text tool edits in place.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(tool_ctx(ctx(&elements), Tool::Text), inside);
+        assert_eq!(outcome.selection, Select::Keep);
+        assert_eq!(
+            outcome.signal,
+            Some(Signal::BeginText(TextTarget::Existing { id: 4 }))
         );
-        assert_eq!(anchor, Point::new(10.0, 156.0));
+        // Any other tool moves the element instead.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(tool_ctx(ctx(&elements), Tool::Arrow), inside);
+        assert_eq!(outcome.selection, Select::Element(4));
+        assert_eq!(outcome.signal, None);
+    }
+
+    #[test]
+    fn draft_is_real_rules() {
+        let stroke = |kind| draft_is_real(&kind);
+        // Rect: zero size is a click, both dimensions must clear the bar.
+        assert!(!stroke(ElementKind::Rect {
+            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            color: RED,
+            width: 4.0,
+        }));
+        assert!(!stroke(ElementKind::Rect {
+            rect: Rect::new(0.0, 0.0, 10.0, 2.0),
+            color: RED,
+            width: 4.0,
+        }));
+        assert!(stroke(ElementKind::Rect {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            color: RED,
+            width: 4.0,
+        }));
+        // Pen: a single point is a click; distant ends are a stroke.
+        assert!(!stroke(ElementKind::Pen {
+            points: vec![pt(1.0, 1.0)],
+            color: RED,
+            width: 4.0,
+        }));
+        assert!(stroke(ElementKind::Pen {
+            points: vec![pt(1.0, 1.0), pt(1.0, 2.0), pt(10.0, 10.0)],
+            color: RED,
+            width: 4.0,
+        }));
+        // Text drafts never come from drags.
+        assert!(!stroke(ElementKind::Text {
+            origin: pt(0.0, 0.0),
+            text: String::new(),
+            color: RED,
+            size: 32.0,
+        }));
+    }
+
+    #[test]
+    fn frame_rect_math_standardizes_and_moves_whole() {
+        let orig = Rect::new(20.0, 20.0, 60.0, 40.0);
+        // An NW handle dragged past the opposite corner: standardized, not
+        // negative.
+        let flipped = frame_rect(orig, FrameSpot::Nw, pt(20.0, 20.0), pt(100.0, 80.0));
+        assert_eq!(flipped, Rect::new(80.0, 60.0, 20.0, 20.0));
+        // The center spot translates the whole rect.
+        let moved = frame_rect(orig, FrameSpot::Center, pt(50.0, 40.0), pt(60.0, 55.0));
+        assert_eq!(moved, Rect::new(30.0, 35.0, 60.0, 40.0));
+        // An edge handle moves one edge only.
+        let east = frame_rect(orig, FrameSpot::E, pt(80.0, 40.0), pt(30.0, 40.0));
+        assert_eq!(east, Rect::new(20.0, 20.0, 10.0, 40.0));
+    }
+
+    #[test]
+    fn spot_at_honors_the_per_axis_tolerance() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        assert_eq!(spot_at(r, pt(2.0, -1.0), 8.0, 8.0), Some((FrameSpot::Nw, pt(0.0, 0.0))));
+        assert_eq!(
+            spot_at(r, pt(99.0, 101.0), 8.0, 8.0),
+            Some((FrameSpot::Se, pt(100.0, 100.0)))
+        );
+        assert_eq!(spot_at(r, pt(50.0, 50.0), 8.0, 8.0), None, "no center handle");
+        assert_eq!(spot_at(r, pt(20.0, 20.0), 4.0, 4.0), None, "outside the tolerance");
+    }
+
+    #[test]
+    fn crop_frame_roundtrip_settles_and_commits() {
+        let image = Size::new(200.0, 100.0);
+        let mut machine = DragMachine::new();
+        machine.begin_frame(false, image);
+        assert!(machine.frame_active());
+        assert_eq!(machine.current_frame(), Some(Rect::new(0.0, 0.0, 200.0, 100.0)));
+
+        // Grab the SE handle (cursor at the corner, tolerance 8 px) and
+        // pull in.
+        let frame = machine.current_frame();
+        let ctx = DownCtx {
+            tool: Some(Tool::Crop),
+            frame,
+            ..ctx(&[])
+        };
+        let outcome = machine.down(ctx, pt(200.0, 100.0));
+        assert_eq!(outcome.selection, Select::Keep, "frame clicks never select");
+        machine.drag_to(pt(150.0, 80.0));
+        // The in-flight rect previews.
+        assert_eq!(machine.current_frame(), Some(Rect::new(0.0, 0.0, 150.0, 80.0)));
+        // Settling commits nothing — the OK button and Enter do.
+        let outcome = machine.up(pt(150.0, 80.0), 1).expect("drag was active");
+        assert_eq!(outcome.command, None);
+        assert_eq!(machine.current_frame(), Some(Rect::new(0.0, 0.0, 150.0, 80.0)));
+
+        let command = machine.commit_frame(image);
+        assert_eq!(command, Some(Command::Crop(Rect::new(0.0, 0.0, 150.0, 80.0))));
+        assert!(!machine.frame_active(), "the mode is over");
+    }
+
+    #[test]
+    fn frame_commit_clamps_into_the_image() {
+        let image = Size::new(200.0, 100.0);
+        let mut machine = DragMachine::new();
+        machine.begin_frame(false, image);
+        let frame = machine.current_frame();
+        let ctx = DownCtx {
+            tool: Some(Tool::Crop),
+            frame,
+            ..ctx(&[])
+        };
+        machine.down(ctx, pt(200.0, 100.0));
+        // Dragging past the image edges: the clamp presses the rect back.
+        machine.drag_to(pt(250.0, 150.0));
+        machine.up(pt(250.0, 150.0), 1).expect("drag was active");
+        assert_eq!(
+            machine.commit_frame(image),
+            Some(Command::Crop(Rect::new(0.0, 0.0, 200.0, 100.0)))
+        );
+    }
+
+    #[test]
+    fn degenerate_frame_stays_up_for_another_try() {
+        let image = Size::new(200.0, 100.0);
+        let mut machine = DragMachine::new();
+        machine.begin_frame(false, image);
+        let frame = machine.current_frame();
+        let ctx = DownCtx {
+            tool: Some(Tool::Crop),
+            frame,
+            ..ctx(&[])
+        };
+        machine.down(ctx, pt(200.0, 100.0));
+        // Collapse the frame onto its own corner: under a pixel.
+        machine.drag_to(pt(0.0, 0.0));
+        machine.up(pt(0.0, 0.0), 1).expect("drag was active");
+        assert_eq!(machine.commit_frame(image), None, "degenerate frames wait");
+        assert!(machine.frame_active(), "the mode keeps running");
+    }
+
+    #[test]
+    fn resize_frame_commits_a_resize_command() {
+        let image = Size::new(160.0, 120.0);
+        let mut machine = DragMachine::new();
+        machine.begin_frame(true, image);
+        // The initial rect: the central 75%.
+        assert_eq!(machine.current_frame(), Some(Rect::new(20.0, 15.0, 120.0, 90.0)));
+        let frame = machine.current_frame();
+        let ctx = DownCtx {
+            tool: Some(Tool::Resize),
+            frame,
+            ..ctx(&[])
+        };
+        machine.down(ctx, pt(140.0, 105.0));
+        machine.drag_to(pt(80.0, 75.0));
+        machine.up(pt(80.0, 75.0), 1).expect("drag was active");
+        assert_eq!(
+            machine.commit_frame(image),
+            Some(Command::Resize(Size::new(60.0, 60.0)))
+        );
+    }
+
+    #[test]
+    fn crop_frame_miss_grabs_whole_resize_miss_grabs_nothing() {
+        let image = Size::new(160.0, 120.0);
+        // Crop: a click far from every handle moves the whole frame.
+        let mut machine = DragMachine::new();
+        machine.begin_frame(false, image);
+        let crop_ctx = DownCtx {
+            tool: Some(Tool::Crop),
+            frame: machine.current_frame(),
+            ..ctx(&[])
+        };
+        machine.down(crop_ctx, pt(60.0, 50.0));
+        machine.drag_to(pt(70.0, 55.0));
+        machine.up(pt(70.0, 55.0), 1).expect("drag was active");
+        assert_eq!(
+            machine.current_frame(),
+            Some(Rect::new(10.0, 5.0, 160.0, 120.0)),
+            "the whole frame followed the drag"
+        );
+
+        // Resize: a miss away from the handles starts no drag at all.
+        let mut machine = DragMachine::new();
+        machine.begin_frame(true, image);
+        let resize_ctx = DownCtx {
+            tool: Some(Tool::Resize),
+            frame: machine.current_frame(),
+            ..ctx(&[])
+        };
+        machine.down(resize_ctx, pt(60.0, 50.0));
+        machine.drag_to(pt(70.0, 55.0));
+        assert!(machine.up(pt(70.0, 55.0), 1).is_none(), "no drag was started");
+        assert_eq!(
+            machine.current_frame(),
+            Some(Rect::new(20.0, 15.0, 120.0, 90.0)),
+            "the frame never moved"
+        );
+    }
+
+    #[test]
+    fn callout_up_opens_the_text_phase_and_commit_lands_the_element() {
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Callout), pt(50.0, 50.0));
+        machine.drag_to(pt(100.0, 50.0));
+        let outcome = machine.up(pt(100.0, 50.0), 9).expect("drag was active");
+        // Phase two: no command yet, the field editor signal instead.
+        assert_eq!(outcome.command, None);
+        assert_eq!(
+            outcome.signal,
+            Some(Signal::BeginText(TextTarget::New {
+                origin: pt(50.0, 50.0),
+                callout: true,
+                color: RED,
+            }))
+        );
+
+        // The arrow previews (with empty text) while the input is open.
+        let preview = machine.preview(&elements);
+        assert_eq!(preview.extras.len(), 1);
+        assert!(
+            matches!(&preview.extras[0].kind, ElementKind::Callout { text, tip, .. }
+                if text.is_empty() && *tip == pt(100.0, 50.0))
+        );
+
+        // The anchor query places the block beside the base, away from the tip.
+        let anchor = machine
+            .pending_callout_anchor(Size::new(40.0, 20.0), Size::new(400.0, 300.0))
+            .expect("a pending callout");
+        assert!(anchor.x < 50.0, "the block sits left of the base");
+
+        // Committing the text lands the element and closes the phase.
+        let command = machine
+            .commit_callout_text("hi", Size::new(400.0, 300.0), 9)
+            .expect("a real text");
+        let el = assert_add(Some(command), 9);
+        match el.kind {
+            ElementKind::Callout { tip, anchor, text, color, size, width } => {
+                assert_eq!(tip, pt(100.0, 50.0));
+                assert!(anchor.x < 50.0, "anchored beside the base, away from the tip");
+                assert_eq!(text, "hi");
+                assert_eq!(color, RED);
+                assert_eq!(size, 32.0);
+                assert_eq!(width, 4.0);
+            }
+            other => panic!("expected callout, got {other:?}"),
+        }
+        assert!(machine.preview(&elements).extras.is_empty(), "the phase is over");
+        assert_eq!(
+            machine.commit_callout_text("again", Size::new(400.0, 300.0), 10),
+            None,
+            "a second commit has nothing to land"
+        );
+    }
+
+    #[test]
+    fn empty_text_drops_the_pending_callout() {
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Callout), pt(50.0, 50.0));
+        machine.drag_to(pt(100.0, 50.0));
+        machine.up(pt(100.0, 50.0), 9).expect("drag was active");
+        // Whitespace-only input is as good as empty.
+        assert_eq!(machine.commit_callout_text("  ", Size::new(400.0, 300.0), 9), None);
+        assert!(machine.preview(&elements).extras.is_empty(), "the arrow is gone");
+    }
+
+    #[test]
+    fn frame_edit_survives_a_frame_drag_settle_only() {
+        // A drag of a NON-frame kind must not disturb the frame rect.
+        let image = Size::new(200.0, 100.0);
+        let mut machine = DragMachine::new();
+        machine.begin_frame(false, image);
+        let elements = vec![rect_element(3)];
+        let ctx = DownCtx {
+            tool: Some(Tool::Crop),
+            frame: machine.current_frame(),
+            ..ctx(&elements)
+        };
+        machine.down(ctx, pt(200.0, 100.0));
+        machine.up(pt(195.0, 95.0), 1).expect("drag was active");
+        assert_eq!(
+            machine.current_frame(),
+            Some(Rect::new(0.0, 0.0, 195.0, 95.0)),
+            "the frame settles at the up point without a dragged event"
+        );
+    }
+
+    #[test]
+    fn callout_anchor_moves_where_dragged() {
+        // Regression guard for the anchor math through the machine: an
+        // up-pointing arrow puts the block below the base.
+        let anchor = callout_anchor(
+            pt(100.0, 100.0),
+            pt(100.0, 40.0),
+            60.0,
+            30.0,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        assert_eq!(anchor, Point::new(70.0, 116.0));
     }
 }
+
