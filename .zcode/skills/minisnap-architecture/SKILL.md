@@ -12,7 +12,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | Модуль | Ответственность | Ключевое |
 |---|---|---|
 | `src/main.rs` | входная точка | `app::run()` |
-| `src/app.rs` | жизненный цикл, трей-меню, маршрутизация действий, тик-насос событий | `AppController`, `MainJob`, `start_capture`, `capture_ready`, `open_editor` |
+| `src/app.rs` | жизненный цикл, трей-меню, идентичность экземпляра, маршрутизация действий, тик-насос событий | `AppController`, `MainJob`, `start_capture`, `capture_ready`, `open_editor`, `instance_identity` |
 | `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос событий, клавишные соответствия | `HotkeyAction`, `HotkeyRegistry`, `pending_actions`, `render_combo`, `scancode_to_key` |
 | `src/permission.rs` | разрешения Screen Recording / Accessibility | `preflight_screen_capture`, `request_screen_capture`, `is_accessibility_trusted` |
 | `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций | `PrefsWindow`, `build`, `ROW_CAPTURE`/`ROW_CAPTURE_EDIT`/`ROW_OPEN_LATEST` |
