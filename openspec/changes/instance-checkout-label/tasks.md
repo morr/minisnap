@@ -3,7 +3,7 @@
 ## 1. Метка чекаута
 
 - [x] 1.1 В `src/app.rs` добавить чистую `fn checkout_label(exe: &Path) -> String` (сканирование компонентов пути: пара `.worktrees/<branch>` → ветка, иначе `main`) с юнит-тестами: worktree-путь, путь основного чекаута, путь без `.worktrees`. Проверка: `cargo test` зелёный.
-- [ ] 1.2 В `app::run` вычислить метку через `instance_identity()`, напечатать в stderr `minisnap instance '<метка>' from <путь бинарника>` до создания контроллера, передать метку в `AppController::new` и сохранить в ivars `checkout_label`. Проверка: запуск бинарника печатает строку; `cargo build` чист.
+- [x] 1.2 В `app::run` вычислить метку через `instance_identity()`, напечатать в stderr `minisnap instance '<метка>' from <путь бинарника>` до создания контроллера, передать метку в `AppController::new` и сохранить в ivars `checkout_label`. Проверка: запуск бинарника печатает строку; `cargo build` чист.
 
 ## 2. Трей-меню и tooltip
 

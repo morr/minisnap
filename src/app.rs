@@ -2,7 +2,8 @@
 //! tray icon and the main menu.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::mpsc;
 
@@ -90,6 +91,11 @@ struct AppIvars {
     // it) and whether the permission is currently granted.
     permission_dialog_visible: Cell<bool>,
     permission_granted: Cell<bool>,
+    // Checkout label of this instance (branch name for a worktree build,
+    // "main" otherwise); shown in the tray menu header, tooltip and the
+    // preferences window title.
+    #[allow(dead_code)]
+    checkout_label: String,
 }
 
 define_class!(
@@ -240,7 +246,7 @@ define_class!(
 );
 
 impl AppController {
-    fn new(mtm: MainThreadMarker, config: Config) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, config: Config, checkout_label: String) -> Retained<Self> {
         let status_item = NSStatusBar::systemStatusBar()
             .statusItemWithLength(STATUS_ITEM_SQUARE_LENGTH);
         let button = status_item.button(mtm).expect("status item button");
@@ -338,6 +344,7 @@ impl AppController {
             monitor: RefCell::new(None),
             permission_dialog_visible: Cell::new(false),
             permission_granted: Cell::new(crate::permission::preflight_screen_capture()),
+            checkout_label,
         });
         // SAFETY: `init` on NSObject is the designated initializer of the root
         // class and has no superclass invariants beyond zeroed ivars.
@@ -769,12 +776,29 @@ fn checkout_label(exe: &Path) -> String {
     "main".to_owned()
 }
 
+/// This instance's identity: the checkout label plus the canonical
+/// executable path it was launched from.
+fn instance_identity() -> (String, PathBuf) {
+    let exe = std::env::current_exe()
+        .map(|exe| fs::canonicalize(&exe).unwrap_or(exe))
+        .unwrap_or_else(|_| PathBuf::from("<unknown>"));
+    let label = checkout_label(&exe);
+    (label, exe)
+}
+
 /// Boot the NSApplication as a menu-bar agent (no Dock icon, no windows),
 /// install the tray icon with its menu and hand control to the run loop.
 pub fn run() {
     let mtm = MainThreadMarker::new().expect("minisnap must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    let (checkout_label, exe_path) = instance_identity();
+    eprintln!(
+        "minisnap instance '{}' from {}",
+        checkout_label,
+        exe_path.display()
+    );
 
     let config = Config::load_or_create();
     eprintln!(
@@ -785,7 +809,7 @@ pub fn run() {
         config.retention
     );
 
-    let controller = AppController::new(mtm, config);
+    let controller = AppController::new(mtm, config, checkout_label);
     app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     // NSMenuItem targets and the app delegate hold weak references; the
     // controller (and its overlay) live for the whole process.
