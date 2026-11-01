@@ -1126,13 +1126,14 @@ impl EditorView {
     }
 
     /// The image card area: the canvas inset by the card gap on the
-    /// sides and the bottom, touching the toolbar strip on top. The
+    /// sides and the bottom (origin Y grows upward — the gap sits at the
+    /// window's bottom edge), touching the toolbar strip on top. The
     /// card's own paint (fill, border, rounding) lives in `draw`; this is
     /// the geometry the frame centers in.
     fn card_rect(&self) -> CGRect {
         let bounds = self.bounds();
         CGRect::new(
-            CGPoint::new(CARD_GAP, 0.0),
+            CGPoint::new(CARD_GAP, CARD_GAP),
             CGSize::new(
                 (bounds.size.width - 2.0 * CARD_GAP).max(0.0),
                 (bounds.size.height - CARD_GAP).max(0.0),
