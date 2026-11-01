@@ -24,7 +24,7 @@
 
 ## 3. Подключение к завершению захвата
 
-- [ ] 3.1 В `src/app.rs` в обработчике `OverlayOutcome::Selected` вызвать
+- [x] 3.1 В `src/app.rs` в обработчике `OverlayOutcome::Selected` вызвать
   `sound::play_shutter()` сразу после успешного `crop` (design D2 — звук
   до буфера и файла, один вызов на снимок); проверка: `cargo build`
   проходит.

@@ -755,6 +755,7 @@ impl AppController {
                     eprintln!("output: empty selection rect {pixel_rect:?}");
                     return;
                 };
+                crate::sound::play_shutter();
                 if let Err(e) = crate::output::copy_to_pasteboard(&image) {
                     eprintln!("output: pasteboard: {e}");
                 }
