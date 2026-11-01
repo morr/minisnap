@@ -1112,10 +1112,10 @@ impl OverlayView {
         // Logical-pixel sample around the cursor, kept fully inside the
         // bitmap; the cursor pixel stays the center cell.
         let half = LOUPE_SAMPLE_PX / 2.0;
-        let px = (cursor.x * scale / factor).round().clamp(half, lw - half);
-        let py = ((screen.height - cursor.y) * scale / factor)
-            .round()
-            .clamp(half, lh - half);
+        let cursor_logical =
+            crate::capture::geometry::display_point_to_logical_pixel(cursor, screen.height, scale, factor);
+        let px = cursor_logical.x.round().clamp(half, lw - half);
+        let py = cursor_logical.y.round().clamp(half, lh - half);
         let sample = CGRect::new(
             CGPoint::new(px - half, py - half),
             objc2_core_foundation::CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
@@ -1158,8 +1158,8 @@ impl OverlayView {
             Some((w, h)) => format!("{} × {}", w.round() as i64, h.round() as i64),
             None => format!(
                 "{} × {}",
-                (cursor.x * scale / factor).round() as i64,
-                ((screen.height - cursor.y) * scale / factor).round() as i64
+                cursor_logical.x.round() as i64,
+                cursor_logical.y.round() as i64
             ),
         };
         let label = &ivars.size_label;
@@ -1600,12 +1600,12 @@ impl OverlayView {
             // Click: capture the topmost T0 window under the cursor; a miss
             // (empty desktop area) takes the whole display. Window frames
             // are SCKit-global top-left points; the click converts from
-            // display-local AppKit the same way the pixel mapping does.
+            // display-local AppKit through the pixel mapping's Y flip at
+            // scale 1 (points, not pixels), plus the display's SCKit origin.
+            let screen_h = ivars.screen_frame.get().size.height;
             let sckit = ivars.display_frame_sckit.get();
-            let point_sckit = CGPoint::new(
-                sckit.origin.x + up.x,
-                sckit.origin.y + (ivars.screen_frame.get().size.height - up.y),
-            );
+            let local = crate::capture::geometry::display_point_to_pixel(up, screen_h, 1.0);
+            let point_sckit = CGPoint::new(sckit.origin.x + local.x, sckit.origin.y + local.y);
             let t0_windows = ivars.windows.borrow().clone();
             eprintln!(
                 "click: sckit point ({:.0},{:.0}), {} T0 windows",

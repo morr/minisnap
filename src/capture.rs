@@ -687,10 +687,8 @@ mod tests {
 ///   Y grows down; point coordinates on that display scale by the display's
 ///   `backingScaleFactor`.
 // Consumed by the overlay (selection, magnifier) and output (crop) modules.
-#[allow(dead_code)]
 pub mod geometry {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-    use objc2_core_graphics::CGRectContainsPoint;
 
     /// AppKit global point → ScreenCaptureKit global point.
     pub fn point_to_sckit(point: CGPoint, primary_height_pt: f64) -> CGPoint {
@@ -831,13 +829,18 @@ pub mod geometry {
         CGPoint::new(point.x * scale, (display_height_pt - point.y) * scale)
     }
 
-    /// Index of the first (front-to-back) window frame containing `point`,
-    /// or None — the click-to-window target. Zero-sized frames never hit.
-    #[allow(dead_code)]
-    pub fn topmost_window_at(frames: &[CGRect], point: CGPoint) -> Option<usize> {
-        frames
-            .iter()
-            .position(|f| f.size.width > 0.0 && f.size.height > 0.0 && CGRectContainsPoint(*f, point))
+    /// Display-local AppKit point → logical pixel point of the display
+    /// image downsampled by `factor` (the sampler's rounded backing scale,
+    /// never zero): what the loupe's sample rect and the coordinate readout
+    /// speak.
+    pub fn display_point_to_logical_pixel(
+        point: CGPoint,
+        display_height_pt: f64,
+        scale: f64,
+        factor: f64,
+    ) -> CGPoint {
+        let px = display_point_to_pixel(point, display_height_pt, scale);
+        CGPoint::new(px.x / factor, px.y / factor)
     }
 
     #[cfg(test)]
@@ -1034,26 +1037,16 @@ pub mod geometry {
         }
 
         #[test]
-        fn topmost_window_hits_front_to_back() {
-            let frames = [
-                rect(100.0, 100.0, 200.0, 100.0),
-                rect(0.0, 0.0, 500.0, 500.0),
-            ];
-            // Where both frames contain the point, the front one wins.
-            assert_eq!(topmost_window_at(&frames, CGPoint::new(120.0, 120.0)), Some(0));
-            // Outside the front window but inside the one behind it.
-            assert_eq!(topmost_window_at(&frames, CGPoint::new(20.0, 20.0)), Some(1));
-            // Desktop: no window contains the point.
-            assert_eq!(topmost_window_at(&frames, CGPoint::new(600.0, 600.0)), None);
-        }
-
-        #[test]
-        fn topmost_window_skips_zero_sized_frames() {
-            let frames = [
-                rect(10.0, 10.0, 0.0, 0.0),
-                rect(0.0, 0.0, 100.0, 100.0),
-            ];
-            assert_eq!(topmost_window_at(&frames, CGPoint::new(50.0, 50.0)), Some(1));
+        fn display_point_maps_to_logical_pixels_with_factor() {
+            // Factor 1 at 1x: the pixel mapping itself.
+            let p = display_point_to_logical_pixel(CGPoint::new(100.0, 450.0), 600.0, 1.0, 1.0);
+            assert_eq!((p.x, p.y), (100.0, 150.0));
+            // Retina 2x downsampled by the sampler factor 2: logical pixels.
+            let p = display_point_to_logical_pixel(CGPoint::new(100.0, 450.0), 600.0, 2.0, 2.0);
+            assert_eq!((p.x, p.y), (100.0, 150.0));
+            // A 2x display sampled at factor 1 keeps full-res pixels.
+            let p = display_point_to_logical_pixel(CGPoint::new(100.0, 450.0), 600.0, 2.0, 1.0);
+            assert_eq!((p.x, p.y), (200.0, 300.0));
         }
     }
 }
