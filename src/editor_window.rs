@@ -21,7 +21,7 @@ use objc2_app_kit::{
     NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow,
     NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
@@ -381,6 +381,25 @@ define_class!(
         #[unsafe(method(canBecomeKeyWindow))]
         fn __can_become_key_window(&self) -> bool {
             true
+        }
+
+        // The system hosts the traffic lights and calls these window methods
+        // on a real click (verified with CGEvent clicks on macOS 26, change
+        // editor-system-buttons). The miniaturize button sends
+        // `miniaturize:`, not `performMiniaturize:`; an accessory app has no
+        // dock to miniaturize into, so both paths hide the window and the
+        // next `show_shot` brings it back. Green stays native zoom: the
+        // window is `Resizable`, while `toggleFullScreen:` is a no-op
+        // without the `FullScreen` style bit, which would break the system
+        // corner rounding.
+        #[unsafe(method(miniaturize:))]
+        fn __miniaturize(&self, sender: Option<&AnyObject>) {
+            self.orderOut(sender);
+        }
+
+        #[unsafe(method(performMiniaturize:))]
+        fn __perform_miniaturize(&self, sender: Option<&AnyObject>) {
+            self.orderOut(sender);
         }
     }
 );
@@ -3461,7 +3480,9 @@ impl EditorWindow {
                 ),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::FullSizeContentView
-                    | NSWindowStyleMask::Closable,
+                    | NSWindowStyleMask::Closable
+                    | NSWindowStyleMask::Miniaturizable
+                    | NSWindowStyleMask::Resizable,
                 NSBackingStoreType::Buffered,
                 false,
             )
@@ -3472,15 +3493,10 @@ impl EditorWindow {
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
-        // An accessory app has no dock icon: a miniaturized window would be
-        // unreachable, and zoom is meaningless — the window is refit to
-        // every shot anyway. Hide both standard buttons; close stays.
-        // Bringing the three lights alive is editor-system-buttons.
-        for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
-            if let Some(button) = window.standardWindowButton(role) {
-                button.setHidden(true);
-            }
-        }
+        // Miniaturizable/Resizable light up the yellow and green buttons —
+        // without the bits AppKit draws them disabled. FullScreen stays out:
+        // with it the window loses the system corner rounding, and green
+        // zooms natively without it (change editor-system-buttons).
         // The light appearance everywhere: the popover and every system
         // control resolve against it.
         if let Some(aqua) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }) {
