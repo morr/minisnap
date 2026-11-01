@@ -10,7 +10,7 @@
 
 ## 3. Словарь драга — в editor/drag.rs
 
-- [ ] 3.1 Создать `src/editor/drag.rs` (декларация в `src/editor/mod.rs`): переезд типов `Drag`, `FrameSpot`, `FrameEdit`, `PendingCallout`, констант `MIN_DRAG_PX`, `CALLOUT_TEXT_OFFSET_PX` и функций `point_dist`, `draft_is_real`, `frame_rect`, `callout_anchor`, `spot_points`, `spot_at` (поиск ручки с допуском-параметром — из `frame_spot_at` окна). Окно импортирует словарь; ivars и структура обработчиков пока прежние. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — драг, коллаут, рамка работают как раньше.
+- [x] 3.1 Создать `src/editor/drag.rs` (декларация в `src/editor/mod.rs`): переезд типов `Drag`, `FrameSpot`, `FrameEdit`, `PendingCallout`, констант `MIN_DRAG_PX`, `CALLOUT_TEXT_OFFSET_PX` и функций `point_dist`, `draft_is_real`, `frame_rect`, `callout_anchor`, `spot_points`, `spot_at` (поиск ручки с допуском-параметром — из `frame_spot_at` окна). Окно импортирует словарь; ivars и структура обработчиков пока прежние. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — драг, коллаут, рамка работают как раньше. *(build/clippy/test зелёные, 98 тестов (тесты callout_anchor переехали в drag.rs вместе с функцией); live-каналы сессии мертвы (см. таск 1) — smoke: экземпляр с новым билдом запускался, редактор открылся, лог чистый (pid 92673, погашен); поведенческая проверка драга/коллаута/рамки ждёт ручной проверки)*
 
 ## 4. DragMachine — тонкие обработчики окна
 
