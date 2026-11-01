@@ -166,6 +166,22 @@ pub enum Endpoint {
     B,
 }
 
+/// An annotation tool the window can be switched to; the toolbar row lists
+/// them in declaration order. Crop and resize bring up the adjustable frame
+/// instead of drawing elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Arrow,
+    Rect,
+    Line,
+    Pen,
+    Text,
+    Callout,
+    Blur,
+    Crop,
+    Resize,
+}
+
 /// One deterministic edit. `Crop`/`Resize` mutate the base frame and
 /// transform the coordinates of every existing element.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -144,19 +144,7 @@ pub(crate) const COLOR_PRESETS: [Rgba; 9] = [
 /// minimum pointer target a pointer-driven control is expected to meet.
 const PALETTE_SWATCH_SIZE: f64 = 24.0;
 
-/// The annotation tools, in toolbar order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool {
-    Arrow,
-    Rect,
-    Line,
-    Pen,
-    Text,
-    Callout,
-    Blur,
-    Crop,
-    Resize,
-}
+pub use crate::editor::Tool;
 
 impl Tool {
     fn all() -> [Tool; 9] {
