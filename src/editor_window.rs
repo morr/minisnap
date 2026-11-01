@@ -27,8 +27,8 @@ use objc2_foundation::{NSDate, NSString, NSNotification};
 use crate::editor::hit_test::{Hit, text_bounds, top_hit};
 use crate::editor::text;
 use crate::editor::{
-    name_density, render, set_endpoint, shift_element, Command, Element, ElementKind, Endpoint,
-    OpenShot, Point, Rect, Rgba, Size,
+    clamp_crop_rect, name_density, render, set_endpoint, shift_element, Command, Element,
+    ElementKind, Endpoint, OpenShot, Point, Rect, Rgba, Size,
 };
 use crate::editor_toolbar::{
     arrow_tuner_panel, stroke_width_of, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH,
@@ -1791,12 +1791,8 @@ impl EditorView {
         };
         self.remove_frame_chrome();
         let (iw, ih) = self.image_size();
-        let r = edit.rect.standardize();
-        let x0 = r.x.max(0.0);
-        let y0 = r.y.max(0.0);
-        let x1 = r.max_x().min(iw as f64);
-        let y1 = r.max_y().min(ih as f64);
-        let (w, h) = ((x1 - x0).round(), (y1 - y0).round());
+        let r = clamp_crop_rect(edit.rect, iw as f64, ih as f64);
+        let (w, h) = (r.width.round(), r.height.round());
         if w < 1.0 || h < 1.0 {
             *ivars.frame_edit.borrow_mut() = Some(edit);
             self.layout_frame_chrome();
@@ -1806,7 +1802,7 @@ impl EditorView {
         let cmd = if edit.resize {
             Command::Resize(Size::new(w, h))
         } else {
-            Command::Crop(Rect::new(x0, y0, w, h))
+            Command::Crop(Rect::new(r.x, r.y, w, h))
         };
         let result = ivars
             .shot

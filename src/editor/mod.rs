@@ -242,13 +242,7 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
         }
         Command::Crop(rect) => {
             let (w, h) = image_size(&state.base);
-            let bounds = Rect::new(0.0, 0.0, w, h);
-            let rect = rect.standardize();
-            let x0 = rect.x.max(bounds.x);
-            let y0 = rect.y.max(bounds.y);
-            let x1 = rect.max_x().min(bounds.max_x());
-            let y1 = rect.max_y().min(bounds.max_y());
-            let clipped = Rect::new(x0, y0, x1 - x0, y1 - y0);
+            let clipped = clamp_crop_rect(*rect, w, h);
             if clipped.is_empty() {
                 return;
             }
@@ -286,6 +280,18 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
             }
         }
     }
+}
+
+/// Clamp a crop rect to the image bounds, standardized. The one owner of
+/// the crop clamp semantics: both the journal's `Crop` command and the
+/// editor's frame commit route their rect through here.
+pub fn clamp_crop_rect(rect: Rect, width: f64, height: f64) -> Rect {
+    let r = rect.standardize();
+    let x0 = r.x.max(0.0);
+    let y0 = r.y.max(0.0);
+    let x1 = r.max_x().min(width);
+    let y1 = r.max_y().min(height);
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
 /// Image size in pixels (the space all element coordinates live in).
@@ -1009,5 +1015,26 @@ mod tests {
             }
             other => panic!("expected arrow, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clamp_crop_rect_pulls_the_rect_into_the_image() {
+        // Fully inside: passes through unchanged.
+        assert_eq!(
+            clamp_crop_rect(Rect::new(5.0, 6.0, 10.0, 20.0), 64.0, 64.0),
+            Rect::new(5.0, 6.0, 10.0, 20.0)
+        );
+        // Negative origin and overshoot are pressed against the bounds.
+        assert_eq!(
+            clamp_crop_rect(Rect::new(-5.0, -5.0, 100.0, 100.0), 64.0, 32.0),
+            Rect::new(0.0, 0.0, 64.0, 32.0)
+        );
+        // A negative-drag rect is standardized before the clamp.
+        assert_eq!(
+            clamp_crop_rect(Rect::new(60.0, 60.0, -30.0, -40.0), 64.0, 64.0),
+            Rect::new(30.0, 20.0, 30.0, 40.0)
+        );
+        // Fully outside: empty — the caller's no-op signal.
+        assert!(clamp_crop_rect(Rect::new(100.0, 100.0, 10.0, 10.0), 64.0, 64.0).is_empty());
     }
 }
