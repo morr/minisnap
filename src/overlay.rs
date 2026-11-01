@@ -27,6 +27,8 @@ use objc2_quartz_core::{
 
 use crate::capture::{T0Capture, T0Surface, T0Window};
 
+use presentation::SurfaceMap;
+
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
     fn CGShieldingWindowLevel() -> i64;
@@ -132,6 +134,240 @@ enum OverlayState {
 /// Movement tolerance (in points) within which down+up counts as a click.
 const CLICK_TOLERANCE_PT: f64 = 3.0;
 
+/// Target presentation plumbing: the per-session surface↔screen pairing
+/// (`SurfaceMap`) and its queries. Pure — no AppKit calls — so it
+/// unit-tests on synthetic frames; the thin `for_surfaces` constructor is
+/// the only part that touches NSScreen.
+mod presentation {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+    use objc2_core_foundation::{CGPoint, CGRect};
+
+    use crate::capture::{self, geometry, T0Surface};
+
+    /// The live screen behind a surface: AppKit frame and backing scale.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct ScreenPair {
+        pub(crate) frame: CGRect,
+        pub(crate) scale: f64,
+    }
+
+    /// Surface↔screen pairing for one overlay session, built once at
+    /// show(): every surface is matched against the live screens by its
+    /// whole SCKit frame flipped into AppKit space (origin + size, small
+    /// tolerance). A surface without a live screen stays unpaired and is
+    /// unreachable for target switching — its display remains veiled for
+    /// the whole session. The screen list cannot change mid-session (a
+    /// display configuration change cancels the mode), so the pairing
+    /// holds until finish().
+    #[derive(Debug, Default)]
+    pub(crate) struct SurfaceMap {
+        pairs: Vec<Option<ScreenPair>>,
+    }
+
+    impl SurfaceMap {
+        /// Pair `surfaces` with the live screens. Main thread only.
+        pub(crate) fn for_surfaces(surfaces: &[T0Surface], mtm: MainThreadMarker) -> SurfaceMap {
+            let screens = NSScreen::screens(mtm)
+                .iter()
+                .map(|screen| (screen.frame(), screen.backingScaleFactor()))
+                .collect::<Vec<_>>();
+            let frames = surfaces
+                .iter()
+                .map(|surface| surface.display_frame_sckit)
+                .collect::<Vec<_>>();
+            Self::from_frames(&frames, &screens, capture::primary_screen_height(mtm))
+        }
+
+        /// Pure pairing, unit-tested on synthetic frames.
+        fn from_frames(
+            display_frames_sckit: &[CGRect],
+            screens: &[(CGRect, f64)],
+            primary_height_pt: f64,
+        ) -> SurfaceMap {
+            SurfaceMap {
+                pairs: display_frames_sckit
+                    .iter()
+                    .map(|display_frame| {
+                        screens
+                            .iter()
+                            .find(|&&(screen_frame, _)| {
+                                geometry::screen_matches_display(
+                                    screen_frame,
+                                    *display_frame,
+                                    primary_height_pt,
+                                    geometry::FRAME_MATCH_TOLERANCE_PT,
+                                )
+                            })
+                            .map(|&(frame, scale)| ScreenPair { frame, scale })
+                    })
+                    .collect(),
+            }
+        }
+
+        /// The paired screen of surface `index`, if it has one.
+        pub(crate) fn screen_of(&self, index: usize) -> Option<ScreenPair> {
+            self.pairs.get(index).copied().flatten()
+        }
+
+        /// The first surface other than `current` whose paired screen
+        /// contains the global AppKit point (half-open frame bounds) — the
+        /// target-switch candidate for the cursor position. Unpaired
+        /// surfaces never match. The current target is filtered out before
+        /// the search, not after: on mirrored setups two screens share a
+        /// frame, and searching first would find the target itself.
+        pub(crate) fn switch_candidate(&self, point: CGPoint, current: usize) -> Option<usize> {
+            self.pairs
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != current)
+                .find(|(_, pair)| pair.is_some_and(|p| frame_contains(p.frame, point)))
+                .map(|(index, _)| index)
+        }
+    }
+
+    /// Half-open frame containment, as the switching search has always
+    /// used it: origin in, `max` out.
+    fn frame_contains(frame: CGRect, point: CGPoint) -> bool {
+        point.x >= frame.origin.x
+            && point.x < frame.origin.x + frame.size.width
+            && point.y >= frame.origin.y
+            && point.y < frame.origin.y + frame.size.height
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+            CGRect::new(CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h))
+        }
+
+        fn pt(x: f64, y: f64) -> CGPoint {
+            CGPoint::new(x, y)
+        }
+
+        #[test]
+        fn pairs_surfaces_to_screens_by_full_frame() {
+            // Primary 900pt tall, external 1080p above it (AppKit y=900).
+            // SCKit space is 1980pt tall: external at y=0, primary at
+            // y=1080.
+            let screens = [(rect(0.0, 900.0, 1920.0, 1080.0), 2.0), (rect(0.0, 0.0, 1440.0, 900.0), 2.0)];
+            let map = SurfaceMap::from_frames(
+                &[rect(0.0, 0.0, 1920.0, 1080.0), rect(0.0, 1080.0, 1440.0, 900.0)],
+                &screens,
+                1980.0,
+            );
+            let external = map.screen_of(0).expect("external paired");
+            assert_eq!(
+                (external.frame.origin.x, external.frame.origin.y),
+                (0.0, 900.0)
+            );
+            assert_eq!(external.scale, 2.0);
+            let primary = map.screen_of(1).expect("primary paired");
+            assert_eq!(
+                (primary.frame.origin.x, primary.frame.origin.y),
+                (0.0, 0.0)
+            );
+        }
+
+        #[test]
+        fn twin_monitors_told_apart_by_origin() {
+            // Two identical monitors side by side: sizes alone cannot tell
+            // them apart, the whole frame must match.
+            let screens = [(rect(-1920.0, 0.0, 1920.0, 1080.0), 1.0), (rect(0.0, 0.0, 1920.0, 1080.0), 1.0)];
+            let map = SurfaceMap::from_frames(
+                &[rect(-1920.0, 0.0, 1920.0, 1080.0), rect(0.0, 0.0, 1920.0, 1080.0)],
+                &screens,
+                1080.0,
+            );
+            assert_eq!(map.screen_of(0).expect("left paired").frame.origin.x, -1920.0);
+            assert_eq!(map.screen_of(1).expect("right paired").frame.origin.x, 0.0);
+        }
+
+        #[test]
+        fn surface_without_live_screen_is_unpaired() {
+            let screens = [(rect(0.0, 0.0, 1440.0, 900.0), 2.0)];
+            // First surface pairs the screen; the second sits at a SCKit
+            // frame no live screen matches (primary height 1980: SCKit
+            // (0,900) is AppKit (0,0), outside the screen list).
+            let map = SurfaceMap::from_frames(
+                &[rect(0.0, 1080.0, 1440.0, 900.0), rect(0.0, 900.0, 1920.0, 1080.0)],
+                &screens,
+                1980.0,
+            );
+            assert!(map.screen_of(0).is_some());
+            assert!(map.screen_of(1).is_none());
+            // Out-of-range indices are unpaired too, not a panic.
+            assert!(map.screen_of(2).is_none());
+        }
+
+        #[test]
+        fn tolerance_absorbs_frame_rounding() {
+            // The two frameworks report frames with slight rounding
+            // differences; within FRAME_MATCH_TOLERANCE_PT they still pair.
+            let screens = [(rect(0.0, 899.5, 1920.0, 1080.5), 2.0)];
+            let map = SurfaceMap::from_frames(&[rect(0.0, 0.0, 1920.0, 1080.0)], &screens, 1980.0);
+            assert!(map.screen_of(0).is_some());
+        }
+
+        #[test]
+        fn switch_candidate_finds_other_target() {
+            // Two 1000pt screens side by side (primary height 1000), the
+            // second surface without a pair.
+            let screens = [(rect(0.0, 0.0, 1000.0, 1000.0), 1.0), (rect(1000.0, 0.0, 1000.0, 1000.0), 2.0)];
+            let map = SurfaceMap::from_frames(
+                &[
+                    rect(0.0, 0.0, 1000.0, 1000.0),
+                    rect(1000.0, 0.0, 1000.0, 1000.0),
+                    rect(5000.0, 0.0, 1000.0, 1000.0),
+                ],
+                &screens,
+                1000.0,
+            );
+            // Cursor over the current target: nothing to switch to.
+            assert_eq!(map.switch_candidate(pt(500.0, 500.0), 0), None);
+            // Cursor over the second screen: its surface wins.
+            assert_eq!(map.switch_candidate(pt(1500.0, 500.0), 0), Some(1));
+            // The unpaired surface is never a candidate, its virtual frame
+            // is not on any screen.
+            assert_eq!(map.switch_candidate(pt(5000.0, 500.0), 0), None);
+            // Current excluded, the first other covering surface wins.
+            assert_eq!(map.switch_candidate(pt(1500.0, 500.0), 1), None);
+        }
+
+        #[test]
+        fn switch_candidate_uses_half_open_bounds() {
+            let screens = [(rect(0.0, 0.0, 1000.0, 1000.0), 1.0), (rect(1000.0, 0.0, 1000.0, 1000.0), 1.0)];
+            let map = SurfaceMap::from_frames(
+                &[rect(0.0, 0.0, 1000.0, 1000.0), rect(1000.0, 0.0, 1000.0, 1000.0)],
+                &screens,
+                1000.0,
+            );
+            // Exactly on the boundary between the screens: belongs to the
+            // right one (origin in, max out).
+            assert_eq!(map.switch_candidate(pt(1000.0, 500.0), 0), Some(1));
+            // Past the far edge: nothing.
+            assert_eq!(map.switch_candidate(pt(2000.0, 500.0), 0), None);
+        }
+
+        #[test]
+        fn switch_candidate_filters_current_before_search() {
+            // Mirrored setup: two screens share one frame, two surfaces
+            // pair to it. With the current target filtered out first, the
+            // cursor over the shared frame still finds the mirror surface.
+            let screens = [(rect(0.0, 0.0, 1000.0, 1000.0), 1.0), (rect(0.0, 0.0, 1000.0, 1000.0), 1.0)];
+            let map = SurfaceMap::from_frames(
+                &[rect(0.0, 0.0, 1000.0, 1000.0), rect(0.0, 0.0, 1000.0, 1000.0)],
+                &screens,
+                1000.0,
+            );
+            assert_eq!(map.switch_candidate(pt(500.0, 500.0), 1), Some(0));
+            assert_eq!(map.switch_candidate(pt(500.0, 500.0), 0), Some(1));
+        }
+    }
+}
+
 struct OverlayIvars {
     window: RefCell<Option<Retained<OverlayWindow>>>,
     veils: RefCell<Vec<Retained<NSWindow>>>,
@@ -143,6 +379,8 @@ struct OverlayIvars {
     surfaces: RefCell<Vec<T0Surface>>,
     /// Index into `surfaces` of the current capture target.
     target: Cell<usize>,
+    /// Surface↔screen pairing for the session, built once at show().
+    surface_map: RefCell<SurfaceMap>,
     image: RefCell<Option<Retained<CGImage>>>,
     /// Full-image pixel size.
     image_size_px: Cell<(usize, usize)>,
@@ -258,6 +496,7 @@ define_class!(
                 on_done: RefCell::new(None),
                 surfaces: RefCell::new(Vec::new()),
                 target: Cell::new(0),
+                surface_map: RefCell::new(SurfaceMap::default()),
                 image: RefCell::new(None),
                 image_size_px: Cell::new((0, 0)),
                 display_frame_sckit: Cell::new(CGRect::ZERO),
@@ -990,20 +1229,8 @@ impl OverlayView {
         }
         let mouse = NSEvent::mouseLocation();
         let switch_to = {
-            let surfaces = ivars.surfaces.borrow();
-            (0..surfaces.len())
-                .filter(|index| *index != ivars.target.get())
-                .find(|index| {
-                    surfaces
-                        .get(*index)
-                        .and_then(Self::matched_screen)
-                        .is_some_and(|(frame, _)| {
-                            mouse.x >= frame.origin.x
-                                && mouse.x < frame.origin.x + frame.size.width
-                                && mouse.y >= frame.origin.y
-                                && mouse.y < frame.origin.y + frame.size.height
-                        })
-                })
+            let map = ivars.surface_map.borrow();
+            map.switch_candidate(mouse, ivars.target.get())
         };
         if let Some(index) = switch_to {
             self.switch_to_surface(index);
@@ -1015,28 +1242,6 @@ impl OverlayView {
         );
         ivars.mouse.set(point);
         self.update_hud(point, None);
-    }
-
-    /// The AppKit frame and backing scale of the live screen hosting
-    /// `surface`'s display: the SCKit frame is flipped into AppKit space
-    /// and matched against `NSScreen::screens` by whole frames (origin +
-    /// size, small tolerance). `None` — no screen matches; the surface
-    /// stays unreachable for target switching.
-    fn matched_screen(surface: &T0Surface) -> Option<(CGRect, f64)> {
-        let mtm = MainThreadMarker::new().expect("overlay on main thread");
-        let primary_height = crate::capture::primary_screen_height(mtm);
-        for screen in NSScreen::screens(mtm).iter() {
-            let frame = screen.frame();
-            if crate::capture::geometry::screen_matches_display(
-                frame,
-                surface.display_frame_sckit,
-                primary_height,
-                crate::capture::geometry::FRAME_MATCH_TOLERANCE_PT,
-            ) {
-                return Some((frame, screen.backingScaleFactor()));
-            }
-        }
-        None
     }
 
     /// Point the flat ivars (frozen frame, display frames, scale) at the
@@ -1059,18 +1264,25 @@ impl OverlayView {
     /// Main thread only.
     fn show(&self, t0: T0Capture, on_done: Box<dyn FnOnce(OverlayOutcome)>) {
         let ivars = self.ivars();
+        let mtm = MainThreadMarker::new().expect("overlay on main thread");
         if ivars.active.get() {
             eprintln!("overlay: capture request ignored, mode already active");
             return;
         }
         // The starting target must have a live screen behind it: without
-        // one there is nothing to show the frozen frame on.
-        let Some((screen_frame, scale)) = Self::matched_screen(&t0.surfaces[t0.target]) else {
+        // one there is nothing to show the frozen frame on. The pairing is
+        // session data: built once here, it serves every mouseMoved until
+        // finish() (the screen list cannot change mid-session — a display
+        // configuration change cancels the mode).
+        let map = SurfaceMap::for_surfaces(&t0.surfaces, mtm);
+        let Some(screen) = map.screen_of(t0.target) else {
             eprintln!("overlay: no live screen matches the capture target, dropping");
             return;
         };
+        let (screen_frame, scale) = (screen.frame, screen.scale);
         *ivars.surfaces.borrow_mut() = t0.surfaces;
         ivars.target.set(t0.target);
+        *ivars.surface_map.borrow_mut() = map;
         *ivars.windows.borrow_mut() = t0.windows;
         *ivars.on_done.borrow_mut() = Some(on_done);
         ivars.finishing.set(false);
@@ -1214,13 +1426,8 @@ impl OverlayView {
         if index == ivars.target.get() {
             return false;
         }
-        let screen = {
-            let surfaces = ivars.surfaces.borrow();
-            surfaces
-                .get(index)
-                .and_then(Self::matched_screen)
-        };
-        let Some((screen_frame, scale)) = screen else {
+        let screen = ivars.surface_map.borrow().screen_of(index);
+        let Some((screen_frame, scale)) = screen.map(|s| (s.frame, s.scale)) else {
             eprintln!("overlay: no live screen for surface {index}, target kept");
             return false;
         };
@@ -1506,6 +1713,7 @@ impl OverlayView {
         // The T0 surface set belongs to the finished mode; the selected
         // frame's reference travels inside the outcome.
         *ivars.surfaces.borrow_mut() = Vec::new();
+        *ivars.surface_map.borrow_mut() = SurfaceMap::default();
         let image = ivars.image.borrow_mut().take();
         let scale = ivars.scale.get();
         // The selection carries the frame to the output stage; a missing
