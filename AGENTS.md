@@ -83,4 +83,6 @@ lives inside the project at `.worktrees/<branch>` (the directory is already
 in `.gitignore`). Create the branch and the worktree in one step —
 `git worktree add -b <branch> .worktrees/<branch> [base]` — and remove the
 worktree with `git worktree remove .worktrees/<branch>`; the branch ref
-itself stays.
+itself stays. A minisnap built and run from a worktree follows the
+instance rules in «Working with a running app» — identify it by executable
+path, never by icon or window look.
