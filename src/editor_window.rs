@@ -662,9 +662,6 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
-    /// The file-name label in the toolbar (the window title is hidden,
-    /// the bar carries the name instead).
-    file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -723,7 +720,6 @@ define_class!(
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
-                file_label: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -2353,8 +2349,8 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: file-name label, size,
-    /// full redraw.
+    /// Show (or replace) the shot in the window: density, selection reset,
+    /// full refit.
     fn display_shot(&self, shot: OpenShot) {
         let file_name = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
@@ -2363,9 +2359,6 @@ impl EditorView {
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().density.set(name_density(&file_name));
         self.ivars().selection.set(None);
-        if let Some(label) = self.ivars().file_label.borrow().as_ref() {
-            label.setStringValue(&NSString::from_str(&file_name));
-        }
         self.refit_window();
     }
 
