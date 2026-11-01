@@ -39,12 +39,17 @@
 
 ## 3. Domain-skills pass
 
-- [ ] 3.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (карта модулей:
+- [x] 3.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (карта модулей:
   строка «переключение цели» → `SurfaceMap` + `present_target`; инвариант
   «спаривание считается один раз при show и живёт до конца сессии»; поток
   данных — построение карты в show, запрос кандидата в mouseMoved) и
   `.zcode/skills/minisnap-architecture/SKILL.md` (карта модулей: ключевые
-  имена overlay). Проверка: текст скиллов соответствует коду.
+  имена overlay). Проверка: текст скиллов соответствует коду. *(оба SKILL.md
+  обновлены: в minisnap-capture — строка карты «презентация цели», вход и
+  шаги 1–3 потока данных, два инварианта (спаривание SurfaceMap один раз за
+  сессию; сброс idle на обоих путях present_target); в minisnap-architecture —
+  ключевые имена overlay; сверено с кодом — все упомянутые имена на месте,
+  устаревших упоминаний matched_screen нет)*
 
 ## Workflow follow-up
 

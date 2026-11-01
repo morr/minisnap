@@ -18,7 +18,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций | `PrefsWindow`, `build`, `ROW_CAPTURE`/`ROW_CAPTURE_EDIT`/`ROW_OPEN_LATEST` |
 | `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция), миграция легаси-дефолтов | `Config`, `load_or_create`, `save_to`, `migrate_legacy_defaults` |
 | `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат | `capture_t0`, `T0Capture`, `T0Surface`, `T0Window`, `shareable_content`, `capture_display_image`, `mod geometry` |
-| `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler` |
+| `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler`, `SurfaceMap`, `present_target` |
 | `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки | `crop`, `copy_to_pasteboard`, `save_to_file`, `encode_png_atomic`, `latest_shot`, `sorted_shots`, `enforce_retention` |
 | `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` | `play_shutter`, `shutter_sound_paths`, `sound_disabled_by_system`, `PLAYER` |
 | `src/editor_window.rs` | окно редактора и канвас: ввод текста, chrome рамки; мышиные обработчики тонкие — `pixel_point` + пересылка в машину драга | `EditorWindow`, `EditorIvars`, `pixel_point` |
