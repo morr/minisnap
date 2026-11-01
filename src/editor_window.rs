@@ -48,8 +48,9 @@ const MARKER_RADIUS_PT: f64 = 4.5;
 /// gray (#F2F2F2) of the zcode chrome — no vibrancy anywhere.
 const WINDOW_BG: [f64; 4] = [242.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 1.0];
 
-/// Toolbar strip height, in points: room for the 28 pt buttons with air.
-const TOOLBAR_HEIGHT: f64 = 40.0;
+/// Toolbar strip height, in points: the 22 pt tile of the reference plus
+/// its air — the compact strip of the zcode window.
+const TOOLBAR_HEIGHT: f64 = 32.0;
 
 /// Leading padding of the toolbar row, in points: the cluster of three
 /// visible traffic lights ends at ~64 pt (the yellow button's right
