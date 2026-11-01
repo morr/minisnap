@@ -2673,6 +2673,10 @@ impl EditorView {
             label.setStringValue(&NSString::from_str(&file_name));
         }
         self.refit_window();
+        // The lights' alignment runs after the refit: at window setup the
+        // standard buttons have no superview yet (the titlebar builds out
+        // lazily), and the titlebar relayouts on resize.
+        self.align_traffic_lights();
         // The stack settles the buttons' frames during refit; re-center the
         // plates (and the swatch disc) on the settled bounds and refresh the
         // tint/plate state, so the tiles read as equal squares in any
@@ -2707,7 +2711,6 @@ impl EditorView {
         let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
         let center_y = in_content.origin.y + in_content.size.height / 2.0;
         let dy = axis_y - center_y;
-        eprintln!("TLA dy={:.1} host_y={:.1}", dy, in_content.origin.y);
         if dy == 0.0 {
             return;
         }
@@ -3726,6 +3729,14 @@ impl EditorWindow {
         // column, which stays the only chrome of the window.
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        // The toolbar strip is the window's titlebar for the system, and it
+        // must not drag the window: with movability on, macOS replays any
+        // press in the strip that a control does not claim (the width
+        // slider's tracking loop aside) as a window drag, and a press
+        // landing in the slider before its `mouseDown:` runs is stolen
+        // outright. The window still moves — the panel and the viewing-mode
+        // canvas drag it through their own mouse handlers.
+        window.setMovable(false);
         window.setHasShadow(true);
         // Miniaturizable/Resizable light up the yellow and green buttons —
         // without the bits AppKit draws them disabled. FullScreen stays out:
@@ -3748,48 +3759,6 @@ impl EditorWindow {
         window.setBackgroundColor(Some(&window_bg));
         // Toolbar hover styling rides on mouse-moved events.
         window.setAcceptsMouseMovedEvents(true);
-        // The traffic lights: the titlebar parks their centers above the
-        // toolbar icon row's axis; slide their hosting view down so the
-        // circles share the row axis. The shift rides the container's
-        // frame converted through content coordinates (handles the
-        // titlebar's flipped geometry); we never re-lay the titlebar, so
-        // the offset holds across refits.
-        if let (Some(close), Some(content)) = (
-            window.standardWindowButton(NSWindowButton::CloseButton),
-            window.contentView(),
-        ) {
-            // SAFETY: plain view-tree reads, no external invariants.
-            let host = unsafe { close.superview() };
-            if let Some(host) = host {
-                let in_content = host.convertRect_toView(host.bounds(), Some(&content));
-                let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
-                let center_y = in_content.origin.y + in_content.size.height / 2.0;
-                let dy = axis_y - center_y;
-                eprintln!(
-                    "TLS in_content=({:.1},{:.1},{:.1},{:.1}) axis={:.1} center={:.1} dy={:.1}",
-                    in_content.origin.x,
-                    in_content.origin.y,
-                    in_content.size.width,
-                    in_content.size.height,
-                    axis_y,
-                    center_y,
-                    dy
-                );
-                if dy != 0.0 {
-                    // SAFETY: plain view-tree reads, no external invariants.
-                    let superview = unsafe { host.superview() };
-                    if let Some(superview) = superview {
-                        let target = CGRect::new(
-                            CGPoint::new(in_content.origin.x, in_content.origin.y + dy),
-                            in_content.size,
-                        );
-                        let target_in_superview =
-                            content.convertRect_toView(target, Some(&superview));
-                        host.setFrame(target_in_superview);
-                    }
-                }
-            }
-        }
         // The window lives in the app controller for the whole process;
         // closing only hides it, the next shot reuses it (no second window).
         // SAFETY: plain setter on the freshly created window.
