@@ -2,6 +2,7 @@
 //! tray icon and the main menu.
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::mpsc;
 
@@ -752,6 +753,22 @@ impl AppController {
     }
 }
 
+/// Checkout identity of a running instance, derived from its executable
+/// path: a binary under `.worktrees/<branch>/` labels itself with the
+/// branch name, any other path is the main checkout. The label must agree
+/// with what `ps -axo comm` shows for the same process.
+fn checkout_label(exe: &Path) -> String {
+    let mut components = exe.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == std::ffi::OsStr::new(".worktrees") {
+            if let Some(branch) = components.next() {
+                return branch.as_os_str().to_string_lossy().into_owned();
+            }
+        }
+    }
+    "main".to_owned()
+}
+
 /// Boot the NSApplication as a menu-bar agent (no Dock icon, no windows),
 /// install the tray icon with its menu and hand control to the run loop.
 pub fn run() {
@@ -775,4 +792,46 @@ pub fn run() {
     std::mem::forget(controller);
 
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checkout_label;
+    use std::path::Path;
+
+    #[test]
+    fn label_from_worktree_bundle_path() {
+        let exe = Path::new(
+            "/Users/morr/develop/minisnap/.worktrees/editor-filename-label/\
+             target/release/minisnap.app/Contents/MacOS/minisnap",
+        );
+        assert_eq!(checkout_label(exe), "editor-filename-label");
+    }
+
+    #[test]
+    fn label_from_main_checkout_bundle_path() {
+        let exe = Path::new(
+            "/Users/morr/develop/minisnap/target/release/minisnap.app/\
+             Contents/MacOS/minisnap",
+        );
+        assert_eq!(checkout_label(exe), "main");
+    }
+
+    #[test]
+    fn label_from_path_without_worktrees() {
+        let exe = Path::new("/Applications/minisnap.app/Contents/MacOS/minisnap");
+        assert_eq!(checkout_label(exe), "main");
+    }
+
+    #[test]
+    fn label_from_bare_worktree_binary_path() {
+        let exe = Path::new("/Users/morr/develop/minisnap/.worktrees/overlay-follows-cursor/target/debug/minisnap");
+        assert_eq!(checkout_label(exe), "overlay-follows-cursor");
+    }
+
+    #[test]
+    fn label_when_worktrees_is_the_last_component() {
+        let exe = Path::new("/Users/morr/develop/minisnap/.worktrees");
+        assert_eq!(checkout_label(exe), "main");
+    }
 }
