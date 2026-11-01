@@ -166,6 +166,13 @@ const BAR_SPACING: f64 = 6.0;
 /// points: the wider gap that separates the toolbar's zones.
 const BAR_ZONE_SPACING: f64 = 12.0;
 
+/// Fixed width of the file-name label block, in points: the widest
+/// typical shot name measured at the label's 13 pt system font
+/// (`MiniSnap_2026-11-01_15-46-36@2x.png`, 251 pt) plus 10% — enough
+/// even for an `@10x` density marker (262 pt). One width for every
+/// shot, so leafing never shifts the neighboring controls.
+const FILE_LABEL_WIDTH: f64 = 276.0;
+
 /// Tint of an inactive toolbar symbol: near-black (#262626), readable on
 /// the light column whatever the surrounding colors are.
 const ICON_TINT: [f64; 4] = [38.0 / 255.0, 38.0 / 255.0, 38.0 / 255.0, 1.0];
@@ -3542,9 +3549,19 @@ impl EditorWindow {
         // secondary text, not a control — a drag on it moves the window.
         let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
         file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        file_label.setAlignment(NSTextAlignment::Center);
         file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-        // Long file names truncate in the middle instead of stretching
-        // the window's minimum width.
+        // The block rides a fixed width — one for every shot, so the
+        // row holds still across leafing; the height stays on the
+        // intrinsicContentSize, like the slider's.
+        file_label.setTranslatesAutoresizingMaskIntoConstraints(false);
+        file_label
+            .widthAnchor()
+            .constraintEqualToConstant(FILE_LABEL_WIDTH)
+            .setActive(true);
+        // The fixed width must beat the text's own size for names longer
+        // than the block: they truncate in the middle instead of fighting
+        // the constraint.
         file_label.setContentCompressionResistancePriority_forOrientation(
             250.0,
             NSLayoutConstraintOrientation::Horizontal,
