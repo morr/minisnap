@@ -20,6 +20,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат | `capture_t0`, `T0Capture`, `T0Surface`, `T0Window`, `shareable_content`, `capture_display_image`, `mod geometry` |
 | `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler` |
 | `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки | `crop`, `copy_to_pasteboard`, `save_to_file`, `encode_png_atomic`, `latest_shot`, `sorted_shots`, `enforce_retention` |
+| `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` | `play_shutter`, `shutter_sound_paths`, `sound_disabled_by_system`, `PLAYER` |
 | `src/editor_window.rs` | окно редактора: тулбар, инструменты, ввод текста, кроп/ресайз | `EditorWindow`, `Tool`, `Drag`, `EditorIvars`, `FrameEdit`, `PendingCallout` |
 | `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса по чистому оригиналу | `Element`, `ElementKind`, `Command`, `EditorDoc`, `Point`/`Rect`/`Rgba` |
 | `src/editor/render.rs` | рендер элементов и композита, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `pixelate_region` |
@@ -32,7 +33,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 1. Хоткей или пункт меню → `AppController::start_capture(edit)` (`src/app.rs`): preflight разрешения, конвертация позиции мыши `geometry::point_to_sckit`, фоновый `std::thread` → `capture::capture_t0(mouse_sckit)` — снимки всех дисплеев подряд в том же единственном фоновом потоке.
 2. Результат приезжает по `mpsc` как `MainJob::CaptureReady`; метод `tick:` (повторяющийся `NSTimer`, 50 мс) перекачивает jobs в главный поток и там же забирает `HotkeyRegistry::pending_actions()` — глобальные хоткеи опрашиваются, их обработчиков в чужих потоках нет.
 3. `capture_ready` → `Overlay::show(t0, callback)`: замороженный кадр дисплея с курсором (цель из `T0Capture.target`); пока режим активен, перевод курсора на другой дисплей переключает цель на его кадр.
-4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `output::copy_to_pasteboard` → `output::save_to_file`; при `edit` → `MainJob::OpenEditor { path }` через тот же тик.
+4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `sound::play_shutter` → `output::copy_to_pasteboard` → `output::save_to_file`; при `edit` → `MainJob::OpenEditor { path }` через тот же тик.
 5. `open_editor` → `session::OpenShot::open(path, default_root())` → единственное переиспользуемое `EditorWindow::show_shot(shot)`.
 6. Правки: `OpenShot::apply`/`apply_width`/`undo`/`redo` → `render::render_composite` → `output::encode_png_atomic` (файл снимка) + журнал сессии в tmp.
 
@@ -46,5 +47,5 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 |---|---|---|---|
 | `minisnap-shell` | оболочка приложения | `app.rs`, `config.rs`, `prefs.rs`, `hotkeys.rs`, `permission.rs` | `tray-app`, `global-hotkeys`, `preferences`, `screen-recording-permission` |
 | `minisnap-capture` | заморозка и выделение | `capture.rs`, `overlay.rs` | `frozen-capture` |
-| `minisnap-output` | вывод снимков | `output.rs` | `capture-output` |
+| `minisnap-output` | вывод снимков | `output.rs`, `sound.rs` | `capture-output` |
 | `minisnap-editor` | аннотирование | `editor_window.rs`, `src/editor/` | `shot-editor` |
