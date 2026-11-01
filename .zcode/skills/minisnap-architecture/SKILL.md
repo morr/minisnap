@@ -17,8 +17,8 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/permission.rs` | разрешения Screen Recording / Accessibility | `preflight_screen_capture`, `request_screen_capture`, `is_accessibility_trusted` |
 | `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций | `PrefsWindow`, `build`, `ROW_CAPTURE`/`ROW_CAPTURE_EDIT`/`ROW_OPEN_LATEST` |
 | `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция), миграция легаси-дефолтов | `Config`, `load_or_create`, `save_to`, `migrate_legacy_defaults` |
-| `src/capture.rs` | захват момента T0: дисплей под курсором, кадр в пикселях, список окон; единственный конвертер координат | `capture_t0`, `T0Capture`, `T0Window`, `shareable_content`, `capture_display_image`, `mod geometry` |
-| `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуаль соседних дисплеев | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler` |
+| `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат | `capture_t0`, `T0Capture`, `T0Surface`, `T0Window`, `shareable_content`, `capture_display_image`, `mod geometry` |
+| `src/overlay.rs` | полноэкранный оверлей заморозки: выделение, лупа, красная рамка, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `FrameSampler` |
 | `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки | `crop`, `copy_to_pasteboard`, `save_to_file`, `encode_png_atomic`, `latest_shot`, `sorted_shots`, `enforce_retention` |
 | `src/editor_window.rs` | окно редактора: тулбар, инструменты, ввод текста, кроп/ресайз | `EditorWindow`, `Tool`, `Drag`, `EditorIvars`, `FrameEdit`, `PendingCallout` |
 | `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса по чистому оригиналу | `Element`, `ElementKind`, `Command`, `EditorDoc`, `Point`/`Rect`/`Rgba` |
@@ -29,16 +29,16 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 
 ## Сквозной поток «хоткей → снимок → редактор»
 
-1. Хоткей или пункт меню → `AppController::start_capture(edit)` (`src/app.rs`): preflight разрешения, `capture::screen_under_cursor`, конвертация позиции мыши `geometry::point_to_sckit`, фоновый `std::thread` → `capture::capture_t0(mouse_sckit)`.
+1. Хоткей или пункт меню → `AppController::start_capture(edit)` (`src/app.rs`): preflight разрешения, конвертация позиции мыши `geometry::point_to_sckit`, фоновый `std::thread` → `capture::capture_t0(mouse_sckit)` — снимки всех дисплеев подряд в том же единственном фоновом потоке.
 2. Результат приезжает по `mpsc` как `MainJob::CaptureReady`; метод `tick:` (повторяющийся `NSTimer`, 50 мс) перекачивает jobs в главный поток и там же забирает `HotkeyRegistry::pending_actions()` — глобальные хоткеи опрашиваются, их обработчиков в чужих потоках нет.
-3. `capture_ready` → `Overlay::show(t0, screen_frame, scale, callback)`: замороженный кадр накрывает дисплей с курсором.
-4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image }` → `output::crop` → `output::copy_to_pasteboard` → `output::save_to_file`; при `edit` → `MainJob::OpenEditor { path }` через тот же тик.
+3. `capture_ready` → `Overlay::show(t0, callback)`: замороженный кадр дисплея с курсором (цель из `T0Capture.target`); пока режим активен, перевод курсора на другой дисплей переключает цель на его кадр.
+4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `output::copy_to_pasteboard` → `output::save_to_file`; при `edit` → `MainJob::OpenEditor { path }` через тот же тик.
 5. `open_editor` → `session::OpenShot::open(path, default_root())` → единственное переиспользуемое `EditorWindow::show_shot(shot)`.
 6. Правки: `OpenShot::apply`/`apply_width`/`undo`/`redo` → `render::render_composite` → `output::encode_png_atomic` (файл снимка) + журнал сессии в tmp.
 
 ## Сквозные конвенции
 
-Кратко: весь AppKit в главном потоке, единственный фоновый поток — захват T0 (результат по `mpsc` в тик); три системы координат (AppKit-пункты, SCKit-пункты, пиксели изображения) переводятся только через `capture::geometry`; `CGImage` неизменяем, редактор всегда перерисовывает композит с нуля; свои objc2-классы — `MainThreadOnly` с SAFETY-комментариями у каждого `unsafe`; заморозка T0 — один снимок, всё дальнейшее читает только его. Подробности — [references/conventions.md](references/conventions.md).
+Кратко: весь AppKit в главном потоке, единственный фоновый поток — захват T0 (все дисплеи снимаются им же один за другим, результат по `mpsc` в тик); три системы координат (AppKit-пункты, SCKit-пункты, пиксели изображения) переводятся только через `capture::geometry`; `CGImage` неизменяем, редактор всегда перерисовывает композит с нуля; свои objc2-классы — `MainThreadOnly` с SAFETY-комментариями у каждого `unsafe`; заморозка T0 — один набор снимков всех дисплеев, всё дальнейшее (оверлей, переключение цели, вырезание результата) читает только его. Подробности — [references/conventions.md](references/conventions.md).
 
 ## Домены и скилы
 
