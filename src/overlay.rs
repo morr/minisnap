@@ -4,7 +4,6 @@
 
 use std::cell::{Cell, RefCell};
 
-use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{
@@ -230,7 +229,6 @@ const BORDER_W_PT: f64 = 4.0;
 const BORDER_MIN_OPACITY: f64 = 0.55;
 const BORDER_FADE_IN_DUR: f64 = 0.25;
 const BORDER_PULSE_DUR: f64 = 0.8;
-const BORDER_FADE_OUT_DUR: f64 = 0.2;
 /// Animation key of the idle pulse on the border layer.
 const BORDER_PULSE_KEY: &str = "border-pulse";
 
@@ -1475,28 +1473,15 @@ impl OverlayView {
         ivars.axis_h_dark.setHidden(true);
         ivars.axis_h_light.setHidden(true);
 
-        // The border fades out; the window goes down in the fade's
-        // completion block, so the frozen frame and the dimming linger for
-        // the fade (a short freeze-frame flash). The guard keeps the window
-        // up if the mode was re-entered during the fade.
+        // Get out of the user's way first: the window drops the moment the
+        // mode ends, and only then the output stage runs on the exposed
+        // desktop (crop, shutter, clipboard, file). Nothing of the capture
+        // pipeline lingers on screen.
         let border = &ivars.border;
         border.removeAnimationForKey(&NSString::from_str(BORDER_PULSE_KEY));
-        let window = ivars.window.borrow().as_ref().map(|w| w.clone());
-        let view = self.retain();
-        CATransaction::begin();
-        CATransaction::setAnimationDuration(BORDER_FADE_OUT_DUR);
-        if let Some(window) = window {
-            let on_fade = RcBlock::new(move || {
-                if !view.ivars().active.get() {
-                    window.orderOut(None);
-                }
-            });
-            // SAFETY: the completion block runs on the main thread and only
-            // touches retained ObjC handles owned by the closure.
-            unsafe { CATransaction::setCompletionBlock(Some(&on_fade)) };
+        if let Some(window) = ivars.window.borrow().as_ref() {
+            window.orderOut(None);
         }
-        border.setOpacity(0.0);
-        CATransaction::commit();
 
         if let Some(on_done) = ivars.on_done.borrow_mut().take() {
             on_done(outcome);
