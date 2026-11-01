@@ -32,7 +32,7 @@ use objc2_foundation::{NSDate, NSString, NSNotification, NSRectEdge};
 use objc2_quartz_core::CALayer;
 
 use crate::editor::render;
-use crate::editor::{Command, EditorDoc, Element, ElementKind, Point, Rgba};
+use crate::editor::{EditorDoc, ElementKind, Point, Rgba};
 use crate::plates::{
     animate_plate_changes, center_toolbar_layers, disc, plate, DISC_LAYER_NAME, HOVER_BG,
     PLATE_LAYER_NAME, SWATCH_DISC, SWATCH_RING, SWATCH_RING_HOVER, TOOLBAR_PLATE_SIZE,
@@ -1862,6 +1862,7 @@ pub(crate) fn arrow_tuner_panel(mtm: MainThreadMarker, view: &ToolbarView) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::{Command, Element};
     use objc2_core_graphics::CGBitmapContextCreateImage;
 
     /// A tiny document with a real (blank) base image, so the reduction
