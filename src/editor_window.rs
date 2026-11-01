@@ -48,9 +48,13 @@ const MARKER_RADIUS_PT: f64 = 4.5;
 /// gray (#F2F2F2) of the zcode chrome — no vibrancy anywhere.
 const WINDOW_BG: [f64; 4] = [242.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 1.0];
 
-/// Toolbar strip height, in points: the 22 pt tile of the reference plus
-/// its air — the compact strip of the zcode window.
-const TOOLBAR_HEIGHT: f64 = 32.0;
+/// Toolbar strip height, in points: the reference's roomier air above
+/// the buttons and the shorter one between them and the card below.
+const TOOLBAR_HEIGHT: f64 = 36.0;
+
+/// Air above the toolbar buttons, in points: the top padding of the
+/// reference strip.
+const BAR_TOP_PAD: f64 = 9.0;
 
 /// Leading padding of the toolbar row, in points: the cluster of three
 /// visible traffic lights ends at ~64 pt (the yellow button's right
@@ -2237,10 +2241,14 @@ impl EditorView {
         // The default-button weight: Enter applies the frame, the button is
         // the frame mode's confirmation.
         ok.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
-        // An accent plate instead of the default bezel; the title renders
-        // white on it in the window's dark appearance.
+        // An accent plate instead of the default bezel; the button keeps
+        // the dark appearance so its title renders white on the accent in
+        // the light window.
         ok.setBordered(false);
         ok.setWantsLayer(true);
+        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
+            ok.setAppearance(Some(&dark));
+        }
         if let Some(layer) = ok.layer() {
             layer.setCornerRadius(6.0);
             layer.setBackgroundColor(Some(&NSColor::controlAccentColor().CGColor()));
@@ -3510,13 +3518,14 @@ impl EditorWindow {
         );
         content.addSubview(&panel);
         toolbar.setFrame(CGRect::new(
-            CGPoint::new(BAR_LEADING_PAD, 0.0),
-            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
+            CGPoint::new(
+                BAR_LEADING_PAD,
+                TOOLBAR_HEIGHT - BAR_TOP_PAD - TOOLBAR_BUTTON_SIZE.height / 2.0
+                    - SLIDER_HEIGHT / 2.0,
+            ),
+            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, SLIDER_HEIGHT),
         ));
-        toolbar.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
+        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
         panel.addSubview(&toolbar);
         view.setFrame(CGRect::new(
             CGPoint::ZERO,
