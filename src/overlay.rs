@@ -26,7 +26,7 @@ use objc2_quartz_core::{
     CATransaction,
 };
 
-use crate::capture::{T0Capture, T0Window};
+use crate::capture::{T0Capture, T0Surface, T0Window};
 
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
@@ -68,10 +68,13 @@ struct FrameSampler {
 #[derive(Debug)]
 pub enum OverlayOutcome {
     /// A final selection: the pixel rect of the T0 image plus the image
-    /// itself, for the crop in the output stage.
+    /// itself for the crop in the output stage, and the backing scale of
+    /// the display the selection finished on (the file name density
+    /// suffix).
     Selected {
         pixel_rect: CGRect,
         image: Retained<CGImage>,
+        scale: f64,
     },
     /// The mode was cancelled (Esc / other-display click / screen change).
     Cancelled,
@@ -136,6 +139,11 @@ struct OverlayIvars {
     active: Cell<bool>,
     finishing: Cell<bool>,
     on_done: RefCell<Option<Box<dyn FnOnce(OverlayOutcome)>>>,
+    /// Frozen frame per display at T0; switching the capture target walks
+    /// this list.
+    surfaces: RefCell<Vec<T0Surface>>,
+    /// Index into `surfaces` of the current capture target.
+    target: Cell<usize>,
     image: RefCell<Option<Retained<CGImage>>>,
     /// Full-image pixel size.
     image_size_px: Cell<(usize, usize)>,
@@ -246,6 +254,8 @@ define_class!(
                 active: Cell::new(false),
                 finishing: Cell::new(false),
                 on_done: RefCell::new(None),
+                surfaces: RefCell::new(Vec::new()),
+                target: Cell::new(0),
                 image: RefCell::new(None),
                 image_size_px: Cell::new((0, 0)),
                 display_frame_sckit: Cell::new(CGRect::ZERO),
@@ -640,10 +650,27 @@ impl OverlayView {
             ivars.root_layer.addSublayer(label);
         }
 
-        // Red mode border along the display perimeter, Monosnap-style. The
-        // rect is inset by half the stroke so the line stays fully inside
-        // the window. Invisible until show() fades it in.
+        // Red mode border along the display perimeter, Monosnap-style: the
+        // stroke color and geometry style once, the path rebuilt per target
+        // (it follows the display size). Invisible until show() fades it in.
         let border = &ivars.border;
+        border.setPath(None);
+        border.setStrokeColor(Some(&NSColor::redColor().CGColor()));
+        border.setFillColor(None);
+        border.setLineWidth(BORDER_W_PT);
+        border.setContentsScale(ivars.scale.get());
+        border.setOpacity(0.0);
+        // On top of every other HUD element.
+        ivars.root_layer.addSublayer(border);
+        self.rebuild_border_path();
+    }
+
+    /// Rebuild the red border path along the current display's perimeter.
+    /// The rect is inset by half the stroke so the line stays fully inside
+    /// the window. Called on the first attach and on every target switch
+    /// (displays differ in size and scale).
+    fn rebuild_border_path(&self) {
+        let ivars = self.ivars();
         let inset = BORDER_W_PT / 2.0;
         let size = ivars.screen_frame.get().size;
         let border_path = CGMutablePath::new();
@@ -671,14 +698,8 @@ impl OverlayView {
             CGMutablePath::add_line_to_point(Some(&border_path), std::ptr::null(), inset, inset);
         }
         let border_ref: &CGPath = &border_path;
-        border.setPath(Some(border_ref));
-        border.setStrokeColor(Some(&NSColor::redColor().CGColor()));
-        border.setFillColor(None);
-        border.setLineWidth(BORDER_W_PT);
-        border.setContentsScale(ivars.scale.get());
-        border.setOpacity(0.0);
-        // On top of every other HUD element.
-        ivars.root_layer.addSublayer(border);
+        ivars.border.setPath(Some(border_ref));
+        ivars.border.setContentsScale(ivars.scale.get());
     }
 
     /// Arm the idle pulse on the border. The model opacity stays 1.0, so
@@ -940,32 +961,65 @@ impl OverlayView {
         self.update_hud(point, None);
     }
 
-    /// Point the frame layer at the T0 image and show the overlay on the
-    /// captured screen. Main thread only.
-    fn show(
-        &self,
-        t0: T0Capture,
-        screen_frame: CGRect,
-        scale: f64,
-        on_done: Box<dyn FnOnce(OverlayOutcome)>,
-    ) {
+    /// The AppKit frame and backing scale of the live screen hosting
+    /// `surface`'s display: the SCKit frame is flipped into AppKit space
+    /// and matched against `NSScreen::screens` by whole frames (origin +
+    /// size, small tolerance). `None` — no screen matches; the surface
+    /// stays unreachable for target switching.
+    fn matched_screen(surface: &T0Surface) -> Option<(CGRect, f64)> {
+        let mtm = MainThreadMarker::new().expect("overlay on main thread");
+        let primary_height = crate::capture::primary_screen_height(mtm);
+        for screen in NSScreen::screens(mtm).iter() {
+            let frame = screen.frame();
+            if crate::capture::geometry::screen_matches_display(
+                frame,
+                surface.display_frame_sckit,
+                primary_height,
+                crate::capture::geometry::FRAME_MATCH_TOLERANCE_PT,
+            ) {
+                return Some((frame, screen.backingScaleFactor()));
+            }
+        }
+        None
+    }
+
+    /// Point the flat ivars (frozen frame, display frames, scale) at the
+    /// surface `index`, shown on `screen_frame` with `scale`.
+    fn apply_target(&self, index: usize, screen_frame: CGRect, scale: f64) {
+        let ivars = self.ivars();
+        let surfaces = ivars.surfaces.borrow();
+        let surface = &surfaces[index];
+        let w_px = CGImage::width(Some(&surface.image));
+        let h_px = CGImage::height(Some(&surface.image));
+        *ivars.image.borrow_mut() = Some(surface.image.clone());
+        ivars.image_size_px.set((w_px, h_px));
+        ivars.display_frame_sckit.set(surface.display_frame_sckit);
+        ivars.screen_frame.set(screen_frame);
+        ivars.scale.set(scale);
+    }
+
+    /// Point the frame layer at the T0 frame of the target surface (the
+    /// display under the cursor) and show the overlay on its screen.
+    /// Main thread only.
+    fn show(&self, t0: T0Capture, on_done: Box<dyn FnOnce(OverlayOutcome)>) {
         let ivars = self.ivars();
         if ivars.active.get() {
             eprintln!("overlay: capture request ignored, mode already active");
             return;
         }
-
-        let w_px = CGImage::width(Some(&t0.image));
-        let h_px = CGImage::height(Some(&t0.image));
-        *ivars.image.borrow_mut() = Some(t0.image);
-        ivars.image_size_px.set((w_px, h_px));
-        ivars.display_frame_sckit.set(t0.display_frame);
+        // The starting target must have a live screen behind it: without
+        // one there is nothing to show the frozen frame on.
+        let Some((screen_frame, scale)) = Self::matched_screen(&t0.surfaces[t0.target]) else {
+            eprintln!("overlay: no live screen matches the capture target, dropping");
+            return;
+        };
+        *ivars.surfaces.borrow_mut() = t0.surfaces;
+        ivars.target.set(t0.target);
         *ivars.windows.borrow_mut() = t0.windows;
-        ivars.screen_frame.set(screen_frame);
-        ivars.scale.set(scale);
         *ivars.on_done.borrow_mut() = Some(on_done);
         ivars.finishing.set(false);
         ivars.active.set(true);
+        self.apply_target(t0.target, screen_frame, scale);
 
         // Attach the layer tree to the view once.
         if !ivars.layers_attached.get() {
@@ -1007,6 +1061,7 @@ impl OverlayView {
 
         // Downsample the frame to logical pixels for the loupe and for the
         // axis-guide brightness sampling.
+        let (w_px, h_px) = ivars.image_size_px.get();
         let source = ivars.image.borrow();
         *ivars.sampler.borrow_mut() = source
             .as_ref()
@@ -1087,8 +1142,9 @@ impl OverlayView {
             .as_ref()
             .map(|w| w.isKeyWindow())
             .unwrap_or(false);
+        let (w_px, h_px) = ivars.image_size_px.get();
         eprintln!(
-            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, windows: {}, veils: {}",
+            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, surfaces: {}, windows: {}, veils: {}",
             w_px,
             h_px,
             screen_frame.origin.x,
@@ -1097,6 +1153,7 @@ impl OverlayView {
             screen_frame.size.height,
             app.isActive(),
             key_state,
+            ivars.surfaces.borrow().len(),
             ivars.windows.borrow().len(),
             ivars.veils.borrow().len()
         );
@@ -1238,12 +1295,20 @@ impl OverlayView {
             veil.orderOut(None);
         }
         ivars.veils.borrow_mut().clear();
+        // The T0 surface set belongs to the finished mode; the selected
+        // frame's reference travels inside the outcome.
+        *ivars.surfaces.borrow_mut() = Vec::new();
         let image = ivars.image.borrow_mut().take();
+        let scale = ivars.scale.get();
         // The selection carries the frame to the output stage; a missing
         // image (should never happen) downgrades to a cancelled mode.
         let outcome = match request {
             FinishRequest::Selected { pixel_rect } => match image {
-                Some(image) => OverlayOutcome::Selected { pixel_rect, image },
+                Some(image) => OverlayOutcome::Selected {
+                    pixel_rect,
+                    image,
+                    scale,
+                },
                 None => {
                     eprintln!("overlay: selection finished without a frame, dropping");
                     OverlayOutcome::Cancelled
@@ -1328,15 +1393,10 @@ impl Overlay {
         self.view.ivars().active.get()
     }
 
-    /// Enter the frozen-frame mode on the captured screen. Main thread only.
-    pub fn show(
-        &self,
-        t0: T0Capture,
-        screen_frame: CGRect,
-        scale: f64,
-        on_done: Box<dyn FnOnce(OverlayOutcome)>,
-    ) {
-        self.view.show(t0, screen_frame, scale, on_done);
+    /// Enter the frozen-frame mode on the display under the cursor.
+    /// Main thread only.
+    pub fn show(&self, t0: T0Capture, on_done: Box<dyn FnOnce(OverlayOutcome)>) {
+        self.view.show(t0, on_done);
     }
 
     /// Cancel the active mode without a result (e.g. display config change).

@@ -241,8 +241,8 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
     let mut surfaces = Vec::new();
     let mut target = None;
     for display in unsafe { content.displays() }.iter() {
-        let is_target = std::ptr::eq(display, &*target_display);
-        match capture_display_image(display) {
+        let is_target = std::ptr::eq(&*display, &*target_display);
+        match capture_display_image(&display) {
             Ok(image) => {
                 if is_target {
                     target = Some(surfaces.len());
