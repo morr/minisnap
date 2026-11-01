@@ -57,11 +57,19 @@ Moved → hover-проход. Часть его ivars — `Retained`-слоты,
 pub struct ToolbarState {
     pub tool: Option<Tool>,
     pub stroke_width: f64,
+    pub color: Rgba,
     pub can_undo: bool,
     pub can_redo: bool,
     pub file_label: String,
 }
 ```
+
+**Отклонение 3 (форма сохранена: interface).** Поле `color` в решениях не
+перечислено (список снимка: инструмент, ширина, can_undo/can_redo,
+enabled-правила, метка файла), но диск свотча — тулбарный контрол, и без
+цвета в снимке окну понадобился бы второй вход (`show_color`), что ломало бы
+«set_state — единственный вход». Цвет поехал в снимке; редукция проводит его
+насквозь (не вычисляет).
 
 Единственный вход. `set_state` делает всё state-зависимое: метку файла, подсветку
 активного инструмента, цвет свотча, значение слайдера (setDoubleValue — равное
