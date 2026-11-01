@@ -3566,9 +3566,12 @@ impl EditorWindow {
             250.0,
             NSLayoutConstraintOrientation::Horizontal,
         );
-        toolbar.addArrangedSubview(&file_label);
-        // Zones: leafing + file name | color + width | tools, separated
+        // Zones: leafing | file name | color + width | tools, separated
         // by 1 pt dividers with a wider gap around them.
+        let leafing_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&leafing_sep);
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leafing_sep);
+        toolbar.addArrangedSubview(&file_label);
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
         let leading_sep = bar_separator(mtm);
         toolbar.addArrangedSubview(&leading_sep);
