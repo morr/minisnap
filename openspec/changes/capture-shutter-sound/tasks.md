@@ -12,7 +12,7 @@
 
 ## 2. Модуль звука
 
-- [ ] 2.1 Создать `src/sound.rs` (design D1/D3/D4): чистая функция цепочки
+- [x] 2.1 Создать `src/sound.rs` (design D1/D3/D4): чистая функция цепочки
   путей системного звука (`Shutter.aif` в CoreAudio.component, затем
   `camera-shutter.aiff` в ScreenCapture.framework), чтение ключа
   `disable-sound` домена `com.apple.screencapture` через

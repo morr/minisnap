@@ -8,6 +8,7 @@ mod overlay;
 mod output;
 mod permission;
 mod prefs;
+mod sound;
 
 fn main() {
     app::run();
