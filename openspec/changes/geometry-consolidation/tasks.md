@@ -2,14 +2,21 @@
 
 ## 1. Containment — одна функция для обоих пространств
 
-- [ ] 1.1 В `capture::geometry` появляется `frame_contains_point(frame, point)`
+- [x] 1.1 В `capture::geometry` появляется `frame_contains_point(frame, point)`
   (полуоткрытые границы, нулевой кадр не содержит) с юнит-тестами (внутри,
   на origin, на max-краях, нулевой кадр, отрицательные координаты);
   `pick_display` (src/capture.rs:105–108) и `SurfaceMap::switch_candidate`
   (src/overlay.rs) переходят на неё, локальный `frame_contains` оверлея
   удаляется. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live —
   показ оверлея, переключение цели между дисплеями (если стойка
-  двухдисплейная), клик-за-окно.
+  двухдисплейная), клик-за-окно. *(build/clippy/test зелёные, 124 теста
+  (+2 containment); live: экземпляр по PID 2410 запускался, трей-меню
+  работает, preflight «screen recording: granted», но SCK отдаёт пустой
+  список дисплеев («no display under cursor») — TCC-барьер сессионного
+  билда, тот же, что в change'ах overlay-target-presentation и ранее; путь
+  захвата change'ом не трогается (семантика containment сохранена,
+  юнит-тесты покрывают) — live-проверка показа/переключения ждёт ручной
+  проверки)*
 
 ## 2. Точка→пиксели через geometry, `display_point_to_pixel` возвращается в работу
 

@@ -221,18 +221,11 @@ mod presentation {
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| *index != current)
-                .find(|(_, pair)| pair.is_some_and(|p| frame_contains(p.frame, point)))
+                .find(|(_, pair)| {
+                    pair.is_some_and(|p| geometry::frame_contains_point(p.frame, point))
+                })
                 .map(|(index, _)| index)
         }
-    }
-
-    /// Half-open frame containment, as the switching search has always
-    /// used it: origin in, `max` out.
-    fn frame_contains(frame: CGRect, point: CGPoint) -> bool {
-        point.x >= frame.origin.x
-            && point.x < frame.origin.x + frame.size.width
-            && point.y >= frame.origin.y
-            && point.y < frame.origin.y + frame.size.height
     }
 
     #[cfg(test)]

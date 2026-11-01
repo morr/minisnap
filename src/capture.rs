@@ -102,11 +102,7 @@ pub fn pick_display(
     for display in unsafe { content.displays() }.iter() {
         // SAFETY: plain property access on a live SCDisplay object.
         let frame = unsafe { display.frame() };
-        let inside = mouse_sckit.x >= frame.origin.x
-            && mouse_sckit.x < frame.origin.x + frame.size.width
-            && mouse_sckit.y >= frame.origin.y
-            && mouse_sckit.y < frame.origin.y + frame.size.height;
-        if inside {
+        if geometry::frame_contains_point(frame, mouse_sckit) {
             return Some(display);
         }
         if first.is_none() {
@@ -764,6 +760,17 @@ pub mod geometry {
         )
     }
 
+    /// Whether `point` lies inside `frame` with half-open bounds (origin
+    /// in, `max` out) — the "display/frame under the point" test shared by
+    /// display picking and target switching. Zero-sized frames never
+    /// contain.
+    pub fn frame_contains_point(frame: CGRect, point: CGPoint) -> bool {
+        point.x >= frame.origin.x
+            && point.x < frame.origin.x + frame.size.width
+            && point.y >= frame.origin.y
+            && point.y < frame.origin.y + frame.size.height
+    }
+
     /// A selection rect given in display-local AppKit points (bottom-left
     /// origin) → the corresponding pixel rect of the captured image
     /// (top-left origin). Edges round inward-safe: origin down, extent up,
@@ -931,6 +938,28 @@ pub mod geometry {
             assert_eq!((p.x, p.y), (0.0, 50.0));
             let p = clamp_point(CGPoint::new(10.0, 20.0), bounds);
             assert_eq!((p.x, p.y), (10.0, 20.0));
+        }
+
+        #[test]
+        fn frame_contains_point_half_open() {
+            let frame = rect(10.0, 20.0, 100.0, 50.0);
+            // Origin is in, opposite edges are out.
+            assert!(frame_contains_point(frame, CGPoint::new(10.0, 20.0)));
+            assert!(frame_contains_point(frame, CGPoint::new(60.0, 40.0)));
+            assert!(!frame_contains_point(frame, CGPoint::new(110.0, 40.0)));
+            assert!(!frame_contains_point(frame, CGPoint::new(60.0, 70.0)));
+            assert!(!frame_contains_point(frame, CGPoint::new(9.0, 40.0)));
+            assert!(!frame_contains_point(frame, CGPoint::new(60.0, 19.0)));
+        }
+
+        #[test]
+        fn frame_contains_point_zero_sized_and_negative_origin() {
+            // Zero-sized frames never contain, even at their origin.
+            assert!(!frame_contains_point(rect(5.0, 5.0, 0.0, 0.0), CGPoint::new(5.0, 5.0)));
+            // A display left of the primary has negative x in both spaces.
+            let frame = rect(-1920.0, 0.0, 1920.0, 1080.0);
+            assert!(frame_contains_point(frame, CGPoint::new(-100.0, 500.0)));
+            assert!(!frame_contains_point(frame, CGPoint::new(100.0, 500.0)));
         }
 
         #[test]
