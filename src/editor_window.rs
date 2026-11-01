@@ -2538,8 +2538,8 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Show (or replace) the shot in the window: density, selection reset,
-    /// full refit.
+    /// Show (or replace) the shot in the window: file-name label, density,
+    /// selection reset, full refit.
     fn display_shot(&self, shot: OpenShot) {
         let file_name = shot.file_name();
         // Any in-flight interaction belongs to the outgoing shot.
@@ -2548,6 +2548,9 @@ impl EditorView {
         *self.ivars().shot.borrow_mut() = Some(shot);
         self.ivars().density.set(name_density(&file_name));
         self.ivars().selection.set(None);
+        if let Some(label) = self.ivars().file_label.borrow().as_ref() {
+            label.setStringValue(&NSString::from_str(&file_name));
+        }
         self.refit_window();
     }
 

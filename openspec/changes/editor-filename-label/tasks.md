@@ -3,7 +3,7 @@
 ## 1. Подпись имени файла в тулбаре
 
 - [x] 1.1 Восстановить лейбл в `src/editor_window.rs` по design.md: ivar `file_label`, создание в построении тулбара (`NSTextField::labelWithString`, `secondaryLabelColor`, `ByTruncatingMiddle`, сопротивление сжатию 250 по горизонтали), вставка в стек после пары листания с `setCustomSpacing(BAR_ZONE_SPACING, label)`, сохранение в ivars рядом с `tool_buttons`/`width_slider`. Проверка: `cargo build` чист.
-- [ ] 1.2 Запись имени в `display_shot`: перед `refit_window` выставить `setStringValue` с именем файла показанного снимка. Проверка: `MINISNAP_DEBUG_OPEN_EDITOR=<path>` — при открытии в полосе после ◄/► показано имя файла; листание ◄/► меняет подпись на имя соседнего снимка; drag за подпись и свободное место полосы переносит окно; `cargo build` чист.
+- [x] 1.2 Запись имени в `display_shot`: перед `refit_window` выставить `setStringValue` с именем файла показанного снимка. Проверка: `MINISNAP_DEBUG_OPEN_EDITOR=<path>` — при открытии в полосе после ◄/► показано имя файла; листание ◄/► меняет подпись на имя соседнего снимка; drag за подпись и свободное место полосы переносит окно; `cargo build` чист.
 
 ## 2. Документация
 
