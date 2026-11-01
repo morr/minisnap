@@ -12,10 +12,15 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGDisplayCopyDisplayMode,
     CGDisplayMode, CGImage, CGImageAlphaInfo, CGContext, CGRectContainsPoint,
 };
+use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType};
+use objc2_core_graphics::{
+    CGWindowListCopyWindowInfo, CGWindowListOption, CGRectMakeWithDictionaryRepresentation,
+    kCGNullWindowID, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
-    SCCaptureResolutionType, SCWindow,
+    SCContentFilter, SCDisplay, SCScreenshotConfiguration, SCScreenshotManager, SCScreenshotOutput,
+    SCShareableContent, SCStreamConfiguration, SCCaptureResolutionType, SCWindow,
 };
 
 /// Height of the primary screen (origin at (0,0)) in points. ScreenCaptureKit
@@ -38,15 +43,14 @@ pub fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
 /// A visible regular window at the moment of capture (T0).
 #[derive(Debug, Clone)]
 pub struct T0Window {
-    /// Frame in ScreenCaptureKit global points (top-left origin, front-to-
-    /// back list order as reported by ScreenCaptureKit).
+    /// Frame in the window server's global points (top-left origin, same
+    /// space as ScreenCaptureKit's), from `CGWindowListCopyWindowInfo` —
+    /// the compositor's truth for both bounds and front-to-back order.
     // Consumed by the overlay's click-to-window hit-testing.
     #[allow(dead_code)]
     pub frame: CGRect,
     #[allow(dead_code)]
     pub window_id: u32,
-    #[allow(dead_code)]
-    pub title: Option<String>,
 }
 
 fn error_text(error: *mut NSError) -> String {
@@ -112,34 +116,91 @@ pub fn pick_display(
     first
 }
 
-/// Regular visible windows, front-to-back: layer 0 only, an owning app
-/// required. Minisnap's own on-screen windows take part like any other app's.
-/// Used for click-to-window hit-testing at T0.
-pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
+/// Regular visible windows at T0, front-to-back, from the window server's
+/// own list (`CGWindowListCopyWindowInfo`): layer 0, an owning process
+/// required, on-screen only. Minisnap's own on-screen windows take part like
+/// any other app's. Used for click-to-window hit-testing.
+///
+/// ScreenCaptureKit's `SCShareableContent` window list is deliberately not
+/// the source: it lags behind freshly created windows by minutes, keeps
+/// stale records of resized/closed windows (a winit/bevy game resized by a
+/// window manager ends up with wrong origins and phantom full-display
+/// entries), and its order does not follow the compositor. The window IDs
+/// are the same `CGWindowID` namespace, so the SCK list stays useful for
+/// rendering a candidate (see `resolve_click_target`).
+pub fn cg_visible_windows() -> Vec<T0Window> {
     let mut windows = Vec::new();
-    for window in unsafe { content.windows() }.iter() {
-        // SAFETY: plain property access on live SCWindow/SCRunningApplication
-        // objects returned by this shareable content.
-        let (layer, on_screen, app, frame, window_id, title) = unsafe {
-            (
-                window.windowLayer(),
-                window.isOnScreen(),
-                window.owningApplication(),
-                window.frame(),
-                window.windowID(),
-                window.title(),
-            )
-        };
-        if layer != 0 || !on_screen {
+    // SAFETY: plain C query; the option needs no permissions for bounds.
+    let Some(list) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly,
+        kCGNullWindowID,
+    ) else {
+        return windows;
+    };
+    let read_number = |dict: &CFDictionary,
+                       key: &objc2_core_foundation::CFString|
+     -> Option<i64> {
+        // SAFETY: CGWindowList dictionaries hold CFNumber values under the
+        // documented keys; the pointer is valid for the call.
+        let value = unsafe { dict.value(std::ptr::from_ref(key).cast::<std::ffi::c_void>()) }
+            as *mut CFNumber;
+        if value.is_null() {
+            return None;
+        }
+        // SAFETY: checked non-null above; a CGWindow number/layer/pid value.
+        let value = unsafe { &*value };
+        let mut out: i64 = 0;
+        // SAFETY: out is a valid i64 slot for the SInt64 read.
+        if !unsafe {
+            value.value(CFNumberType::SInt64Type, &mut out as *mut i64 as *mut std::ffi::c_void)
+        } {
+            return None;
+        }
+        Some(out)
+    };
+    for idx in 0..list.count() {
+        // SAFETY: idx is within the array; entries are CFDictionary.
+        let entry = unsafe { list.value_at_index(idx) } as *mut CFDictionary;
+        if entry.is_null() {
             continue;
         }
-        if app.is_none() {
+        // SAFETY: checked non-null above.
+        let dict = unsafe { &*entry };
+        // SAFETY: extern statics (const CFStringRef keys).
+        let (layer, pid, id) = unsafe { (&kCGWindowLayer, &kCGWindowOwnerPID, &kCGWindowNumber) };
+        if read_number(dict, layer) != Some(0) {
+            continue;
+        }
+        if read_number(dict, pid).is_none() {
+            continue;
+        }
+        let Some(window_id) = read_number(dict, id) else {
+            continue;
+        };
+        if window_id == 0 {
+            continue;
+        }
+        let mut frame = CGRect::ZERO;
+        // SAFETY: an extern static (const CFStringRef key) read as a value —
+        // taking `&kCGWindowBounds` would pass the static's slot instead of
+        // the string and crash the dictionary lookup.
+        let bounds_key: &objc2_core_foundation::CFString = unsafe { &kCGWindowBounds };
+        // SAFETY: kCGWindowBounds holds the bounds dictionary; frame is a
+        // valid CGRect slot.
+        let bounds = unsafe {
+            dict.value(std::ptr::from_ref(bounds_key).cast::<std::ffi::c_void>())
+                as *mut CFDictionary
+        };
+        if bounds.is_null() {
+            continue;
+        }
+        // SAFETY: checked non-null above.
+        if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&*bounds), &mut frame) } {
             continue;
         }
         windows.push(T0Window {
             frame,
-            window_id,
-            title: title.map(|t| t.to_string()),
+            window_id: window_id as u32,
         });
     }
     windows
@@ -262,7 +323,7 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
         }
     }
     let target = target.expect("the target display was captured");
-    let windows = visible_windows(&content);
+    let windows = cg_visible_windows();
     Ok(T0Capture {
         target,
         surfaces,
@@ -270,18 +331,34 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
     })
 }
 
+/// Verbose click-resolution trace to stderr (candidates, renders, patch
+/// deviations). The one-line markers (`click: …`) are unconditional; this
+/// gate adds the per-candidate detail that diagnoses a misbehaving click.
+pub fn click_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("MINISNAP_CLICK_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
 /// Pixel rect of the window the user actually sees under `point` in the
-/// frozen frame `frozen` (whose display spans `display_frame` in SCKit
-/// points), cropped from that frame.
+/// frozen frame `frozen` (whose display spans `display_frame` in global
+/// top-left points), cropped from that frame.
 ///
-/// The T0 window list is only candidates: ScreenCaptureKit picks up freshly
-/// created windows with a lag (a game restarted by a dev loop is visible on
-/// screen seconds before it shows up in the list), and the list order can
-/// disagree with the compositor, so the first containing entry may be a
-/// window that is actually behind or invisible. Each candidate is verified
-/// by rendering it alone and comparing its pixels at the point with the
-/// frozen frame; the first match is the answer. A total miss falls back to
-/// the plain list-order hit-test, then to the whole frame.
+/// The T0 window list comes from the window server (`cg_visible_windows`):
+/// its order is the compositor's stacking and its frames are the real
+/// bounds, so the topmost window containing the point is the answer by
+/// default. The ScreenCaptureKit window list only supplies `SCWindow`
+/// objects for the render check below — its own frames and order are not
+/// trustworthy (stale records, missing fresh windows).
+///
+/// The render check confirms the candidate is really visible at the point:
+/// the window is rendered alone and its pixels there are compared with the
+/// frozen frame. A confirmed candidate wins immediately; a miss can mean
+/// the window is transparent there (rounded corners, holes) or its content
+/// animates between T0 and the render — in the latter case the candidate is
+/// still the right answer, so the topmost candidate stays the fallback.
+/// No window at all — the whole frame (the desktop click).
 pub fn resolve_click_target(
     t0_windows: &[T0Window],
     point: CGPoint,
@@ -289,74 +366,66 @@ pub fn resolve_click_target(
     frozen: &CGImage,
 ) -> CGRect {
     let scale = image_scale(frozen, display_frame);
-    let fallback = |frames: &[CGRect]| {
-        match geometry::topmost_window_at(frames, point) {
-            Some(i) => geometry::window_frame_to_pixel_rect(frames[i], display_frame, scale),
-            None => CGRect::new(
-                CGPoint::ZERO,
-                CGSize::new(
-                    CGImage::width(Some(frozen)) as f64,
-                    CGImage::height(Some(frozen)) as f64,
-                ),
-            ),
-        }
-    };
-    let t0_frames: Vec<CGRect> = t0_windows.iter().map(|w| w.frame).collect();
-    // Fresh content covers windows created after the T0 snapshot and
-    // provides the live window objects needed for rendering.
-    let fresh = shareable_content().ok();
-    let fresh_pairs: Vec<(u32, CGRect)> = fresh
-        .as_ref()
-        .map(|content| {
-            // SAFETY: plain property access on live shareable content.
-            unsafe { content.windows() }
-                .iter()
-                .map(|w| {
-                    // SAFETY: plain property access on a live SCWindow.
-                    unsafe { (w.windowID(), w.frame()) }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let fresh_windows = fresh.as_ref().map(|content| unsafe { content.windows() });
-    for (id, frame) in candidate_frames(t0_windows, &fresh_pairs, point) {
-        let Some(list) = &fresh_windows else {
-            continue;
-        };
-        let Some(window) = list.iter().find(|w| unsafe { w.windowID() } == id) else {
-            continue;
-        };
-        if renders_as_seen(&window, frame, point, display_frame, frozen) {
-            return geometry::window_frame_to_pixel_rect(frame, display_frame, scale);
+    let crop_of = |frame: CGRect| geometry::window_frame_to_pixel_rect(frame, display_frame, scale);
+    let whole_frame = CGRect::new(
+        CGPoint::ZERO,
+        CGSize::new(
+            CGImage::width(Some(frozen)) as f64,
+            CGImage::height(Some(frozen)) as f64,
+        ),
+    );
+    let candidates = candidate_frames(t0_windows, point);
+    // Fresh shareable content provides the live SCWindow objects needed to
+    // render candidates; fetched off the main thread by the caller.
+    if let Some(content) = shareable_content().ok() {
+        // SAFETY: plain property access on live shareable content.
+        let live = unsafe { content.windows() };
+        for (id, frame) in &candidates {
+            let Some(window) = live.iter().find(|w| unsafe { w.windowID() } == *id) else {
+                if click_trace() {
+                    eprintln!("click-verify: id={id} not in the SCK list, skipped");
+                }
+                continue;
+            };
+            if click_trace() {
+                eprintln!(
+                    "click-verify: candidate id={id} frame=({:.0},{:.0},{:.0},{:.0})",
+                    frame.origin.x, frame.origin.y, frame.size.width, frame.size.height
+                );
+            }
+            if renders_as_seen(&window, *frame, point, display_frame, frozen) {
+                eprintln!("click: matched window id={id}");
+                return crop_of(*frame);
+            }
         }
     }
-    fallback(&t0_frames)
+    match candidates.first() {
+        // Fallback: the compositor's topmost window at the point — right
+        // when the render check failed on animation or a missing SCWindow.
+        Some((id, frame)) => {
+            eprintln!("click: no candidate verified, topmost id={id}");
+            crop_of(*frame)
+        }
+        None => {
+            eprintln!("click: no window at the point, whole frame");
+            whole_frame
+        }
+    }
 }
 
-/// Frames of click candidates in probe order: containing T0 windows in
-/// their list order first, then fresh windows the T0 list missed (matched
-/// by id), preserving the fresh list order. Capped — each candidate costs a
-/// window render.
-fn candidate_frames(
-    t0_windows: &[T0Window],
-    fresh: &[(u32, CGRect)],
-    point: CGPoint,
-) -> Vec<(u32, CGRect)> {
+/// Frames of click candidates in probe order: T0 windows containing the
+/// point, keeping the list's front-to-back order. Capped — each verified
+/// candidate costs a window render.
+fn candidate_frames(t0_windows: &[T0Window], point: CGPoint) -> Vec<(u32, CGRect)> {
     let contains = |frame: CGRect| {
         frame.size.width > 0.0 && frame.size.height > 0.0 && CGRectContainsPoint(frame, point)
     };
-    let mut out: Vec<(u32, CGRect)> = t0_windows
+    t0_windows
         .iter()
         .filter(|w| contains(w.frame))
         .map(|w| (w.window_id, w.frame))
-        .collect();
-    for (id, frame) in fresh {
-        if contains(*frame) && !out.iter().any(|(seen, _)| seen == id) {
-            out.push((*id, *frame));
-        }
-    }
-    out.truncate(5);
-    out
+        .take(5)
+        .collect()
 }
 
 /// Does the window's own content match the frozen frame at `point`? The
@@ -370,6 +439,9 @@ fn renders_as_seen(
     frozen: &CGImage,
 ) -> bool {
     let Some(render) = render_window(window) else {
+        if click_trace() {
+            eprintln!("click-verify: render failed for the candidate");
+        }
         return false;
     };
     let disp_scale = image_scale(frozen, display_frame);
@@ -380,7 +452,21 @@ fn renders_as_seen(
     let Some(b) = patch_at(&render, point, frame, win_scale) else {
         return false;
     };
-    patches_match(&a, &b)
+    if !click_trace() {
+        return patches_match(&a, &b);
+    }
+    let (dev, matched) = match (mean_deviation(&a, &b), patches_match(&a, &b)) {
+        (Some(mean), m) => (format!("{mean:.1}"), m),
+        (None, _) => ("n/a".to_string(), false),
+    };
+    eprintln!(
+        "click-verify: render {}x{} scale {:.2}/{:.2} patch dev={dev} matched={matched}",
+        CGImage::width(Some(&render)),
+        CGImage::height(Some(&render)),
+        disp_scale,
+        win_scale,
+    );
+    matched
 }
 
 /// Actual pixel-per-point scale of an image covering `frame`.
@@ -397,32 +483,33 @@ fn image_scale(image: &CGImage, frame: CGRect) -> f64 {
 /// on.
 fn render_window(window: &SCWindow) -> Option<Retained<CGImage>> {
     // SAFETY: plain init on a freshly allocated filter; the desktop-
-    // independent filter renders the window alone, ignoreShadows drops its
-    // shadow so the image maps 1:1 onto the window frame.
+    // independent filter renders the window alone.
     let filter = unsafe {
         SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
     };
-    // SAFETY: plain constructor.
-    let config = unsafe { SCStreamConfiguration::new() };
+    // SAFETY: plain constructor. ignoreShadows drops the window shadow so
+    // the image maps 1:1 onto the window frame; the SCStreamConfiguration
+    // shadow knob is a stream property the screenshot path does not honor.
+    let config = unsafe { SCScreenshotConfiguration::new() };
     // SAFETY: plain property setters on a freshly created configuration.
     unsafe {
-        config.setCaptureResolution(SCCaptureResolutionType::Best);
+        config.setIgnoreShadows(true);
         config.setShowsCursor(false);
-        config.setIgnoreShadowsSingleWindow(true);
     }
     let (tx, rx) = mpsc::channel::<Option<Retained<CGImage>>>();
-    let handler = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-        let result = if !error.is_null() || image.is_null() {
+    let handler = RcBlock::new(move |output: *mut SCScreenshotOutput, error: *mut NSError| {
+        let result = if !error.is_null() || output.is_null() {
             None
         } else {
-            // SAFETY: SCScreenshotManager passes a +1 retained image.
-            Some(unsafe { Retained::retain(image) }.expect("non-null screenshot image"))
+            // SAFETY: SCScreenshotManager passes a +1 retained output.
+            let output = unsafe { Retained::retain(output) }.expect("non-null screenshot output");
+            unsafe { output.sdrImage() }
         };
         let _ = tx.send(result);
     });
     // SAFETY: class method with an owned completion handler.
     unsafe {
-        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+        SCScreenshotManager::captureScreenshotWithFilter_configuration_completionHandler(
             &filter,
             &config,
             Some(&handler),
@@ -478,13 +565,19 @@ fn patch_at(image: &CGImage, point: CGPoint, frame: CGRect, scale: f64) -> Optio
     Some(unsafe { std::slice::from_raw_parts(data, side as usize * side as usize * 4) }.to_vec())
 }
 
-/// Close-enough patch comparison: mean per-channel deviation under a small
-/// tolerance. The same content through the same capture pipeline differs by
-/// a few units at most; different windows differ by a lot. Fully
-/// transparent pixels carry no content and are skipped.
-fn patches_match(a: &[u8], b: &[u8]) -> bool {
+/// Patch comparison bar: the mean per-channel deviation between the same
+/// content captured through the display and the single-window pipelines is
+/// a few units, while unrelated windows (even two dark ones) sit noticeably
+/// above that, so the bar stays tight — a loose one mistakes a terminal for
+/// an animated game scene behind it.
+const PATCH_MATCH_TOLERANCE: f64 = 8.0;
+
+/// Mean per-channel deviation between two RGBA patches; None when they
+/// share no comparable pixels (fully transparent pixels carry no content
+/// and are skipped).
+fn mean_deviation(a: &[u8], b: &[u8]) -> Option<f64> {
     if a.len() != b.len() || a.is_empty() {
-        return false;
+        return None;
     }
     let mut sum = 0u64;
     let mut used = 0u64;
@@ -497,7 +590,13 @@ fn patches_match(a: &[u8], b: &[u8]) -> bool {
             + (i32::from(ca[2]) - i32::from(cb[2])).unsigned_abs() as u64;
         used += 1;
     }
-    used > 0 && (sum as f64) / (used as f64 * 3.0) < 16.0
+    (used > 0).then(|| (sum as f64) / (used as f64 * 3.0))
+}
+
+/// Close-enough patch comparison: mean per-channel deviation under
+/// `PATCH_MATCH_TOLERANCE`.
+fn patches_match(a: &[u8], b: &[u8]) -> bool {
+    mean_deviation(a, b).is_some_and(|dev| dev < PATCH_MATCH_TOLERANCE)
 }
 
 #[cfg(test)]
@@ -506,23 +605,15 @@ mod tests {
     use objc2_foundation::{NSDictionary, NSString};
 
     #[test]
-    fn click_candidates_t0_order_first_then_fresh_missed() {
+    fn click_candidates_keep_t0_front_to_back_order() {
         let point = CGPoint::new(100.0, 100.0);
         let inside = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 200.0));
         let outside = CGRect::new(CGPoint::new(500.0, 500.0), CGSize::new(50.0, 50.0));
-        let win = |id: u32, frame: CGRect| T0Window {
-            frame,
-            window_id: id,
-            title: None,
-        };
+        let win = |id: u32, frame: CGRect| T0Window { frame, window_id: id };
         let t0 = vec![win(1, inside), win(2, outside), win(3, inside)];
-        let fresh = vec![(2, outside), (4, inside), (1, inside)];
-        // T0 containing windows keep their list order; fresh adds only what
-        // the T0 list missed (4); 2 is outside the point and 1 is a dupe.
-        assert_eq!(
-            candidate_frames(&t0, &fresh, point),
-            vec![(1, inside), (3, inside), (4, inside)]
-        );
+        // Only windows containing the point, in the list's (compositor's)
+        // order — that order decides both the probe order and the fallback.
+        assert_eq!(candidate_frames(&t0, point), vec![(1, inside), (3, inside)]);
     }
 
     #[test]
@@ -533,11 +624,20 @@ mod tests {
             .map(|i| T0Window {
                 frame: inside,
                 window_id: i,
-                title: None,
             })
             .collect();
-        let out = candidate_frames(&t0, &[], point);
+        let out = candidate_frames(&t0, point);
         assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn cg_windows_returns_sane_frames() {
+        // Parses the live window list without crashing; bounds and ids are
+        // read through the CF dictionary keys, which once passed a pointer
+        // to the key static instead of the key and killed the process.
+        let windows = cg_visible_windows();
+        assert!(!windows.is_empty());
+        assert!(windows.iter().all(|w| w.frame.size.width > 0.0 && w.window_id != 0));
     }
 
     #[test]

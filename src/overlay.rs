@@ -151,6 +151,10 @@ struct OverlayIvars {
     /// Visible regular windows at capture time (T0), front-to-back, for
     /// click-to-window hit-testing.
     windows: RefCell<Vec<T0Window>>,
+    /// Pending click resolution: the background thread's channel answering
+    /// with the resolved pixel rect. Polled from the app tick on the main
+    /// thread (SCK calls must leave the blocked main thread alone).
+    resolving: RefCell<Option<std::sync::mpsc::Receiver<CGRect>>>,
     /// Overlay window frame = captured screen frame (AppKit points).
     screen_frame: Cell<CGRect>,
     scale: Cell<f64>,
@@ -260,6 +264,7 @@ define_class!(
                 windows: RefCell::new(Vec::new()),
                 screen_frame: Cell::new(CGRect::ZERO),
                 scale: Cell::new(1.0),
+                resolving: RefCell::new(None),
                 frame_layer: CALayer::new(),
                 state: Cell::new(OverlayState::Idle),
                 drag_start: Cell::new(CGPoint::ZERO),
@@ -1069,6 +1074,9 @@ impl OverlayView {
         *ivars.windows.borrow_mut() = t0.windows;
         *ivars.on_done.borrow_mut() = Some(on_done);
         ivars.finishing.set(false);
+        // A stale receiver from a cancelled session must not eat the new
+        // session's clicks (the mouse guards) or deliver its late answer.
+        *ivars.resolving.borrow_mut() = None;
         ivars.active.set(true);
         self.apply_target(t0.target, screen_frame, scale);
 
@@ -1318,7 +1326,18 @@ impl OverlayView {
 
     fn handle_mouse_down(&self, event: &NSEvent) {
         let ivars = self.ivars();
+        if crate::capture::click_trace() {
+            eprintln!(
+                "mouse-down: active={}, resolving={}",
+                ivars.active.get(),
+                ivars.resolving.borrow().is_some()
+            );
+        }
         if !ivars.active.get() {
+            return;
+        }
+        // A click resolution is in flight; the overlay is about to close.
+        if ivars.resolving.borrow().is_some() {
             return;
         }
         let point = self.local_point(event);
@@ -1365,8 +1384,28 @@ impl OverlayView {
         );
     }
 
+    /// Picks up a resolved click rect from the background resolver (if any)
+    /// and finishes the mode with it. Called from the app tick on the main
+    /// thread; until the answer arrives the overlay stays on screen.
+    fn poll_resolved_click(&self) {
+        let Some(rx) = self.ivars().resolving.borrow_mut().take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(rect) => self.finish(FinishRequest::Selected { pixel_rect: rect }),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.ivars().resolving.replace(Some(rx));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
     fn handle_mouse_up(&self, event: &NSEvent) {
         let ivars = self.ivars();
+        // A click resolution is in flight; the next tick finishes the mode.
+        if ivars.resolving.borrow().is_some() {
+            return;
+        }
         if ivars.state.get() != OverlayState::Drag {
             return;
         }
@@ -1388,7 +1427,7 @@ impl OverlayView {
                 sckit.origin.x + up.x,
                 sckit.origin.y + (ivars.screen_frame.get().size.height - up.y),
             );
-            let t0_windows = ivars.windows.borrow();
+            let t0_windows = ivars.windows.borrow().clone();
             eprintln!(
                 "click: sckit point ({:.0},{:.0}), {} T0 windows",
                 point_sckit.x,
@@ -1396,23 +1435,37 @@ impl OverlayView {
                 t0_windows.len()
             );
             // The list is only candidates: freshness and stacking order are
-            // verified by rendering (see resolve_click_target).
-            let rect = match ivars.image.borrow().as_ref() {
-                Some(frozen) => crate::capture::resolve_click_target(
-                    &t0_windows,
-                    point_sckit,
-                    sckit,
-                    frozen,
-                ),
+            // verified by rendering (see resolve_click_target). The whole
+            // resolution runs off the main thread — it fetches SCK content
+            // and renders windows, and SCK completions do not reach a main
+            // thread blocked on the answer. The result lands via
+            // poll_resolved_click on the app tick.
+            match ivars.image.borrow().as_ref() {
+                Some(frozen) => {
+                    let frozen = frozen.clone();
+                    let sckit = ivars.display_frame_sckit.get();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    ivars.resolving.replace(Some(rx));
+                    std::thread::spawn(move || {
+                        let rect = crate::capture::resolve_click_target(
+                            &t0_windows,
+                            point_sckit,
+                            sckit,
+                            &frozen,
+                        );
+                        let _ = tx.send(rect);
+                    });
+                    return;
+                }
                 None => {
                     let (w_px, h_px) = ivars.image_size_px.get();
-                    CGRect::new(
+                    let rect = CGRect::new(
                         CGPoint::ZERO,
                         objc2_core_foundation::CGSize::new(w_px as f64, h_px as f64),
-                    )
+                    );
+                    self.finish(FinishRequest::Selected { pixel_rect: rect });
                 }
-            };
-            self.finish(FinishRequest::Selected { pixel_rect: rect });
+            }
             return;
         }
 
@@ -1442,6 +1495,9 @@ impl OverlayView {
         }
         ivars.finishing.set(true);
         ivars.active.set(false);
+        // The mode is over; a click still resolving is cancelled with it —
+        // drop the receiver so its late answer cannot finish anything.
+        *ivars.resolving.borrow_mut() = None;
 
         for veil in ivars.veils.borrow().iter() {
             veil.orderOut(None);
@@ -1541,6 +1597,12 @@ impl Overlay {
     /// Cancel the active mode without a result (e.g. display config change).
     pub fn cancel(&self) {
         self.view.finish(FinishRequest::Cancelled);
+    }
+
+    /// Delivers a resolved click result from the background resolver, if
+    /// one is ready. Called from the app tick. Main thread only.
+    pub fn poll_resolved_click(&self) {
+        self.view.poll_resolved_click();
     }
 }
 

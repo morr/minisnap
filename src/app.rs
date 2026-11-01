@@ -210,6 +210,9 @@ define_class!(
                     HotkeyAction::OpenLatest => self.open_latest(),
                 }
             }
+            // A click resolution finishes the overlay from the background
+            // resolver; polled here so the answer lands on the main thread.
+            self.ivars().overlay.borrow().poll_resolved_click();
         }
     }
 
