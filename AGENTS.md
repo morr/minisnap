@@ -28,7 +28,10 @@ What belongs in a skill is what orients a future session: mechanisms, module
 boundaries, code-level invariants, gotchas. Normative product behavior —
 hotkey values and defaults, menu composition, user-facing scenarios — lives
 in `openspec/specs/`; a skill links the capability as its reference instead
-of restating it.
+of restating it. The questions split three ways: the spec answers what the
+product must do, SKILL.md answers where in the code and why it is built
+this way, and the skill's `references/` carry the mechanics a task loads
+on demand.
 
 ## Working with a running app
 
