@@ -22,7 +22,7 @@
 
 ## 6. Domain-skills pass
 
-- [ ] 6.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (карта модулей: `editor/drag.rs` — машина драга и её interface; инварианты: где живут MIN_DRAG_PX, фазы коллаута, клампы кропа) и `.zcode/skills/minisnap-architecture/SKILL.md` (карта модулей). Проверка: текст скиллов соответствует коду.
+- [x] 6.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (карта модулей: `editor/drag.rs` — машина драга и её interface; инварианты: где живут MIN_DRAG_PX, фазы коллаута, клампы кропа) и `.zcode/skills/minisnap-architecture/SKILL.md` (карта модулей). Проверка: текст скиллов соответствует коду. *(оба SKILL.md обновлены; в minisnap-editor также `references/window-mechanics.md` — разделы «Мышь», «Коллаут в две фазы», «Кроп/ресайз» и список ivars переписаны под машину; сверено с кодом)*
 
 ## Workflow follow-up
 
