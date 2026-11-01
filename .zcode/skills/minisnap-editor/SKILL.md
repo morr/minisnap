@@ -13,9 +13,9 @@ description: Map of the minisnap shot-editor domain (src/editor_window.rs + src/
 
 | Модуль | Ответственность | Ключевое |
 |---|---|---|
-| `src/editor_window.rs` | окно и канвас `EditorView` (свой objc2-класс, MainThreadOnly): мышь, клавиатура, верхняя полоса на вибрации (три зоны, ховер, drag панели), ввод текста, кроп/ресайз, тюнер стрелки | `EditorWindow`, `KeyableWindow`, `ToolbarPanel`, `EditorView`/`EditorIvars`, `Tool`, `Drag`, `WidthSliderView`, `TextTarget`, `PendingCallout`, `FrameEdit`/`FrameSpot`, `arrow_tuner_panel` |
+| `src/editor_window.rs` | окно и канвас `EditorView` (свой objc2-класс, MainThreadOnly): мышь, клавиатура, верхняя полоса на вибрации (три зоны, ховер, drag панели), ввод текста, кроп/ресайз, тюнер стрелки | `EditorWindow`, `KeyableWindow`, `ToolbarPanel`, `EditorView`/`EditorIvars`, `Tool`, `Drag`, `WidthSliderView`, `TextTarget`, `PendingCallout`, `FrameEdit`/`FrameSpot`, `callout_anchor`, `arrow_tuner_panel` |
 | `src/editor/mod.rs` | документ: элементы и журнал команд; undo/redo — реплей | `Element`, `ElementKind`, `Command`, `Endpoint`, `EditorDoc`, `Point`/`Rect`/`Rgba` |
-| `src/editor/render.rs` | рендер композита и элементов, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `draw_arrow`, `arrow_outline`, `ArrowParams`, `pixelate_region`, `bitmap_context` |
+| `src/editor/render.rs` | рендер композита и элементов, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `draw_arrow`, `arrow_outline`, `callout_tail`, `ArrowParams`, `pixelate_region`, `bitmap_context` |
 | `src/editor/hit_test.rs` | кто оказался под кликом | `Hit`, `top_hit`, `hit_element`, `text_bounds` |
 | `src/editor/session.rs` | сессии в tmp, автосейв после каждой команды | `OpenShot`, `MAX_SESSIONS`, `default_root`, `name_density`, `load`/`save`, `enforce_retention` |
 | `src/editor/text.rs` | замеры и отрисовка текста (Core Text) | `measure`, `measure_block`, `line_height`, `draw_text`, `FONT_NAME` |
@@ -27,7 +27,7 @@ description: Map of the minisnap shot-editor domain (src/editor_window.rs + src/
 3. Undo/redo (⌘Z / ⌘⇧Z): `EditorDoc::undo/redo` двигают границу `applied` и пересобирают состояние реплеем префикса по нетронутому `original()`. Обратных операций нет — смещение состояния от журнала невозможно.
 4. Выделение: клик → `hit_test::top_hit` → `Hit::Body` (перенос элемента, у текста — правка на месте) или `Hit::End` (тяга конца стрелки/линии/коллаута).
 5. Текст: прозрачный `NSTextField` поверх блока (`TextTarget::New`/`Existing`); Enter — коммит, Shift+Enter — перенос строки, Esc — отмена.
-6. Коллаут в две фазы: протяжка стрелки → `PendingCallout` (стрелка висит превью) → ввод текста у основания → `AddElement(Callout)`; пустой текст или отмена — коллаут не создаётся.
+6. Коллаут в две фазы: протяжка стрелки — в точности как инструмент стрелки (тот же силуэт, цвет, толщина со слайдера; `Callout.width` замораживается в mouse-down) → `PendingCallout` (стрелка висит превью) → ввод текста у основания на стороне от острия (`callout_anchor`; поле стоит на месте будущего текста и растёт от стрелки) → `AddElement(Callout)`; пустой текст или отмена — коллаут не создаётся.
 7. Кроп/ресайз: рамка `FrameEdit` с восемью ручками → OK/Enter → `Command::Crop` (отрезать кадр) или `Command::Resize` (пересэмплировать); Esc — отмена без команды.
 
 Механика окна и ввода текста — [references/window-mechanics.md](references/window-mechanics.md); стрелка, блюр, текст, хит-тест — [references/render-and-hit.md](references/render-and-hit.md); журнал, команды, сессии — [references/doc-and-sessions.md](references/doc-and-sessions.md).
