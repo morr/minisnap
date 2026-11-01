@@ -24,15 +24,10 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSDate, NSString, NSNotification};
 
-use crate::editor::drag::{
-    callout_anchor, draft_is_real, frame_rect, point_dist, spot_at, spot_points, Drag, FrameEdit,
-    FrameSpot, PendingCallout, MIN_DRAG_PX,
-};
-use crate::editor::hit_test::{Hit, text_bounds, top_hit};
+use crate::editor::drag::{DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX};
 use crate::editor::text;
 use crate::editor::{
-    clamp_crop_rect, name_density, render, set_endpoint, shift_element, Command, Element,
-    ElementKind, OpenShot, Point, Rect, Rgba, Size,
+    name_density, render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba, Size,
 };
 use crate::editor_toolbar::{
     arrow_tuner_panel, stroke_width_of, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH,
@@ -70,9 +65,6 @@ const CARD_RADIUS: f64 = 8.0;
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
 
-/// Font size of new text and callout elements, in image pixels.
-const DEFAULT_TEXT_SIZE_PX: f64 = 32.0;
-
 /// Minimum width of the callout field editor, in view points: only wide
 /// enough for the caret, so an empty field never reaches over the arrow.
 const CALLOUT_EDITOR_MIN_WIDTH_PT: f64 = 30.0;
@@ -85,20 +77,6 @@ const HANDLE_RADIUS_PT: f64 = 5.0;
 
 /// Size of the frame mode's OK button, in view points.
 const FRAME_OK_SIZE: CGSize = CGSize::new(52.0, 26.0);
-
-/// What the open field editor is editing.
-#[derive(Clone, Copy)]
-enum TextTarget {
-    /// A brand-new text or callout element; the color is frozen at the
-    /// click, so a mid-edit palette change cannot rewrite it.
-    New {
-        origin: Point,
-        callout: bool,
-        color: Rgba,
-    },
-    /// An existing text/callout element being re-edited.
-    Existing { id: u64 },
-}
 
 define_class!(
     /// The editor's window. A titled window accepts key status by default;
@@ -167,16 +145,13 @@ struct EditorIvars {
     color: Cell<Rgba>,
     /// Stroke width for new elements, in image pixels.
     stroke_width: Cell<f64>,
-    /// The in-progress mouse drag (draw, move, or endpoint drag).
-    drag: RefCell<Option<Drag>>,
+    /// The editor's interaction state machine: the in-flight drag, the
+    /// two-phase callout and the crop/resize frame.
+    machine: RefCell<DragMachine>,
     /// The open field editor (text/callout input), if any.
     text_editor: RefCell<Option<Retained<NSTextField>>>,
     /// What the open field editor will commit.
     text_target: Cell<Option<TextTarget>>,
-    /// The active crop/resize frame, if the tool is up.
-    frame_edit: RefCell<Option<FrameEdit>>,
-    /// The callout awaiting its text (arrow drawn, editor open).
-    pending_callout: RefCell<Option<PendingCallout>>,
     /// The frame mode's size label and OK button subviews.
     frame_label: RefCell<Option<Retained<NSTextField>>>,
     frame_ok: RefCell<Option<Retained<NSButton>>>,
@@ -220,11 +195,9 @@ define_class!(
                 tool: Cell::new(None),
                 color: Cell::new(COLOR_PRESETS[0]),
                 stroke_width: Cell::new(DEFAULT_STROKE_WIDTH),
-                drag: RefCell::new(None),
+                machine: RefCell::new(DragMachine::new()),
                 text_editor: RefCell::new(None),
                 text_target: Cell::new(None),
-                frame_edit: RefCell::new(None),
-                pending_callout: RefCell::new(None),
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
@@ -268,7 +241,7 @@ define_class!(
             match event.keyCode() {
                 53 => {
                     // Esc: cancel the crop/resize frame, else close.
-                    if self.ivars().frame_edit.borrow().is_some() {
+                    if self.ivars().machine.borrow().frame_active() {
                         self.cancel_frame_edit();
                     } else if let Some(window) = self.window() {
                         window.close();
@@ -300,7 +273,7 @@ define_class!(
 
         #[unsafe(method(resetCursorRects))]
         fn __reset_cursor_rects(&self) {
-            if self.ivars().frame_edit.borrow().is_none() {
+            if !self.ivars().machine.borrow().frame_active() {
                 return;
             }
             let cursor = NSCursor::crosshairCursor();
@@ -525,9 +498,11 @@ impl EditorView {
 
         // The composite content: base frame + elements, drawn in image
         // pixel units (`draw_elements` applies its own Y flip) into the
-        // frame rect. A move or endpoint drag hides its element and shows
-        // a transformed preview; an element under in-place text editing is
-        // hidden entirely.
+        // frame rect. The machine reports what the in-flight interaction
+        // draws over the document: a move or endpoint drag hides its
+        // element and shows a transformed preview, a draw drag previews
+        // its draft, a pending callout previews its arrow; an element
+        // under in-place text editing is hidden entirely.
         CGContext::save_g_state(Some(&cg));
         CGContext::translate_ctm(Some(&cg), frame.origin.x, frame.origin.y);
         CGContext::scale_ctm(Some(&cg), sx, sy);
@@ -540,73 +515,33 @@ impl EditorView {
             CGRect::new(CGPoint::ZERO, CGSize::new(iw as f64, ih as f64)),
             Some(base),
         );
-        let drag_guard = ivars.drag.borrow();
-        let preview: Option<(u64, Element)> = drag_guard.as_ref().and_then(|drag| match drag {
-            Drag::Move { id, start, last, .. } => {
-                let mut el = shot.doc.element(*id)?.clone();
-                shift_element(&mut el.kind, last.x - start.x, last.y - start.y);
-                Some((*id, el))
-            }
-            Drag::End { id, endpoint, last, .. } => {
-                let mut el = shot.doc.element(*id)?.clone();
-                set_endpoint(&mut el.kind, *endpoint, *last);
-                Some((*id, el))
-            }
-            Drag::Draw(_) => None,
-            // The frame drag previews through the frame overlay, not here.
-            Drag::Frame { .. } => None,
-        });
-        let hidden = preview.as_ref().map(|(id, _)| *id);
+        let machine = ivars.machine.borrow();
+        let preview = machine.preview(shot.doc.elements());
         let editing = match ivars.text_target.get() {
             Some(TextTarget::Existing { id }) => Some(id),
             _ => None,
         };
-        if hidden.is_some() || editing.is_some() {
+        if preview.hide.is_some() || editing.is_some() {
             let visible: Vec<Element> = shot
                 .doc
                 .elements()
                 .iter()
-                .filter(|el| Some(el.id) != hidden && Some(el.id) != editing)
+                .filter(|el| Some(el.id) != preview.hide && Some(el.id) != editing)
                 .cloned()
                 .collect();
             render::draw_elements(&cg, base, ih as f64, &visible);
         } else {
             render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
         }
-        if let Some((_, el)) = preview.as_ref() {
-            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(el));
+        if !preview.extras.is_empty() {
+            render::draw_elements(&cg, base, ih as f64, &preview.extras);
         }
-        drop(drag_guard);
-        // Live preview of the element being drawn (view-only until the
-        // mouse-up commit).
-        if let Some(Drag::Draw(kind)) = ivars.drag.borrow().as_ref() {
-            let draw_preview = Element {
-                id: 0,
-                kind: kind.clone(),
-            };
-            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&draw_preview));
-        }
-        // The pending callout (arrow drawn, text being entered) previews on
-        // top until the text commits or the input is cancelled.
-        if let Some(pending) = ivars.pending_callout.borrow().as_ref() {
-            let pending_el = Element {
-                id: 0,
-                kind: ElementKind::Callout {
-                    tip: pending.tip,
-                    anchor: pending.base,
-                    text: String::new(),
-                    color: pending.color,
-                    size: pending.size,
-                    width: pending.width,
-                },
-            };
-            render::draw_elements(&cg, base, ih as f64, std::slice::from_ref(&pending_el));
-        }
+        drop(machine);
         CGContext::restore_g_state(Some(&cg));
 
         // The crop/resize frame overlay: the dim, the border and the
         // handles stay inside the card clip.
-        if ivars.frame_edit.borrow().is_some() {
+        if ivars.machine.borrow().frame_active() {
             self.draw_frame_overlay(&cg, &card, sx, sy);
         }
         CGContext::restore_g_state(Some(&cg));
@@ -756,153 +691,40 @@ impl EditorView {
         let ivars = self.ivars();
         // Finish any in-flight text edit before interpreting the click.
         self.commit_text_editor();
-        let tool = ivars.tool.get();
-        let draft_kind: Option<ElementKind> = match tool {
-            Some(Tool::Arrow) => Some(ElementKind::Arrow {
-                a: point,
-                b: point,
-                color: ivars.color.get(),
-                width: ivars.stroke_width.get(),
-            }),
-            Some(Tool::Rect) => Some(ElementKind::Rect {
-                rect: Rect::new(point.x, point.y, 0.0, 0.0),
-                color: ivars.color.get(),
-                width: ivars.stroke_width.get(),
-            }),
-            Some(Tool::Line) => Some(ElementKind::Line {
-                a: point,
-                b: point,
-                color: ivars.color.get(),
-                width: ivars.stroke_width.get(),
-            }),
-            Some(Tool::Pen) => Some(ElementKind::Pen {
-                points: vec![point],
-                color: ivars.color.get(),
-                width: ivars.stroke_width.get(),
-            }),
-            Some(Tool::Blur) => Some(ElementKind::Blur {
-                rect: Rect::new(point.x, point.y, 0.0, 0.0),
-            }),
-            // The callout draws its arrow by drag, from the base to the
-            // tip, exactly like the arrow tool (same color, same stroke
-            // width); the text follows in the second phase, at mouse-up.
-            Some(Tool::Callout) => Some(ElementKind::Callout {
-                tip: point,
-                anchor: point,
-                text: String::new(),
-                color: ivars.color.get(),
-                size: DEFAULT_TEXT_SIZE_PX,
-                width: ivars.stroke_width.get(),
-            }),
-            // The text tool starts editing on the click (below).
-            Some(Tool::Text) => None,
-            // Crop/resize drag the frame's handles; the click never draws
-            // or selects elements. The crop frame also drags from any
-            // point (moving whole); the resize frame does not move.
-            Some(Tool::Crop) | Some(Tool::Resize) => {
-                let resize = ivars.tool.get() == Some(Tool::Resize);
-                let spot = match self.frame_spot_at(point) {
-                    Some((spot, _)) => Some(spot),
-                    None if !resize => Some(FrameSpot::Center),
-                    None => None,
-                };
-                if let Some(spot) = spot {
-                    let orig = self
-                        .ivars()
-                        .frame_edit
-                        .borrow()
-                        .as_ref()
-                        .map(|edit| edit.rect);
-                    if let Some(orig) = orig {
-                        *self.ivars().drag.borrow_mut() = Some(Drag::Frame {
-                            spot,
-                            orig,
-                            start: point,
-                            last: point,
-                        });
-                    }
-                }
-                return;
-            }
-            // No tool picked: the click only selects or deselects.
-            None => None,
+        // The frame-handle tolerance is a view-space constant the window
+        // converts into image pixels through the view scale.
+        let (sx, sy) = self.view_scale();
+        let tolerance = Point::new(
+            (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001),
+            (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001),
+        );
+        let shot_guard = ivars.shot.borrow();
+        let ctx = DownCtx {
+            tool: ivars.tool.get(),
+            color: ivars.color.get(),
+            stroke_width: ivars.stroke_width.get(),
+            elements: shot_guard.as_ref().map(|shot| shot.doc.elements()).unwrap_or(&[]),
+            frame: ivars.machine.borrow().current_frame(),
+            handle_tolerance: tolerance,
         };
-        // A hit on an existing element decides between moving it, dragging
-        // one of its ends, and editing its text; the empty frame draws a
-        // new element (or starts a text).
-        let hit = ivars
-            .shot
-            .borrow()
-            .as_ref()
-            .and_then(|shot| top_hit(shot.doc.elements(), point));
-        let drag = match hit {
-            Some(Hit::End(id, endpoint)) => {
-                ivars.selection.set(Some(id));
-                Drag::End {
-                    id,
-                    endpoint,
-                    start: point,
-                    last: point,
-                }
+        let outcome = ivars.machine.borrow_mut().down(ctx, point);
+        drop(shot_guard);
+        match outcome.selection {
+            Select::Element(id) => ivars.selection.set(Some(id)),
+            Select::Clear => ivars.selection.set(None),
+            Select::Keep => {}
+        }
+        match outcome.signal {
+            // begin_text_edit ends in a redraw of its own.
+            Some(Signal::BeginText(target)) => self.begin_text_edit(target),
+            // The redraw must land before the tracking loop takes over:
+            // nothing repaints while the window drag runs.
+            Some(Signal::DragWindow) => {
+                self.redraw();
+                self.drag_window_with_mouse();
             }
-            Some(Hit::Body(id)) => {
-                // A click on editable text edits it in place; a click on a
-                // callout's arrow moves the whole callout (text follows).
-                if self.hit_edits_text(id, point) {
-                    self.begin_text_edit(TextTarget::Existing { id });
-                    return;
-                }
-                if tool == Some(Tool::Text) && !self.id_is_textlike(id) {
-                    // The text tool starts a new text over any other element.
-                    self.begin_text_edit(TextTarget::New {
-                        origin: point,
-                        callout: false,
-                        color: ivars.color.get(),
-                    });
-                    return;
-                }
-                ivars.selection.set(Some(id));
-                Drag::Move {
-                    id,
-                    start: point,
-                    last: point,
-                    moved: false,
-                }
-            }
-            _ => {
-                // Drawing on the empty frame starts from a clean selection;
-                // a plain click here is the deselect rule. The text tool
-                // opens its editor instead, the callout needs a drag.
-                ivars.selection.set(None);
-                match (tool, draft_kind) {
-                    (Some(Tool::Text), _) => {
-                        self.begin_text_edit(TextTarget::New {
-                            origin: point,
-                            callout: false,
-                            color: ivars.color.get(),
-                        });
-                        return;
-                    }
-                    (_, Some(kind)) => Drag::Draw(kind),
-                    // Viewing mode over free image space: the drag moves
-                    // the window. The frame handles, the text field and the
-                    // elements have already claimed their clicks above.
-                    (None, None) => {
-                        self.redraw();
-                        self.drag_window_with_mouse();
-                        return;
-                    }
-                    // A tool is up but produced no draft (cannot happen
-                    // today): a plain deselect, the window stays put.
-                    _ => {
-                        self.redraw();
-                        return;
-                    }
-                }
-            }
-        };
-        *ivars.drag.borrow_mut() = Some(drag);
-        self.redraw();
+            None => self.redraw(),
+        }
     }
 
     /// Move the window with the mouse after a viewing-mode press. The
@@ -943,167 +765,42 @@ impl EditorView {
         );
     }
 
-    /// Whether a Body hit at `point` is a click on editable text: a
-    /// callout's text block (any tool) or a text element (text tools only).
-    fn hit_edits_text(&self, id: u64, point: Point) -> bool {
-        let ivars = self.ivars();
-        let kind = ivars
-            .shot
-            .borrow()
-            .as_ref()
-            .and_then(|shot| shot.doc.element(id))
-            .map(|el| el.kind.clone());
-        match kind {
-            Some(ElementKind::Callout { anchor, text, size, .. }) => {
-                text_bounds(anchor, &text, size).is_some_and(|b| b.contains(point))
-            }
-            Some(ElementKind::Text { .. }) => {
-                matches!(ivars.tool.get(), Some(Tool::Text) | Some(Tool::Callout))
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether the element is a text or callout element.
-    fn id_is_textlike(&self, id: u64) -> bool {
-        self.ivars()
-            .shot
-            .borrow()
-            .as_ref()
-            .and_then(|shot| shot.doc.element(id))
-            .is_some_and(|el| {
-                matches!(el.kind, ElementKind::Text { .. } | ElementKind::Callout { .. })
-            })
-    }
-
     fn handle_mouse_dragged(&self, event: &NSEvent) {
-        self.update_drag(self.pixel_point(event));
+        if self.ivars().machine.borrow_mut().drag_to(self.pixel_point(event)) {
+            self.layout_frame_chrome();
+            self.redraw();
+        }
     }
 
     fn handle_mouse_up(&self, event: &NSEvent) {
-        self.update_drag(self.pixel_point(event));
         let ivars = self.ivars();
-        let Some(drag) = ivars.drag.borrow_mut().take() else {
+        let point = self.pixel_point(event);
+        let next_id = ivars
+            .shot
+            .borrow()
+            .as_ref()
+            .map(|shot| shot.doc.next_element_id())
+            .unwrap_or(0);
+        let Some(outcome) = ivars.machine.borrow_mut().up(point, next_id) else {
             return;
         };
-        match drag {
-            Drag::Draw(kind) => {
-                if !draft_is_real(&kind) {
-                    // Plain click: the draft is discarded and the selection
-                    // was already cleared at mouse-down.
-                    self.redraw();
-                    return;
-                }
-                // A callout splits into two phases: the drawn arrow stays
-                // up as a pending preview while the text is entered at its
-                // base; the element lands (or is dropped) with the text.
-                if let ElementKind::Callout { anchor, tip, color, size, width, text: _ } = kind {
-                    *ivars.pending_callout.borrow_mut() = Some(PendingCallout {
-                        base: anchor,
-                        tip,
-                        color,
-                        size,
-                        width,
-                    });
-                    self.begin_text_edit(TextTarget::New {
-                        origin: anchor,
-                        callout: true,
-                        color,
-                    });
-                    return;
-                }
-                let mut shot_slot = ivars.shot.borrow_mut();
-                let Some(shot) = shot_slot.as_mut() else {
-                    return;
-                };
-                let id = shot.doc.next_element_id();
-                let element = Element { id, kind };
-                if let Err(err) = shot.apply(Command::AddElement(element)) {
-                    eprintln!("editor: failed to commit the drawn element: {err}");
-                    self.redraw();
-                    return;
-                }
-                drop(shot_slot);
-                // The fresh element stays unselected: drawing must not end
-                // in markers and a snapped slider — a click selects it.
-                self.redraw();
-            }
-            Drag::Move { id, start, last, moved } => {
-                if moved {
-                    let delta = Point::new(last.x - start.x, last.y - start.y);
-                    let result = ivars
-                        .shot
-                        .borrow_mut()
-                        .as_mut()
-                        .map(|shot| shot.apply(Command::MoveElement(id, delta)));
-                    if let Some(Err(err)) = result {
-                        eprintln!("editor: failed to move the element: {err}");
-                    }
-                }
-                self.redraw();
-            }
-            Drag::End { id, endpoint, start, last } => {
-                if point_dist(start, last) >= MIN_DRAG_PX {
-                    let result = ivars
-                        .shot
-                        .borrow_mut()
-                        .as_mut()
-                        .map(|shot| shot.apply(Command::MovePoint(id, endpoint, last)));
-                    if let Some(Err(err)) = result {
-                        eprintln!("editor: failed to drag the endpoint: {err}");
-                    }
-                }
-                self.redraw();
-            }
-            Drag::Frame { spot, orig, start, last } => {
-                // Persist the settled rect; nothing is applied yet — the
-                // OK button and Enter do that.
-                let rect = frame_rect(orig, spot, start, last);
-                if let Some(edit) = ivars.frame_edit.borrow_mut().as_mut() {
-                    edit.rect = rect;
-                }
-                self.layout_frame_chrome();
-                self.redraw();
-            }
-        }
-    }
-
-    /// Move the drag's trailing point (or grow the drawn trace) to `point`.
-    fn update_drag(&self, point: Point) {
-        let ivars = self.ivars();
-        {
-            let mut drag_slot = ivars.drag.borrow_mut();
-            let Some(drag) = drag_slot.as_mut() else {
-                return;
-            };
-            match drag {
-                Drag::Draw(kind) => match kind {
-                    ElementKind::Arrow { b, .. } | ElementKind::Line { b, .. } => *b = point,
-                    // The callout's tip follows the cursor; the anchor (its
-                    // base) stays at the drag start.
-                    ElementKind::Callout { tip, .. } => *tip = point,
-                    // The drag start stays the origin; the size may go
-                    // negative and is standardized at draw/commit time.
-                    ElementKind::Rect { rect, .. } | ElementKind::Blur { rect } => {
-                        *rect = Rect::new(rect.x, rect.y, point.x - rect.x, point.y - rect.y);
-                    }
-                    ElementKind::Pen { points, .. } if points.last() != Some(&point) => {
-                        points.push(point);
-                    }
-                    _ => {}
-                },
-                Drag::Move { start, last, moved, .. } => {
-                    *last = point;
-                    if point_dist(*start, point) >= MIN_DRAG_PX {
-                        *moved = true;
-                    }
-                }
-                Drag::End { last, .. } => *last = point,
-                Drag::Frame { last, .. } => *last = point,
-            }
-        }
         self.layout_frame_chrome();
-        self.redraw();
+        if let Some(cmd) = outcome.command {
+            let result = ivars
+                .shot
+                .borrow_mut()
+                .as_mut()
+                .map(|shot| shot.apply(cmd));
+            if let Some(Err(err)) = result {
+                eprintln!("editor: failed to apply the drag command: {err}");
+            }
+        }
+        match outcome.signal {
+            // begin_text_edit ends in a redraw of its own.
+            Some(Signal::BeginText(target)) => self.begin_text_edit(target),
+            // Only mouse-down produces the window-drag signal.
+            Some(Signal::DragWindow) | None => self.redraw(),
+        }
     }
 
     /// Delete the selected element, if any.
@@ -1271,33 +968,15 @@ impl EditorView {
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
     }
 
-    /// The base image's pixel rect — the space every element coordinate and
-    /// every frame clamp lives in.
-    fn image_frame(&self) -> Option<Rect> {
-        let shot = self.ivars().shot.borrow();
-        let base = shot.as_ref()?.doc.base();
-        Some(Rect::new(
-            0.0,
-            0.0,
-            CGImage::width(Some(base)) as f64,
-            CGImage::height(Some(base)) as f64,
-        ))
-    }
-
     /// Where the pending callout's text block — or its field editor — sits
-    /// (in image pixels): `callout_anchor` against the pending arrow, with
-    /// `block` already in image pixels.
+    /// (in image pixels): the machine anchors it against the pending arrow,
+    /// with `block` already in image pixels.
     fn pending_callout_anchor(&self, block: Size) -> Option<Point> {
-        let pending = self.ivars().pending_callout.borrow();
-        let pending = pending.as_ref()?;
-        let frame = self.image_frame()?;
-        Some(callout_anchor(
-            pending.base,
-            pending.tip,
-            block.width,
-            block.height,
-            frame,
-        ))
+        let (iw, ih) = self.image_size();
+        self.ivars()
+            .machine
+            .borrow()
+            .pending_callout_anchor(block, Size::new(iw as f64, ih as f64))
     }
 
     /// Open the field editor for `target`: a transparent text field over
@@ -1407,81 +1086,76 @@ impl EditorView {
             self.redraw();
             return;
         };
-        let mut shot_slot = ivars.shot.borrow_mut();
-        let Some(shot) = shot_slot.as_mut() else {
-            self.redraw();
-            return;
-        };
-        match target {
-            TextTarget::New {
-                origin,
-                callout,
-                color,
-            } => {
-                if text.trim().is_empty() {
-                    // An empty commit (and a cancelled input) drops a
-                    // pending callout and adds nothing.
-                    *ivars.pending_callout.borrow_mut() = None;
-                    self.redraw();
-                    return;
-                }
-                let size = DEFAULT_TEXT_SIZE_PX;
-                let kind = if callout {
-                    let (tip, base, width) = match ivars.pending_callout.borrow_mut().take() {
-                        Some(pending) => (pending.tip, pending.base, pending.width),
-                        None => (origin, origin, ivars.stroke_width.get()),
-                    };
-                    let base_image = shot.doc.base();
-                    let frame = Rect::new(
-                        0.0,
-                        0.0,
-                        CGImage::width(Some(base_image)) as f64,
-                        CGImage::height(Some(base_image)) as f64,
-                    );
-                    let (w, h) = text::measure_block(&text, size)
-                        .map(|m| (m.width, m.height))
-                        .unwrap_or((size * 4.0, size * 1.25));
-                    ElementKind::Callout {
-                        tip,
-                        anchor: callout_anchor(base, tip, w, h, frame),
-                        text,
-                        color,
-                        size,
-                        width,
-                    }
-                } else {
-                    ElementKind::Text {
+        // A new-element commit runs before the shot borrow is taken: an
+        // empty input redraws (dropping the machine's pending callout with
+        // it), a callout's text lands through the machine's second phase,
+        // a plain text element is assembled here.
+        if let TextTarget::New { origin, callout, color } = target {
+            if text.trim().is_empty() {
+                ivars.machine.borrow_mut().cancel_callout_text();
+                self.redraw();
+                return;
+            }
+            let mut shot_slot = ivars.shot.borrow_mut();
+            let Some(shot) = shot_slot.as_mut() else {
+                drop(shot_slot);
+                self.redraw();
+                return;
+            };
+            let id = shot.doc.next_element_id();
+            let command = if callout {
+                let (iw, ih) = self.image_size();
+                ivars.machine.borrow_mut().commit_callout_text(
+                    &text,
+                    Size::new(iw as f64, ih as f64),
+                    id,
+                )
+            } else {
+                Some(Command::AddElement(Element {
+                    id,
+                    kind: ElementKind::Text {
                         origin,
                         text,
                         color,
-                        size,
-                    }
-                };
-                let id = shot.doc.next_element_id();
-                // Same rule as drawn shapes: the new element stays
-                // unselected until the user clicks it.
-                if let Err(err) = shot.apply(Command::AddElement(Element { id, kind })) {
+                        size: DEFAULT_TEXT_SIZE_PX,
+                    },
+                }))
+            };
+            // Same rule as drawn shapes: the new element stays unselected
+            // until the user clicks it.
+            if let Some(cmd) = command {
+                if let Err(err) = shot.apply(cmd) {
                     eprintln!("editor: failed to add the text element: {err}");
                 }
             }
-            TextTarget::Existing { id } => {
-                let old_text = shot.doc.element(id).and_then(|el| match &el.kind {
-                    ElementKind::Text { text, .. } | ElementKind::Callout { text, .. } => {
-                        Some(text.clone())
-                    }
-                    _ => None,
-                });
-                if text.trim().is_empty() {
-                    if let Err(err) = shot.apply(Command::DeleteElement(id)) {
-                        eprintln!("editor: failed to delete the emptied text: {err}");
-                    } else {
-                        ivars.selection.set(None);
-                    }
-                } else if old_text.as_deref() != Some(text.as_str()) {
-                    if let Err(err) = shot.apply(Command::EditText(id, text)) {
-                        eprintln!("editor: failed to update the text: {err}");
-                    }
-                }
+            drop(shot_slot);
+            self.redraw();
+            return;
+        }
+        let TextTarget::Existing { id } = target else {
+            return;
+        };
+        let mut shot_slot = ivars.shot.borrow_mut();
+        let Some(shot) = shot_slot.as_mut() else {
+            drop(shot_slot);
+            self.redraw();
+            return;
+        };
+        let old_text = shot.doc.element(id).and_then(|el| match &el.kind {
+            ElementKind::Text { text, .. } | ElementKind::Callout { text, .. } => {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+        if text.trim().is_empty() {
+            if let Err(err) = shot.apply(Command::DeleteElement(id)) {
+                eprintln!("editor: failed to delete the emptied text: {err}");
+            } else {
+                ivars.selection.set(None);
+            }
+        } else if old_text.as_deref() != Some(text.as_str()) {
+            if let Err(err) = shot.apply(Command::EditText(id, text)) {
+                eprintln!("editor: failed to update the text: {err}");
             }
         }
         drop(shot_slot);
@@ -1535,7 +1209,7 @@ impl EditorView {
         // a borrow held across the removal would panic that re-entry.
         let field = ivars.text_editor.borrow_mut().take();
         ivars.text_target.take();
-        *ivars.pending_callout.borrow_mut() = None;
+        ivars.machine.borrow_mut().cancel_callout_text();
         if let Some(field) = field {
             // Ends editing, which re-enters commit with both slots empty.
             field.removeFromSuperview();
@@ -1545,32 +1219,13 @@ impl EditorView {
     /// The crop/resize frame rect in image pixels, including an in-flight
     /// drag.
     fn current_frame_rect(&self) -> Option<Rect> {
-        let ivars = self.ivars();
-        let edit = ivars.frame_edit.borrow();
-        let edit = edit.as_ref()?;
-        let drag = ivars.drag.borrow();
-        Some(match drag.as_ref() {
-            Some(Drag::Frame { spot, orig, start, last }) => frame_rect(*orig, *spot, *start, *last),
-            _ => edit.rect,
-        })
+        self.ivars().machine.borrow().current_frame()
     }
 
     /// The eight frame handles (image pixels), corners first for hit
     /// priority.
     fn frame_spot_points(&self) -> Vec<(FrameSpot, Point)> {
-        match self.current_frame_rect() {
-            Some(r) => spot_points(r),
-            None => Vec::new(),
-        }
-    }
-
-    /// The frame spot under an image-space cursor, if any. The tolerance is
-    /// the view-space handle radius converted through the view scale.
-    fn frame_spot_at(&self, p: Point) -> Option<(FrameSpot, Point)> {
-        let (sx, sy) = self.view_scale();
-        let tol_x = (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001);
-        let tol_y = (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001);
-        self.current_frame_rect().and_then(|r| spot_at(r, p, tol_x, tol_y))
+        self.ivars().machine.borrow().frame_spot_points()
     }
 
     /// The view-space cursor rect around a frame spot.
@@ -1594,13 +1249,10 @@ impl EditorView {
         if iw == 0 || ih == 0 {
             return;
         }
-        let rect = if resize {
-            let (w, h) = (iw as f64 * 0.75, ih as f64 * 0.75);
-            Rect::new((iw as f64 - w) / 2.0, (ih as f64 - h) / 2.0, w, h)
-        } else {
-            Rect::new(0.0, 0.0, iw as f64, ih as f64)
-        };
-        *ivars.frame_edit.borrow_mut() = Some(FrameEdit { resize, rect });
+        ivars
+            .machine
+            .borrow_mut()
+            .begin_frame(resize, Size::new(iw as f64, ih as f64));
 
         let mtm = MainThreadMarker::new().expect("frame chrome on main thread");
         let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
@@ -1683,23 +1335,21 @@ impl EditorView {
     /// tool. A degenerate (sub-pixel) frame is kept up for another try.
     fn commit_frame_edit(&self) {
         let ivars = self.ivars();
-        let Some(edit) = ivars.frame_edit.borrow_mut().take() else {
+        if !ivars.machine.borrow().frame_active() {
             return;
-        };
+        }
+        // The chrome goes first, as it always has: a degenerate frame
+        // keeps the mode up without it until the tool is re-picked.
         self.remove_frame_chrome();
         let (iw, ih) = self.image_size();
-        let r = clamp_crop_rect(edit.rect, iw as f64, ih as f64);
-        let (w, h) = (r.width.round(), r.height.round());
-        if w < 1.0 || h < 1.0 {
-            *ivars.frame_edit.borrow_mut() = Some(edit);
+        let cmd = ivars
+            .machine
+            .borrow_mut()
+            .commit_frame(Size::new(iw as f64, ih as f64));
+        let Some(cmd) = cmd else {
             self.layout_frame_chrome();
             self.redraw();
             return;
-        }
-        let cmd = if edit.resize {
-            Command::Resize(Size::new(w, h))
-        } else {
-            Command::Crop(Rect::new(r.x, r.y, w, h))
         };
         let result = ivars
             .shot
@@ -1723,9 +1373,7 @@ impl EditorView {
 
     /// Tear the frame mode down (tool switch, new shot).
     fn exit_frame_edit(&self) {
-        let ivars = self.ivars();
-        if ivars.frame_edit.borrow().is_some() {
-            *ivars.frame_edit.borrow_mut() = None;
+        if self.ivars().machine.borrow_mut().end_frame() {
             self.remove_frame_chrome();
             self.redraw();
         }
