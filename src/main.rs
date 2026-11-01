@@ -7,6 +7,7 @@ mod hotkeys;
 mod overlay;
 mod output;
 mod permission;
+mod plates;
 mod prefs;
 mod sound;
 

@@ -2,7 +2,7 @@
 
 ## 1. plates-подмодуль
 
-- [ ] 1.1 Создать `src/plates.rs`: переезд из `editor_window.rs` имён слоёв (`PLATE_LAYER_NAME`, `DISC_LAYER_NAME`), размеров (`TOOLBAR_PLATE_SIZE`, `SWATCH_DISC`), цветов (`HOVER_BG`, `SWATCH_RING`, `SWATCH_RING_HOVER`), `PLATE_TRANSITION` с `animate_plate_changes`, поиска именованного подслоя и прохода центрирования (параметризованная таблица «имя → сторона»). Декларация модуля в `main.rs`. Оба потребителя в `editor_window.rs` (кнопки тулбара и палитра) зовут `plates::*`; дубликаты из окна удалены. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — hover и подсветка кнопок/свотчей не изменились.
+- [x] 1.1 Создать `src/plates.rs`: переезд из `editor_window.rs` имён слоёв (`PLATE_LAYER_NAME`, `DISC_LAYER_NAME`), размеров (`TOOLBAR_PLATE_SIZE`, `SWATCH_DISC`), цветов (`HOVER_BG`, `SWATCH_RING`, `SWATCH_RING_HOVER`), `PLATE_TRANSITION` с `animate_plate_changes`, поиска именованного подслоя и прохода центрирования (параметризованная таблица «имя → сторона»). Декларация модуля в `main.rs`. Оба потребителя в `editor_window.rs` (кнопки тулбара и палитра) зовут `plates::*`; дубликаты из окна удалены. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live — hover и подсветка кнопок/свотчей не изменились. *(build/clippy/test зелёные; live: полоса, метка, hover-подложка и акцент активного инструмента подтверждены скриншотами; поповер палитры и слайдер не доиграны — эмуляция упёрлась в активность пользователя (сработал захват ⌘⌥4), ждёт ручной проверки)*
 
 ## 2. Константы, фабрики и сборка в ToolbarView
 
