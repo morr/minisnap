@@ -20,8 +20,15 @@ Before exploring the code for a task, load the matching domain skill from
   sessions and undo.
 
 A change that alters the behavior or structure of a domain's modules updates
-that domain's skill in the same change. Skills are maps with addresses into
+that domain's skill in the same change — the skill is what the next session
+reads instead of the code, so a description left standing after the code
+stopped obeying it is worse than none. Skills are maps with addresses into
 the code, not a copy of it — verify against the actual source before editing.
+What belongs in a skill is what orients a future session: mechanisms, module
+boundaries, code-level invariants, gotchas. Normative product behavior —
+hotkey values and defaults, menu composition, user-facing scenarios — lives
+in `openspec/specs/`; a skill links the capability as its reference instead
+of restating it.
 
 ## Working with a running app
 
@@ -81,6 +88,12 @@ tasks) and is implemented task by task from that change's `tasks.md`.
 - During apply, work strictly from the change's task list; if a task needs
   work beyond what its spec describes, surface it instead of silently
   widening the change.
+- `/opsx:apply` ends with a domain-skills pass: over the change's whole
+  diff, for every domain skill whose modules the change touched, either
+  update the skill or state in the recap that its mechanism didn't change —
+  the verdict is owed exactly when it feels unnecessary. Into the skill goes
+  only what orients a future session (a mechanism, a boundary, a gotcha);
+  normative behavior belongs in the change's specs.
 
 ## Worktrees
 
