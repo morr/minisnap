@@ -16,9 +16,10 @@ use objc2_app_kit::{
     NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
     NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType,
     NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate,
-    NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
-    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSLayoutConstraintOrientation,
-    NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
+    NSCursor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType,
+    NSFocusRingType, NSFont,
+    NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
+    NSLayoutConstraintOrientation, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
@@ -28,7 +29,7 @@ use objc2_app_kit::NSAccessibility;
 use objc2_quartz_core::CALayer;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
-use objc2_foundation::{NSString, NSNotification, NSRectEdge};
+use objc2_foundation::{NSDate, NSString, NSNotification, NSRectEdge};
 
 use crate::editor::hit_test::{Hit, text_bounds, top_hit};
 use crate::editor::text;
@@ -488,7 +489,12 @@ define_class!(
     /// and `setDoubleValue:` is what syncs the knob with the selection —
     /// but it draws itself and reports every drag step (the width edits
     /// collapse into one undo step anyway).
-    #[unsafe(super(NSView))]
+    ///
+    /// The superclass is `NSControl`, not `NSView`: the slider lives in the
+    /// window's titlebar strip (`FullSizeContentView`), and macOS 26
+    /// intercepts mouse-downs there for window dragging, delivering them
+    /// only to controls. A plain `NSView` never sees the press at all.
+    #[unsafe(super(NSControl))]
     #[thread_kind = MainThreadOnly]
     #[ivars = WidthSliderIvars]
     struct WidthSliderView;
@@ -555,6 +561,38 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn __mouse_down(&self, event: &NSEvent) {
             self.drag_to(event);
+            // Track the drag here, in one call: a `mouseDown:` that
+            // returns early hands the remaining drag events back to the
+            // window, which replays the titlebar-strip press as a window
+            // drag — the knob freezes and the editor flies away.
+            if let Some(window) = self.window() {
+                loop {
+                    let Some(next) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                        NSEventMask::LeftMouseUp | NSEventMask::LeftMouseDragged,
+                        Some(&NSDate::distantFuture()),
+                        unsafe { NSEventTrackingRunLoopMode },
+                        true,
+                    ) else {
+                        break;
+                    };
+                    match next.r#type() {
+                        NSEventType::LeftMouseDragged => self.drag_to(&next),
+                        NSEventType::LeftMouseUp => {
+                            self.drag_to(&next);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                // Drop the mouse events that piled up behind the tracking
+                // loop instead of replaying them into the content view.
+                window.discardEventsMatchingMask_beforeEvent(
+                    NSEventMask::LeftMouseUp
+                        | NSEventMask::LeftMouseDragged
+                        | NSEventMask::MouseMoved,
+                    None,
+                );
+            }
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -1681,9 +1719,7 @@ impl EditorView {
                     // elements have already claimed their clicks above.
                     (None, None) => {
                         self.redraw();
-                        if let Some(window) = self.window() {
-                            window.performWindowDragWithEvent(event);
-                        }
+                        self.drag_window_with_mouse();
                         return;
                     }
                     // A tool is up but produced no draft (cannot happen
@@ -1697,6 +1733,44 @@ impl EditorView {
         };
         *ivars.drag.borrow_mut() = Some(drag);
         self.redraw();
+    }
+
+    /// Move the window with the mouse after a viewing-mode press. The
+    /// window is `setMovable(false)` — the toolbar strip must not drag it —
+    /// and `performWindowDragWithEvent` is a no-op for presses the system
+    /// does not count as titlebar ones, so the canvas tracks the drag
+    /// itself: step the frame by the global mouse delta until mouse-up.
+    fn drag_window_with_mouse(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let frame = window.frame();
+        let start = NSEvent::mouseLocation();
+        loop {
+            let Some(next) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::LeftMouseUp | NSEventMask::LeftMouseDragged,
+                Some(&NSDate::distantFuture()),
+                unsafe { NSEventTrackingRunLoopMode },
+                true,
+            ) else {
+                break;
+            };
+            match next.r#type() {
+                NSEventType::LeftMouseDragged => {
+                    let now = NSEvent::mouseLocation();
+                    window.setFrameOrigin(CGPoint::new(
+                        frame.origin.x + (now.x - start.x),
+                        frame.origin.y + (now.y - start.y),
+                    ));
+                }
+                NSEventType::LeftMouseUp => break,
+                _ => {}
+            }
+        }
+        window.discardEventsMatchingMask_beforeEvent(
+            NSEventMask::LeftMouseUp | NSEventMask::LeftMouseDragged | NSEventMask::MouseMoved,
+            None,
+        );
     }
 
     /// Whether a Body hit at `point` is a click on editable text: a
@@ -2605,6 +2679,48 @@ impl EditorView {
         // window size.
         self.update_tool_highlight();
         self.update_color_swatch();
+    }
+
+    /// Slide the system traffic lights' hosting view vertically so their
+    /// centers share the toolbar icon row's axis (`TOOLBAR_ROW_AXIS_FROM_TOP`
+    /// from the top edge; the titlebar parks them higher). The shift rides
+    /// the container's frame converted through content coordinates, which
+    /// absorbs the titlebar's flipped geometry; the titlebar is never
+    /// re-laid by us, so the offset holds until the next relayout — hence
+    /// the call on every displayed shot. Before the window is first shown
+    /// the buttons have no superview and the pass is a no-op.
+    fn align_traffic_lights(&self) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) else {
+            return;
+        };
+        let Some(content) = window.contentView() else {
+            return;
+        };
+        // SAFETY: plain view-tree reads, no external invariants.
+        let Some(host) = (unsafe { close.superview() }) else {
+            return;
+        };
+        let in_content = host.convertRect_toView(host.bounds(), Some(&content));
+        let axis_y = content.bounds().size.height - TOOLBAR_ROW_AXIS_FROM_TOP;
+        let center_y = in_content.origin.y + in_content.size.height / 2.0;
+        let dy = axis_y - center_y;
+        eprintln!("TLA dy={:.1} host_y={:.1}", dy, in_content.origin.y);
+        if dy == 0.0 {
+            return;
+        }
+        // SAFETY: plain view-tree reads, no external invariants.
+        let Some(superview) = (unsafe { host.superview() }) else {
+            return;
+        };
+        let target = CGRect::new(
+            CGPoint::new(in_content.origin.x, in_content.origin.y + dy),
+            in_content.size,
+        );
+        let target_in_superview = content.convertRect_toView(target, Some(&superview));
+        host.setFrame(target_in_superview);
     }
 
     /// Show the previous (-1) or next (1) shot of the save folder by time;
