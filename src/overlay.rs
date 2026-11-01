@@ -995,8 +995,14 @@ impl OverlayView {
             // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
             // expects it as AnyObject.
             let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(image).cast::<AnyObject>()) };
+            // Contents is animatable and the layer still holds the previous
+            // session's frame; with implicit actions Core Animation crossfades
+            // from it and the old capture flashes on screen.
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
             // SAFETY: contents setter with a valid image object.
             unsafe { frame_layer.setContents(Some(as_any)) };
+            CATransaction::commit();
         }
 
         // Downsample the frame to logical pixels for the loupe and for the

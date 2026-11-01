@@ -2,7 +2,7 @@
 
 ## 1. Мгновенная подмена кадра при показе оверлея
 
-- [ ] 1.1 В `OverlayView::show` (`src/overlay.rs`) обернуть подмену `frame_layer.setContents` в `CATransaction::begin(); setDisableActions(true); …; commit()` — паттерн обновлений dim/HUD. Проверка: `cargo build` чист, `cargo clippy` без новых предупреждений.
+- [x] 1.1 В `OverlayView::show` (`src/overlay.rs`) обернуть подмену `frame_layer.setContents` в `CATransaction::begin(); setDisableActions(true); …; commit()` — паттерн обновлений dim/HUD. Проверка: `cargo build` чист, `cargo clippy` без новых предупреждений.
 
 ## 2. Документация
 
