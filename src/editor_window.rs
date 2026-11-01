@@ -17,7 +17,8 @@ use objc2_app_kit::{
     NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType,
     NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate,
     NSCursor, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular,
-    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSPasteboard, NSPasteboardTypeString,
+    NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSLayoutConstraintOrientation,
+    NSLineBreakMode, NSPasteboard, NSPasteboardTypeString,
     NSPopover, NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
@@ -683,6 +684,9 @@ struct EditorIvars {
     frame_ok: RefCell<Option<Retained<NSButton>>>,
     /// The folder the shots are saved to (for the ◄/► leafing).
     save_dir: RefCell<std::path::PathBuf>,
+    /// The file-name label in the toolbar (the window title is hidden,
+    /// the bar carries the name instead).
+    file_label: RefCell<Option<Retained<NSTextField>>>,
     /// Toolbar buttons (tool tag → button) for the active highlight.
     tool_buttons: RefCell<Vec<(isize, Retained<NSButton>)>>,
     /// The color-swatch toolbar button (its bezel shows the current color).
@@ -741,6 +745,7 @@ define_class!(
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
+                file_label: RefCell::new(None),
                 tool_buttons: RefCell::new(Vec::new()),
                 color_button: RefCell::new(None),
                 color_popover: RefCell::new(None),
@@ -3530,9 +3535,21 @@ impl EditorWindow {
             leaf_buttons.push(button.clone());
             tool_buttons.push((tag, button));
         }
-        // Zones: leafing | color + width | tools, separated by 1 pt
-        // dividers with a wider gap around them.
-        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leaf_buttons[1]);
+        // The open shot's file name closes the leafing zone: plain
+        // secondary text, not a control — a drag on it moves the window.
+        let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        // Long file names truncate in the middle instead of stretching
+        // the window's minimum width.
+        file_label.setContentCompressionResistancePriority_forOrientation(
+            250.0,
+            NSLayoutConstraintOrientation::Horizontal,
+        );
+        toolbar.addArrangedSubview(&file_label);
+        // Zones: leafing + file name | color + width | tools, separated
+        // by 1 pt dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
         let leading_sep = bar_separator(mtm);
         toolbar.addArrangedSubview(&leading_sep);
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leading_sep);
@@ -3695,6 +3712,7 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
+        *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
         *view.ivars().toolbar_panel.borrow_mut() = Some(panel);
         view.update_tool_highlight();
