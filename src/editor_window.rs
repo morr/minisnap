@@ -3594,8 +3594,10 @@ impl EditorWindow {
             color_button.setAction(Some(sel!(colorClicked:)));
         }
         // The slider sizes itself through its intrinsicContentSize — the
-        // toolbar stack reads it for layout.
+        // toolbar stack reads it for layout, but only for views with the
+        // autoresizing mask off; every neighbor clears it too.
         let slider = WidthSliderView::new(mtm);
+        slider.setTranslatesAutoresizingMaskIntoConstraints(false);
         // SAFETY: target is this canvas view, alive for the process; the
         // action reads `doubleValue` off the sender.
         unsafe {
@@ -3656,7 +3658,14 @@ impl EditorWindow {
             ),
             CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, SLIDER_HEIGHT),
         ));
-        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+        // The strip stretches with the window: its frame is built from the
+        // initial size, and a fixed-width stack squeezes the row — the
+        // slider, the only view without required size constraints, absorbs
+        // the deficit and vanishes.
+        toolbar.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
         panel.addSubview(&toolbar);
         view.setFrame(CGRect::new(
             CGPoint::ZERO,
