@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-01
+goal: Extract the editor toolbar and window chrome from editor_window.rs into
+  editor_toolbar.rs + plates.rs
+skip_specs: true
