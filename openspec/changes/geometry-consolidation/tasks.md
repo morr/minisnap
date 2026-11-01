@@ -39,11 +39,20 @@
 
 ## 3. Domain-skills pass
 
-- [ ] 3.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (строка geometry
+- [x] 3.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (строка geometry
   в карте модулей: `display_point_to_logical_pixel`, `frame_contains_point`,
   без `topmost_window_at`; инвариант координат — ссылка на спеку
   frozen-capture) и `.zcode/skills/minisnap-architecture/SKILL.md` (карта
   модулей, строка capture.rs). Проверка: текст скиллов соответствует коду.
+  *(minisnap-capture: строка geometry в карте модулей — новые функции без
+  `topmost_window_at`, «хит-тест окон» убран из ответственности; шаг 5
+  потока и инвариант «Координаты клика» — флип через
+  `display_point_to_pixel` (scale 1) + оффсет origin; инвариант переводов —
+  «все переводы, инвариант в спеке frozen-capture», лупа/подпись и
+  containment названы. minisnap-architecture: конвенция в SKILL.md и
+  `references/conventions.md` — список функций geometry дополнен, ссылка на
+  спеку. Сверено с кодом: все упомянутые имена в `capture.rs`/`overlay.rs`
+  на месте, `topmost_window_at` нигде не упоминается)*
 
 ## Workflow follow-up
 
