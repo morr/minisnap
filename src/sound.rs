@@ -52,27 +52,57 @@ pub fn play_shutter() {
     play_shutter_from(&shutter_sound_paths());
 }
 
+/// Warm up everything a real shot pays for — the cfprefsd round-trip, the
+/// sound file load and the CoreAudio client — while the app is starting and
+/// nobody is waiting. Measured on macOS 26: the first `play` of a fresh
+/// process blocks ~0.8 s in audio stack initialization and a cold preference
+/// read ~0.15 s; after the warm-up both are microseconds. Without it the
+/// first capture after launch delays both the shutter and the overlay's
+/// fade-out, which share the main thread with this call.
+pub fn prewarm() {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let _ = sound_disabled_by_system();
+    let Some(sound) = load_player_from(&shutter_sound_paths()) else {
+        return;
+    };
+    // A silent one-buffer playback opens the audio device without a click.
+    sound.setVolume(0.0);
+    sound.play();
+    sound.stop();
+    sound.setVolume(1.0);
+    PLAYER.with(|slot| *slot.borrow_mut() = Some(sound));
+}
+
+/// Load the first existing file of the chain; the chain is the unit of
+/// degradation — no file found, no sound.
+fn load_player_from(paths: &[&'static str]) -> Option<Retained<NSSound>> {
+    let path = paths.iter().find(|p| Path::new(p).exists())?;
+    let sound = NSSound::initWithContentsOfFile_byReference(
+        NSSound::alloc(),
+        &NSString::from_str(path),
+        true,
+    );
+    if sound.is_none() {
+        eprintln!("sound: failed to load {path}");
+    }
+    sound
+}
+
 /// Playback over a given chain of candidates — split out so tests can
 /// exercise the degradation paths without touching NSSound.
 fn play_shutter_from(paths: &[&'static str]) {
-    let Some(path) = paths.iter().find(|p| Path::new(p).exists()) else {
-        return;
-    };
     PLAYER.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            let Some(sound) = NSSound::initWithContentsOfFile_byReference(
-                NSSound::alloc(),
-                &NSString::from_str(path),
-                true,
-            ) else {
-                eprintln!("sound: failed to load {path}");
+            let Some(sound) = load_player_from(paths) else {
                 return;
             };
             *slot = Some(sound);
         }
         if !slot.as_ref().unwrap().play() {
-            eprintln!("sound: play failed for {path}");
+            eprintln!("sound: play failed");
         }
     });
 }
@@ -104,9 +134,26 @@ mod tests {
         let _ = sound_disabled_by_system();
     }
 
+    /// Manual probe (plays sound aloud): the measurements behind the prewarm
+    /// in `prewarm` — cold pref read ~0.15 s, first play ~0.8 s, warm plays
+    /// microseconds. Run: `cargo test timing -- --ignored --test-threads=1 --nocapture`.
     #[test]
-    fn disable_sound_key_is_honored_and_restored() {
-        use objc2_core_foundation::{
+    #[ignore]
+    fn timing_report() {
+        // play_shutter's main-thread gate is false under the test harness.
+        let t = std::time::Instant::now();
+        let _ = sound_disabled_by_system();
+        println!("pref read: {:?}", t.elapsed());
+        let paths = shutter_sound_paths();
+        for i in 0..3 {
+            let t = std::time::Instant::now();
+            play_shutter_from(&paths);
+            println!("play #{i}: {:?}", t.elapsed());
+        }
+    }
+
+    #[test]
+    fn disable_sound_key_is_honored_and_restored() {        use objc2_core_foundation::{
             CFPreferencesAppSynchronize, CFPreferencesSetAppValue, CFRetained, CFPropertyList, Type,
         };
 

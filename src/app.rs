@@ -265,6 +265,11 @@ impl AppController {
             .expect("configured SF Symbol");
         icon.setTemplate(true);
         button.setImage(Some(&icon));
+        // The tooltip is the second surface of the instance identity:
+        // hovering the tray icon names the checkout without opening the menu.
+        button.setToolTip(Some(&NSString::from_str(&format!(
+            "minisnap — {checkout_label}"
+        ))));
 
         let menu = NSMenu::new(mtm);
         // Inert header naming the checkout this instance was built from;
@@ -471,7 +476,13 @@ impl AppController {
                     hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
                 )
             };
-            *slot = Some(prefs::build(mtm, &capture_combo, &edit_combo, &open_combo));
+            *slot = Some(prefs::build(
+                mtm,
+                &capture_combo,
+                &edit_combo,
+                &open_combo,
+                &self.ivars().checkout_label,
+            ));
             let window = slot.as_ref().unwrap();
             for button in [&window.capture_button, &window.capture_edit_button, &window.open_button] {
                 // SAFETY: target is this controller, whose selector lives as
@@ -828,6 +839,13 @@ pub fn run() {
     // NSMenuItem targets and the app delegate hold weak references; the
     // controller (and its overlay) live for the whole process.
     std::mem::forget(controller);
+
+    // The shutter warm-up must not delay the launch itself; one runloop
+    // turn in, the tray is up and a second of audio init is invisible.
+    let warm = RcBlock::new(move |_timer| crate::sound::prewarm());
+    // SAFETY: the block only calls sound::prewarm, which self-gates on the
+    // main thread this timer fires on.
+    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, false, &warm) };
 
     app.run();
 }
