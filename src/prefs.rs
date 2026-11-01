@@ -79,11 +79,13 @@ fn row(
 
 /// Build the preferences window with the given rendered combinations.
 /// Buttons start without a target; the controller attaches its action.
+/// The window title carries the checkout label of the running instance.
 pub fn build(
     mtm: MainThreadMarker,
     capture_combo: &str,
     capture_edit_combo: &str,
     open_combo: &str,
+    checkout_label: &str,
 ) -> PrefsWindow {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -94,7 +96,9 @@ pub fn build(
             false,
         )
     };
-    window.setTitle(&NSString::from_str("Preferences"));
+    window.setTitle(&NSString::from_str(&format!(
+        "Preferences — {checkout_label}"
+    )));
     // The window lives in the controller for the whole process; closing it
     // only hides it, reopening brings the same window back (spec: no second
     // window is created).
