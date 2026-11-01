@@ -23,6 +23,18 @@ A change that alters the behavior or structure of a domain's modules updates
 that domain's skill in the same change. Skills are maps with addresses into
 the code, not a copy of it — verify against the actual source before editing.
 
+## Working with a running app
+
+When a session drives a running minisnap — relaunching it after a rebuild,
+checking the editor window or overlay, any live interaction — hide the
+utility's windows immediately after each such action, before starting the
+next one. Hiding means closing the window (closing the editor/prefs window
+only hides it, the process stays in the tray), not quitting the app.
+Exception: windows the user explicitly opened themselves before the action —
+leave those as the user left them. The editor window and the overlay float
+above everything and ignore app deactivation, so a window left over from the
+previous step steals focus and shows up in the next verification screenshot.
+
 ## OpenSpec workflow
 
 This project is developed through OpenSpec: every feature starts as a change
