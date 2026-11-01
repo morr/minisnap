@@ -94,7 +94,6 @@ struct AppIvars {
     // Checkout label of this instance (branch name for a worktree build,
     // "main" otherwise); shown in the tray menu header, tooltip and the
     // preferences window title.
-    #[allow(dead_code)]
     checkout_label: String,
 }
 
@@ -268,6 +267,20 @@ impl AppController {
         button.setImage(Some(&icon));
 
         let menu = NSMenu::new(mtm);
+        // Inert header naming the checkout this instance was built from;
+        // the label agrees with the executable path shown by `ps -axo comm`.
+        let header_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(&format!("minisnap — {checkout_label}")),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        header_item.setEnabled(false);
+        menu.addItem(&header_item);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+
         let capture_item = unsafe {
             let item = NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
