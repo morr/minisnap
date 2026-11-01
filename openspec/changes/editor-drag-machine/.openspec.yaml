@@ -1,5 +1,0 @@
-schema: spec-driven
-created: 2026-11-01
-goal: Extract the editor drag state machine behind a clean seam into
-  src/editor/drag.rs
-skip_specs: true
