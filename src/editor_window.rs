@@ -1,7 +1,7 @@
 //! The editor window: one reusable `NSWindow` showing the open shot — the
 //! base frame plus annotations, drawn with CoreGraphics into a custom
-//! `NSView`, with an annotation toolbar above the canvas. Selection markers
-//! are drawn on top in the canvas and never become part of a saved
+//! `NSView`, with an annotation toolbar in the left column. Selection
+//! markers are drawn on top in the canvas and never become part of a saved
 //! composite.
 
 use std::cell::{Cell, RefCell};
@@ -13,16 +13,15 @@ use objc2::{
     MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox, NSBoxType, NSButton,
-    NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
+    NSAnimationContext, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox,
+    NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent,
+    NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
     NSImageSymbolConfiguration, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSPopover,
     NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSVisualEffectMaterial,
-    NSVisualEffectView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowStyleMask,
-    NSWorkspace,
+    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
+    NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
 use objc2_app_kit::NSLayoutConstraintOrientation;
@@ -46,27 +45,28 @@ const CHECKER_CELL_PT: f64 = 8.0;
 /// Selection marker radius, in view points (constant on screen).
 const MARKER_RADIUS_PT: f64 = 4.5;
 
-/// Toolbar strip height, in points.
-const TOOLBAR_HEIGHT: f64 = 33.0;
+/// Background of the whole window and the toolbar column: the flat light
+/// gray (#F2F2F2) of the zcode chrome — no vibrancy anywhere.
+const WINDOW_BG: [f64; 4] = [242.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 1.0];
 
-/// The top strip the toolbar reserves: the full-height bar itself. The
-/// canvas fills everything below it.
-const TOOLBAR_RESERVED: f64 = TOOLBAR_HEIGHT;
+/// Height of the column's top row, in points: the traffic-light cluster
+/// and the leafing buttons share it.
+const TRAFFIC_ROW_HEIGHT: f64 = 40.0;
 
-/// Leading padding of the toolbar stack inside the bar, in points: room
-/// for the system traffic lights, whose cluster ends at ~26 pt (the red
-/// button's right edge), plus a gap so controls never run under them.
-const BAR_LEADING_PAD: f64 = 40.0;
+/// Leading padding of the top row, in points: the cluster of three visible
+/// traffic lights ends at ~64 pt (the yellow button's right edge), plus a
+/// gap so the controls next in the row never run under it.
+const TRAFFIC_ROW_PAD: f64 = 70.0;
 
-/// Trailing padding of the toolbar stack inside the bar, in points.
-const BAR_TRAILING_PAD: f64 = 12.0;
+/// Width of the toolbar column, in points: the top row's natural width —
+/// the leading pad, two 28 pt leafing buttons with 8 pt between them and
+/// a 12 pt trailing pad. The column never narrows below this.
+const TOOLBAR_WIDTH: f64 =
+    TRAFFIC_ROW_PAD + 2.0 * TOOLBAR_BUTTON_SIZE.width + BAR_SPACING + 12.0;
 
-/// The hairline separating the toolbar strip from the canvas: white at a
-/// low alpha over the vibrancy bar.
-const BAR_HAIRLINE: [f64; 4] = [1.0, 1.0, 1.0, 0.12];
-
-/// The vertical dividers between the toolbar zones: white at a low alpha.
-const BAR_DIVIDER: [f64; 4] = [1.0, 1.0, 1.0, 0.15];
+/// Gap between the image card and the window's top, right and bottom
+/// edges, in points; the card touches the toolbar column on the left.
+const CARD_GAP: f64 = 4.0;
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
@@ -143,12 +143,13 @@ const BAR_SPACING: f64 = 8.0;
 /// points: the wider gap that separates the toolbar's zones.
 const BAR_ZONE_SPACING: f64 = 12.0;
 
-/// Tint of an inactive toolbar symbol: near-white, readable on the dark
-/// HUD panel regardless of the system appearance.
-const ICON_TINT: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+/// Tint of an inactive toolbar symbol: near-black (#262626), readable on
+/// the light column whatever the surrounding colors are.
+const ICON_TINT: [f64; 4] = [38.0 / 255.0, 38.0 / 255.0, 38.0 / 255.0, 1.0];
 
-/// Hover background of a toolbar button: a faint white wash.
-const HOVER_BG: [f64; 4] = [1.0, 1.0, 1.0, 0.10];
+/// Hover background of a toolbar button: a faint black wash, the light
+/// counterpart of the dark theme's white wash.
+const HOVER_BG: [f64; 4] = [0.0, 0.0, 0.0, 0.06];
 
 /// Diameter of a color swatch's visible circle, in points: the disc sits
 /// inset in the swatch button, at the scale of the icon glyphs, so the
@@ -159,15 +160,15 @@ const SWATCH_DISC: f64 = 18.0;
 /// minimum pointer target a pointer-driven control is expected to meet.
 const PALETTE_SWATCH_SIZE: f64 = 24.0;
 
-/// Resting outline of a color swatch: bright enough to mark the darkest
-/// presets (black, blue) against the dark HUD panel at the 3:1 boundary
-/// contrast graphics are expected to reach, faint enough not to read as a
-/// highlight.
-const SWATCH_RING: [f64; 4] = [1.0, 1.0, 1.0, 0.5];
+/// Resting outline of a color swatch: dark enough to mark the lightest
+/// presets (white, yellow) against the light column and popover at the 3:1
+/// boundary contrast graphics are expected to reach, faint enough not to
+/// read as a highlight.
+const SWATCH_RING: [f64; 4] = [0.0, 0.0, 0.0, 0.15];
 
-/// Hover outline of a color swatch: the ring brightens on hover instead of
+/// Hover outline of a color swatch: the ring darkens on hover instead of
 /// the fill — the fill is the color itself.
-const SWATCH_RING_HOVER: [f64; 4] = [1.0, 1.0, 1.0, 0.9];
+const SWATCH_RING_HOVER: [f64; 4] = [0.0, 0.0, 0.0, 0.3];
 
 /// Crossfade length of toolbar plate changes (hover, tool highlight), in
 /// seconds. Short enough that feedback stays responsive; the database rule
@@ -366,10 +367,11 @@ impl KeyableWindow {
 }
 
 define_class!(
-    /// The floating toolbar panel: a vibrancy pill that drags the window
-    /// when a click lands on its free surface. Controls consume their own
-    /// clicks, so they never reach this handler.
-    #[unsafe(super(NSVisualEffectView))]
+    /// The left toolbar column: an invisible surface that drags the window
+    /// when a click lands on its free area — the canvas behind it paints
+    /// the light gray both the column and the window read as. Controls
+    /// consume their own clicks, so they never reach this handler.
+    #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     struct ToolbarPanel;
 
@@ -1109,14 +1111,29 @@ impl EditorView {
             .unwrap_or((0, 0))
     }
 
-    /// The shot's frame centered in the canvas, in view points.
-    fn frame_rect(&self) -> CGRect {
+    /// The image card area: everything right of the toolbar column, inset
+    /// from the top, right and bottom window edges; the column side is in
+    /// contact. The card's own paint (fill, border, rounding) lives in
+    /// `draw`; this is the geometry the frame centers in.
+    fn card_rect(&self) -> CGRect {
         let bounds = self.bounds();
+        CGRect::new(
+            CGPoint::new(TOOLBAR_WIDTH, CARD_GAP),
+            CGSize::new(
+                (bounds.size.width - TOOLBAR_WIDTH - CARD_GAP).max(0.0),
+                (bounds.size.height - 2.0 * CARD_GAP).max(0.0),
+            ),
+        )
+    }
+
+    /// The shot's frame centered in the card, in view points.
+    fn frame_rect(&self) -> CGRect {
+        let card = self.card_rect();
         let size = self.ivars().frame_size.get();
         CGRect::new(
             CGPoint::new(
-                (bounds.size.width - size.width) / 2.0,
-                (bounds.size.height - size.height) / 2.0,
+                card.origin.x + (card.size.width - size.width) / 2.0,
+                card.origin.y + (card.size.height - size.height) / 2.0,
             ),
             size,
         )
@@ -1165,12 +1182,24 @@ impl EditorView {
             return;
         }
 
+        // The window and the column: the flat light gray of the zcode
+        // chrome. The checker starts right of the toolbar column — the
+        // column itself stays solid.
+        let window_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+            WINDOW_BG[0],
+            WINDOW_BG[1],
+            WINDOW_BG[2],
+            WINDOW_BG[3],
+        );
+        window_bg.setFill();
+        CGContext::fill_rect(Some(&cg), bounds);
         // Backdrop: the light checkerboard image editors draw behind
-        // transparent areas — the frame floats on it, centered.
+        // transparent areas — the frame floats on it, centered in the
+        // card.
         let mut cache = ivars.checker.borrow_mut();
         let checker = cache.get_or_insert_with(checker_color);
         checker.setFill();
-        CGContext::fill_rect(Some(&cg), bounds);
+        CGContext::fill_rect(Some(&cg), self.card_rect());
         drop(cache);
 
         let Some(shot) = shot_guard.as_ref() else {
@@ -2301,17 +2330,13 @@ impl EditorView {
         let content_size = NSScreen::mainScreen(mtm)
             .map(|screen| screen.visibleFrame().size)
             .map(|visible| {
-                fit_size(
-                    iw as f64 / density,
-                    ih as f64 / density,
-                    visible.width,
-                    visible.height - TOOLBAR_RESERVED,
-                )
+                fit_size(iw as f64 / density, ih as f64 / density, visible.width, visible.height)
             })
             .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
-        // The refit never shrinks below the toolbar's minimum width.
-        let width = content_size.width.max(self.ivars().min_width.get());
-        let height = content_size.height + TOOLBAR_RESERVED;
+        // The window wraps the frame: the toolbar column on the left, the
+        // card gap on the other three sides.
+        let width = TOOLBAR_WIDTH + CARD_GAP + content_size.width;
+        let height = content_size.height + 2.0 * CARD_GAP;
         self.ivars().frame_size.set(content_size);
         if self.ivars().placed.get() {
             // Keep the window's top-left corner where it was: AppKit's frame
@@ -2802,22 +2827,17 @@ fn symbol_image(symbol: &str, name: &str) -> Retained<NSImage> {
         .expect("configured symbol")
 }
 
-/// A vertical divider between the toolbar zones: a 1×18 pt view with a
-/// low-alpha white layer. Not a button, so the hover pass ignores it. The
-/// size rides on constraints: the toolbar stack sizes arranged views by
-/// autolayout and would collapse a frame-only view.
+/// A vertical divider between the toolbar zones: a 1×18 pt view in the
+/// system separator color, so it adapts to the light column. Not a button,
+/// so the hover pass ignores it. The size rides on constraints: the
+/// toolbar stack sizes arranged views by autolayout and would collapse a
+/// frame-only view.
 fn bar_separator(mtm: MainThreadMarker) -> Retained<NSView> {
     let view = NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO);
     view.setTranslatesAutoresizingMaskIntoConstraints(false);
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
-        layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            BAR_DIVIDER[0],
-            BAR_DIVIDER[1],
-            BAR_DIVIDER[2],
-            BAR_DIVIDER[3],
-        )
-        .CGColor()));
+        layer.setBackgroundColor(Some(&NSColor::separatorColor().CGColor()));
     }
     view.widthAnchor()
         .constraintEqualToConstant(1.0)
@@ -3200,10 +3220,7 @@ impl EditorWindow {
         let window = unsafe {
             KeyableWindow::init_with_content_rect(
                 KeyableWindow::alloc(mtm),
-                CGRect::new(
-                    CGPoint::ZERO,
-                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_RESERVED),
-                ),
+                CGRect::new(CGPoint::ZERO, INITIAL_SIZE),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::FullSizeContentView
                     | NSWindowStyleMask::Closable,
@@ -3213,7 +3230,7 @@ impl EditorWindow {
         };
         // Electron-style hidden inset: a titled window with a transparent,
         // hidden titlebar — the system traffic lights draw over the toolbar
-        // strip, which stays the only top chrome of the window.
+        // column, which stays the only chrome of the window.
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setHasShadow(true);
@@ -3225,10 +3242,10 @@ impl EditorWindow {
                 button.setHidden(true);
             }
         }
-        // The dark HUD panel, the tints and the label all resolve against
-        // the dark appearance.
-        if let Some(dark) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }) {
-            window.setAppearance(Some(&dark));
+        // The light appearance everywhere: the column, the color popover
+        // and every system control resolve against it.
+        if let Some(aqua) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }) {
+            window.setAppearance(Some(&aqua));
         }
         // Toolbar hover styling rides on mouse-moved events.
         window.setAcceptsMouseMovedEvents(true);
@@ -3239,16 +3256,10 @@ impl EditorWindow {
             window.setReleasedWhenClosed(false);
         }
 
-        // The toolbar strip across the top: a full-width vibrancy bar
-        // carrying the ◄/► leafing buttons, the file name (the window
-        // title is hidden), the tools, the color swatch with its
-        // preset popover and the stroke-width slider.
+        // The toolbar column along the left edge: an invisible surface
+        // carrying the controls; the canvas behind it paints the light
+        // gray the column reads as.
         let panel = ToolbarPanel::new(mtm);
-        panel.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        // No corner radius of its own: the window supplies the system
-        // rounding, and the bar's bottom edge must stay square against
-        // the canvas.
-        panel.setWantsLayer(true);
         // Hover styling: one tracking area over the panel, owned by the
         // canvas view — it holds the button list and the active tool.
         let tracking = unsafe {
@@ -3402,76 +3413,50 @@ impl EditorWindow {
             tool_buttons.push((tool.tag(), button));
         }
 
-        // Layout: the toolbar strip across the top, the canvas filling
-        // everything below it. The flexible min-Y margin keeps the bar
-        // pinned to the top when the window grows; the canvas grows into
-        // the freed space.
+        // Layout: the canvas fills the whole window and paints its
+        // background; the toolbar column overlays the left edge and hosts
+        // the controls. The canvas goes in first, so the column stays on
+        // top of it and keeps the clicks on its own surface.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The window cannot shrink below the bar: the stack's fitting
-        // width plus its leading and trailing padding.
-        let min_width = toolbar.fittingSize().width + BAR_LEADING_PAD + BAR_TRAILING_PAD;
+        // The window cannot shrink below the controls: the stack's
+        // fitting width.
+        let min_width = toolbar.fittingSize().width;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        panel.setFrame(CGRect::new(
-            CGPoint::new(0.0, size.height - TOOLBAR_HEIGHT),
-            CGSize::new(size.width, TOOLBAR_HEIGHT),
-        ));
-        panel.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewMinYMargin,
-        );
-        content.addSubview(&panel);
-        // The hairline under the bar: one point of white at a low alpha,
-        // stretching with the bar.
-        // SAFETY: designated initializer with a plain frame.
-        let hairline = unsafe { NSView::initWithFrame(NSView::alloc(mtm), CGRect::ZERO) };
-        hairline.setWantsLayer(true);
-        if let Some(layer) = hairline.layer() {
-            layer.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                BAR_HAIRLINE[0],
-                BAR_HAIRLINE[1],
-                BAR_HAIRLINE[2],
-                BAR_HAIRLINE[3],
-            )
-            .CGColor()));
-        }
-        hairline.setFrame(CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(size.width, 1.0),
-        ));
-        hairline.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-        panel.addSubview(&hairline);
-        toolbar.setFrame(CGRect::new(
-            CGPoint::new(BAR_LEADING_PAD, 0.0),
-            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
-        ));
-        toolbar.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        panel.addSubview(&toolbar);
-        let canvas_height = size.height - TOOLBAR_RESERVED;
-        view.setFrame(CGRect::new(
-            CGPoint::ZERO,
-            CGSize::new(size.width, canvas_height),
-        ));
+        view.setFrame(CGRect::new(CGPoint::ZERO, size));
         view.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         content.addSubview(&view);
+        // The column: fixed width, full height at the left edge.
+        panel.setFrame(CGRect::new(
+            CGPoint::ZERO,
+            CGSize::new(TOOLBAR_WIDTH, size.height),
+        ));
+        panel.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
+        content.addSubview(&panel);
+        // The control stack rides the top of the column, in the row the
+        // traffic lights share.
+        toolbar.setFrame(CGRect::new(
+            CGPoint::new(0.0, size.height - TRAFFIC_ROW_HEIGHT),
+            CGSize::new(TOOLBAR_WIDTH, TRAFFIC_ROW_HEIGHT),
+        ));
+        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+        panel.addSubview(&toolbar);
         // Keys land on the canvas; the toolbar buttons refuse first
         // responder, so the window never opens with a focused button.
         window.setInitialFirstResponder(Some(&view));
 
-        // The arrow debug tuner overlays the canvas' top-left corner under
-        // MINISNAP_ARROW_DEBUG — a tuning instrument, not shipped UI.
+        // The arrow debug tuner overlays the canvas right of the toolbar
+        // column under MINISNAP_ARROW_DEBUG — a tuning instrument, not
+        // shipped UI.
         if std::env::var_os("MINISNAP_ARROW_DEBUG").is_some_and(|v| !v.is_empty()) {
             let tuner = arrow_tuner_panel(mtm, &view);
             let fit = tuner.frame().size;
             tuner.setFrame(CGRect::new(
-                CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT - 8.0 - fit.height),
+                CGPoint::new(TOOLBAR_WIDTH + 8.0, size.height - 8.0 - fit.height),
                 fit,
             ));
             tuner.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
