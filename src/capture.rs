@@ -1,5 +1,5 @@
-//! Screen capture at moment T0: the display under the cursor, the frame
-//! image and the visible window list.
+//! Screen capture at moment T0: a frozen frame per display, the display
+//! under the cursor and the visible window list.
 
 use std::sync::mpsc;
 
@@ -163,16 +163,28 @@ pub fn visible_windows(content: &SCShareableContent) -> Vec<T0Window> {
     windows
 }
 
-/// Everything captured at the moment the mode starts (T0).
-pub struct T0Capture {
+/// One captured display surface: the frozen frame of a single display plus
+/// that display's frame in ScreenCaptureKit global points (top-left origin).
+pub struct T0Surface {
     /// Full display frame in display pixels (top-left origin image space).
     pub image: Retained<CGImage>,
+    /// The display's frame in ScreenCaptureKit global points.
+    pub display_frame_sckit: CGRect,
+}
+
+/// Everything captured at the moment the mode starts (T0): a frozen frame
+/// per display, the visible window list and the target display under the
+/// cursor.
+pub struct T0Capture {
+    /// Index into `surfaces` of the display under the cursor.
+    pub target: usize,
+    /// Frozen frame per display, one surface each. Displays whose capture
+    /// failed have no surface and stay unreachable for target switching.
+    pub surfaces: Vec<T0Surface>,
     /// Visible regular windows, front-to-back.
     // Consumed by the overlay's click-to-window hit-testing.
     #[allow(dead_code)]
     pub windows: Vec<T0Window>,
-    /// Captured display's frame in ScreenCaptureKit global points.
-    pub display_frame: CGRect,
 }
 
 /// One-shot screenshot of a whole display at its full pixel resolution
@@ -233,22 +245,46 @@ pub fn capture_display_image(display: &SCDisplay) -> Result<Retained<CGImage>, S
     rx.recv().map_err(|_| "screenshot: handler dropped".to_string())?
 }
 
-/// Capture the whole T0 state for the display under `mouse_sckit`:
-/// shareable content (display + window list) and the display screenshot at
-/// `display_pixels` resolution (points × backing scale). Blocking; call
-/// from a background thread.
+/// Capture the whole T0 state: shareable content (display + window list)
+/// and a screenshot of every display at its full pixel resolution, taken
+/// one after another in the calling (background) thread. `target` indexes
+/// the display under `mouse_sckit`. A failed capture on a non-target
+/// display just drops that surface; a failed target fails the whole
+/// capture, as before. Blocking; call from a background thread.
 pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
     let content = shareable_content()?;
-    let display =
+    let target_display =
         pick_display(&content, mouse_sckit).ok_or("capture: no display under cursor")?;
-    let image = capture_display_image(&display)?;
+    let mut surfaces = Vec::new();
+    let mut target = None;
+    for display in unsafe { content.displays() }.iter() {
+        let is_target = std::ptr::eq(display, &*target_display);
+        match capture_display_image(display) {
+            Ok(image) => {
+                if is_target {
+                    target = Some(surfaces.len());
+                }
+                // SAFETY: plain property access on a live SCDisplay object.
+                let display_frame_sckit = unsafe { display.frame() };
+                surfaces.push(T0Surface {
+                    image,
+                    display_frame_sckit,
+                });
+            }
+            Err(e) => {
+                if is_target {
+                    return Err(e);
+                }
+                eprintln!("capture: skipping a display without a T0 frame: {e}");
+            }
+        }
+    }
+    let target = target.expect("the target display was captured");
     let windows = visible_windows(&content);
-    // SAFETY: plain property access on a live SCDisplay object.
-    let display_frame = unsafe { display.frame() };
     Ok(T0Capture {
-        image,
+        target,
+        surfaces,
         windows,
-        display_frame,
     })
 }
 
@@ -316,6 +352,42 @@ pub mod geometry {
     /// AppKit global point → ScreenCaptureKit global point.
     pub fn point_to_sckit(point: CGPoint, primary_height_pt: f64) -> CGPoint {
         CGPoint::new(point.x, primary_height_pt - point.y)
+    }
+
+    /// ScreenCaptureKit global frame (top-left origin) → AppKit global
+    /// points (bottom-left origin): flip Y around the primary screen height.
+    pub fn frame_sckit_to_appkit(frame_sckit: CGRect, primary_height_pt: f64) -> CGRect {
+        CGRect::new(
+            CGPoint::new(
+                frame_sckit.origin.x,
+                primary_height_pt - frame_sckit.origin.y - frame_sckit.size.height,
+            ),
+            frame_sckit.size,
+        )
+    }
+
+    /// Tolerance (in points) when matching an AppKit screen frame to a
+    /// converted ScreenCaptureKit display frame: the two frameworks report
+    /// frames with slight rounding differences.
+    pub const FRAME_MATCH_TOLERANCE_PT: f64 = 1.0;
+
+    /// Whether an AppKit screen frame and a ScreenCaptureKit display frame
+    /// describe the same display: the SCKit frame is flipped into AppKit
+    /// space by the primary screen height and origin + size are compared
+    /// within `tolerance_pt`. Sizes alone cannot tell two identical
+    /// monitors apart, so the whole frame must match.
+    pub fn screen_matches_display(
+        screen_frame: CGRect,
+        display_frame_sckit: CGRect,
+        primary_height_pt: f64,
+        tolerance_pt: f64,
+    ) -> bool {
+        let appkit = frame_sckit_to_appkit(display_frame_sckit, primary_height_pt);
+        let close = |a: f64, b: f64| (a - b).abs() <= tolerance_pt;
+        close(screen_frame.origin.x, appkit.origin.x)
+            && close(screen_frame.origin.y, appkit.origin.y)
+            && close(screen_frame.size.width, appkit.size.width)
+            && close(screen_frame.size.height, appkit.size.height)
     }
 
     /// Clip a rect to `bounds`, returning `CGRect::ZERO` when they do not
@@ -429,6 +501,56 @@ pub mod geometry {
             assert_eq!((p.x, p.y), (100.0, 900.0));
             let p = point_to_sckit(CGPoint::new(100.0, 900.0), 900.0);
             assert_eq!((p.x, p.y), (100.0, 0.0));
+        }
+
+        #[test]
+        fn sckit_frame_flips_to_appkit() {
+            // External 1080p display above a 900pt primary: in the SCKit
+            // space (1980pt tall) it occupies the top, in AppKit space it
+            // sits at y=900.
+            let f = frame_sckit_to_appkit(rect(0.0, 0.0, 1920.0, 1080.0), 1980.0);
+            assert_eq!((f.origin.x, f.origin.y), (0.0, 900.0));
+            assert_eq!((f.size.width, f.size.height), (1920.0, 1080.0));
+            // The primary itself: SCKit y 1080..1980 → AppKit y 0.
+            let f = frame_sckit_to_appkit(rect(0.0, 1080.0, 1440.0, 900.0), 1980.0);
+            assert_eq!((f.origin.x, f.origin.y), (0.0, 0.0));
+            // A display left of the primary keeps its negative x.
+            let f = frame_sckit_to_appkit(rect(-1920.0, 100.0, 1920.0, 1080.0), 1980.0);
+            assert_eq!((f.origin.x, f.origin.y), (-1920.0, 800.0));
+        }
+
+        #[test]
+        fn screen_matches_display_by_full_frame() {
+            // External above the primary: SCKit (0,0,1920,1080) ↔ AppKit
+            // (0,900).
+            assert!(screen_matches_display(
+                rect(0.0, 900.0, 1920.0, 1080.0),
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                1980.0,
+                FRAME_MATCH_TOLERANCE_PT,
+            ));
+            // Same size at a different position: no match — two identical
+            // monitors are told apart by origin.
+            assert!(!screen_matches_display(
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                1980.0,
+                FRAME_MATCH_TOLERANCE_PT,
+            ));
+            // Rounding differences within the tolerance still match.
+            assert!(screen_matches_display(
+                rect(0.0, 899.5, 1920.0, 1080.5),
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                1980.0,
+                FRAME_MATCH_TOLERANCE_PT,
+            ));
+            // Differences beyond the tolerance do not.
+            assert!(!screen_matches_display(
+                rect(0.0, 900.0, 1920.0, 1085.0),
+                rect(0.0, 0.0, 1920.0, 1080.0),
+                1980.0,
+                FRAME_MATCH_TOLERANCE_PT,
+            ));
         }
 
         #[test]

@@ -2,7 +2,7 @@
 
 ## 1. Захват всех дисплеев в T0 (`src/capture.rs`)
 
-- [ ] 1.1 Ввести `T0Surface { image, display_frame_sckit }` и расширить `T0Capture` до `{ target, windows, surfaces }`: `capture_t0` после `shareable_content` снимает `capture_display_image` для каждого дисплея последовательно в том же фоновом потоке; целевой дисплей — `pick_display` под курсором; дисплеи с неудавшимся кадром пропускаются, неудача целевого — ошибка как сейчас. Хелпер сопоставления SCKit↔AppKit фреймов (флип по `primary_screen_height`, допуск ~1 pt) — чистая функция с юнит-тестами.
+- [x] 1.1 Ввести `T0Surface { image, display_frame_sckit }` и расширить `T0Capture` до `{ target, windows, surfaces }`: `capture_t0` после `shareable_content` снимает `capture_display_image` для каждого дисплея последовательно в том же фоновом потоке; целевой дисплей — `pick_display` под курсором; дисплеи с неудавшимся кадром пропускаются, неудача целевого — ошибка как сейчас. Хелпер сопоставления SCKit↔AppKit фреймов (флип по `primary_screen_height`, допуск ~1 pt) — чистая функция с юнит-тестами.
 - [ ] 1.2 Прокидка в `src/app.rs`: `MainJob::CaptureReady` и `capture_ready` несут только `T0Capture` + `edit` (фрейм/скейл целевого экрана больше не считаются в `start_capture` — их выводит `Overlay::show` из поверхностей).
 
 ## 2. Оверлей: поверхности и переключение (`src/overlay.rs`)
