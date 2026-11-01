@@ -20,7 +20,7 @@
 
 ## 2. present_target — один путь презентации
 
-- [ ] 2.1 В `src/overlay.rs` появляется `OverlayView::present_target(index,
+- [x] 2.1 В `src/overlay.rs` появляется `OverlayView::present_target(index,
   screen)` — общий субсегмент двойников по design (apply_target, idle-сброс
   через новый `hide_hud`, один CATransaction: геометрия + подмена кадра +
   `contentsScale` HUD + `rebuild_border_path`, sampler, veils, окно, рамка).
@@ -31,6 +31,11 @@
   общим путём. Проверка: `cargo build`, `cargo clippy`, `cargo test`; live —
   показ, лупа, протяжка, клик-за-окно, Esc; сценарий «Esc посреди протяжки →
   новый захват» — чистый кадр без затемнения, лупа с первого движения.
+  *(build/clippy/test зелёные, 122 теста; overlay.rs 1666→1848 строк, двойники
+  сведены; live: экземпляр по PID 99774 запускался, лог чистый; захват через
+  трей-меню упирается в TCC-барьер сессионного билда (SCK отдаёт пустой список
+  дисплеев, см. таск 1) — поведенческая live-проверка показа/переключения и
+  сценария «Esc посреди протяжки» ждёт ручной проверки)*
 
 ## 3. Domain-skills pass
 

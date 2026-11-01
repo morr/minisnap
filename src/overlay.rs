@@ -27,7 +27,7 @@ use objc2_quartz_core::{
 
 use crate::capture::{T0Capture, T0Surface, T0Window};
 
-use presentation::SurfaceMap;
+use presentation::{ScreenPair, SurfaceMap};
 
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
@@ -1259,195 +1259,44 @@ impl OverlayView {
         ivars.scale.set(scale);
     }
 
-    /// Point the frame layer at the T0 frame of the target surface (the
-    /// display under the cursor) and show the overlay on its screen.
-    /// Main thread only.
-    fn show(&self, t0: T0Capture, on_done: Box<dyn FnOnce(OverlayOutcome)>) {
+    /// Hide the idle HUD: loupe, readout label, the four axis guides.
+    /// Shared by the target presentation (idle reset) and finish().
+    fn hide_hud(&self) {
         let ivars = self.ivars();
-        let mtm = MainThreadMarker::new().expect("overlay on main thread");
-        if ivars.active.get() {
-            eprintln!("overlay: capture request ignored, mode already active");
-            return;
-        }
-        // The starting target must have a live screen behind it: without
-        // one there is nothing to show the frozen frame on. The pairing is
-        // session data: built once here, it serves every mouseMoved until
-        // finish() (the screen list cannot change mid-session — a display
-        // configuration change cancels the mode).
-        let map = SurfaceMap::for_surfaces(&t0.surfaces, mtm);
-        let Some(screen) = map.screen_of(t0.target) else {
-            eprintln!("overlay: no live screen matches the capture target, dropping");
-            return;
-        };
-        let (screen_frame, scale) = (screen.frame, screen.scale);
-        *ivars.surfaces.borrow_mut() = t0.surfaces;
-        ivars.target.set(t0.target);
-        *ivars.surface_map.borrow_mut() = map;
-        *ivars.windows.borrow_mut() = t0.windows;
-        *ivars.on_done.borrow_mut() = Some(on_done);
-        ivars.finishing.set(false);
-        // A stale receiver from a cancelled session must not eat the new
-        // session's clicks (the mouse guards) or deliver its late answer.
-        *ivars.resolving.borrow_mut() = None;
-        ivars.active.set(true);
-        self.apply_target(t0.target, screen_frame, scale);
-
-        // Attach the layer tree to the view once.
-        if !ivars.layers_attached.get() {
-            ivars.layers_attached.set(true);
-            self.setWantsLayer(true);
-            if let Some(view_layer) = self.layer() {
-                let root = &ivars.root_layer;
-                root.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
-                // z-order: frozen frame, then dimming strips.
-                root.addSublayer(&ivars.frame_layer);
-                for strip in ivars.dim_strips.borrow().iter() {
-                    Self::setup_strip(strip);
-                    root.addSublayer(strip);
-                }
-                self.setup_hud();
-                view_layer.addSublayer(root);
-            }
-        }
-        ivars.root_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
-
-        // Frame layer: the frozen T0 bitmap, 1:1 with the display pixels.
-        let frame_layer = &ivars.frame_layer;
-        frame_layer.setContentsScale(scale);
-        frame_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
-        if let Some(image) = ivars.image.borrow().as_ref() {
-            let image: &CGImage = image;
-            // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
-            // expects it as AnyObject.
-            let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(image).cast::<AnyObject>()) };
-            // Contents is animatable and the layer still holds the previous
-            // session's frame; with implicit actions Core Animation crossfades
-            // from it and the old capture flashes on screen.
-            CATransaction::begin();
-            CATransaction::setDisableActions(true);
-            // SAFETY: contents setter with a valid image object.
-            unsafe { frame_layer.setContents(Some(as_any)) };
-            CATransaction::commit();
-        }
-
-        // Downsample the frame to logical pixels for the loupe and for the
-        // axis-guide brightness sampling.
-        let (w_px, h_px) = ivars.image_size_px.get();
-        let source = ivars.image.borrow();
-        *ivars.sampler.borrow_mut() = source
-            .as_ref()
-            .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
-
-        // Veils for the other displays: cover every screen except the
-        // captured one. A veil click cancels the mode.
-        self.rebuild_veils();
-
-        if let Some(window) = ivars.window.borrow().as_ref() {
-            window.setCollectionBehavior(
-                NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
-            );
-            window.setFrame_display(screen_frame, false);
-            // This accessory app is not active when launched from a shell or
-            // when another app is frontmost: NSApp.activate() alone is
-            // silently denied without user-interaction attribution, the
-            // window never becomes key, and Esc goes nowhere until the
-            // first click activates the app. The deprecated
-            // activateIgnoringOtherApps is still honored for this exact
-            // case; the extra makeKeyAndOrderFront on the next runloop tick
-            // locks the key status in after the activation lands.
-            let app =
-                NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"));
-            // SAFETY: deprecated NSObject method with a BOOL argument.
-            let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
-            app.activate();
-            window.makeKeyAndOrderFront(None);
-            // SAFETY: NSObject delayed-perform scheduling; the selector is a
-            // valid window method, the object argument is nil.
-            let _: () = unsafe {
-                msg_send![window,
-                    performSelector: objc2::sel!(makeKeyAndOrderFront:),
-                    withObject: None::<&AnyObject>,
-                    afterDelay: 0.05
-                ]
-            };
-        }
-
-        // Border: reset invisible without animation, fade in, arm the idle
-        // pulse (it starts only after the fade completes).
-        let border = &ivars.border;
-        border.removeAllAnimations();
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        border.setHidden(false);
-        border.setOpacity(0.0);
-        CATransaction::commit();
-        CATransaction::begin();
-        CATransaction::setAnimationDuration(BORDER_FADE_IN_DUR);
-        border.setOpacity(1.0);
-        CATransaction::commit();
-        Self::start_border_pulse(border);
-
-        let app = NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"));
-        let key_state = ivars
-            .window
-            .borrow()
-            .as_ref()
-            .map(|w| w.isKeyWindow())
-            .unwrap_or(false);
-        let (w_px, h_px) = ivars.image_size_px.get();
-        eprintln!(
-            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, surfaces: {}, windows: {}, veils: {}",
-            w_px,
-            h_px,
-            screen_frame.origin.x,
-            screen_frame.origin.y,
-            screen_frame.size.width,
-            screen_frame.size.height,
-            app.isActive(),
-            key_state,
-            ivars.surfaces.borrow().len(),
-            ivars.windows.borrow().len(),
-            ivars.veils.borrow().len()
-        );
-    }
-
-    /// Switch the capture target to the surface `index`: move the window
-    /// onto its screen, swap the frozen frame, rebuild the loupe sampler
-    /// and the veils, reset the HUD to idle and restart the border
-    /// fade-in/pulse. Refuses a surface without a live screen behind it
-    /// and re-entrant calls (mode not active or finishing, the current
-    /// target). Returns whether the switch happened.
-    fn switch_to_surface(&self, index: usize) -> bool {
-        let ivars = self.ivars();
-        if !ivars.active.get() || ivars.finishing.get() {
-            return false;
-        }
-        if index == ivars.target.get() {
-            return false;
-        }
-        let screen = ivars.surface_map.borrow().screen_of(index);
-        let Some((screen_frame, scale)) = screen.map(|s| (s.frame, s.scale)) else {
-            eprintln!("overlay: no live screen for surface {index}, target kept");
-            return false;
-        };
-        self.apply_target(index, screen_frame, scale);
-        ivars.target.set(index);
-
-        // Reset the interaction state: idle, HUD down, no dimming.
-        ivars.state.set(OverlayState::Idle);
-        self.update_dim(None);
         ivars.loupe.setHidden(true);
         ivars.size_label.setHidden(true);
         ivars.axis_v_dark.setHidden(true);
         ivars.axis_v_light.setHidden(true);
         ivars.axis_h_dark.setHidden(true);
         ivars.axis_h_light.setHidden(true);
+    }
 
-        // Layers follow the new display: root/frame geometry, the frozen
+    /// The single target presentation path, shared by show() and
+    /// switch_to_surface(): point the ivars at surface `index`, reset the
+    /// HUD to the idle look, swap the frozen frame and the layer geometry
+    /// without implicit animations, rebuild the loupe sampler and the
+    /// veils, move the window onto the paired screen, restart the border
+    /// fade-in/pulse. One presentation change has one home: this method
+    /// (its twin paths once cost a 166-line rewrite to keep in sync).
+    fn present_target(&self, index: usize, screen: ScreenPair) {
+        let ivars = self.ivars();
+        let (screen_frame, scale) = (screen.frame, screen.scale);
+        self.apply_target(index, screen_frame, scale);
+        ivars.target.set(index);
+
+        // Reset the interaction state: idle, HUD down, no dimming. For
+        // switch this restores the bare frame; for show it clears whatever
+        // the previous session left behind (a drag interrupted by Esc
+        // leaves the state machine in Drag and the dim strips on screen).
+        ivars.state.set(OverlayState::Idle);
+        self.update_dim(None);
+        self.hide_hud();
+
+        // Layers follow the display: root/frame geometry, the frozen
         // bitmap and HUD sharpness (displays differ in size and backing
         // scale). Without disabling actions Core Animation tweens the
-        // swap, and the frame visibly cross-fades.
+        // swap, and the frame visibly cross-fades from the previous
+        // session's frame.
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         ivars.root_layer.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
@@ -1480,7 +1329,8 @@ impl OverlayView {
         self.rebuild_border_path();
         CATransaction::commit();
 
-        // Loupe sampler for the new frame.
+        // Downsample the new frame to logical pixels for the loupe and for
+        // the axis-guide brightness sampling.
         let (w_px, h_px) = ivars.image_size_px.get();
         let source = ivars.image.borrow();
         *ivars.sampler.borrow_mut() = source
@@ -1488,18 +1338,18 @@ impl OverlayView {
             .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
         drop(source);
 
-        // Veils flip sides: the new target is uncovered, the previous one
-        // is covered.
+        // Veils flip with the target: the new display is uncovered, the
+        // rest is covered. A veil click cancels the mode.
         self.rebuild_veils();
 
-        // The window moves to the new target's screen and stays key.
+        // The window sits on the target's screen and stays key.
         if let Some(window) = ivars.window.borrow().as_ref() {
             window.setFrame_display(screen_frame, false);
             window.makeKeyAndOrderFront(None);
         }
 
         // Border: reset invisible without animation, fade in, arm the idle
-        // pulse (same scheme as show()).
+        // pulse (it starts only after the fade completes).
         let border = &ivars.border;
         border.removeAllAnimations();
         CATransaction::begin();
@@ -1512,13 +1362,142 @@ impl OverlayView {
         border.setOpacity(1.0);
         CATransaction::commit();
         Self::start_border_pulse(border);
+    }
 
+    /// Point the frame layer at the T0 frame of the target surface (the
+    /// display under the cursor) and show the overlay on its screen.
+    /// Main thread only.
+    fn show(&self, t0: T0Capture, on_done: Box<dyn FnOnce(OverlayOutcome)>) {
+        let ivars = self.ivars();
+        let mtm = MainThreadMarker::new().expect("overlay on main thread");
+        if ivars.active.get() {
+            eprintln!("overlay: capture request ignored, mode already active");
+            return;
+        }
+        // The starting target must have a live screen behind it: without
+        // one there is nothing to show the frozen frame on. The pairing is
+        // session data: built once here, it serves every mouseMoved until
+        // finish() (the screen list cannot change mid-session — a display
+        // configuration change cancels the mode).
+        let map = SurfaceMap::for_surfaces(&t0.surfaces, mtm);
+        let Some(screen) = map.screen_of(t0.target) else {
+            eprintln!("overlay: no live screen matches the capture target, dropping");
+            return;
+        };
+        let screen_frame = screen.frame;
+        *ivars.surfaces.borrow_mut() = t0.surfaces;
+        *ivars.surface_map.borrow_mut() = map;
+        *ivars.windows.borrow_mut() = t0.windows;
+        *ivars.on_done.borrow_mut() = Some(on_done);
+        ivars.finishing.set(false);
+        // A stale receiver from a cancelled session must not eat the new
+        // session's clicks (the mouse guards) or deliver its late answer.
+        *ivars.resolving.borrow_mut() = None;
+        ivars.active.set(true);
+
+        // Attach the layer tree to the view once.
+        if !ivars.layers_attached.get() {
+            ivars.layers_attached.set(true);
+            self.setWantsLayer(true);
+            if let Some(view_layer) = self.layer() {
+                let root = &ivars.root_layer;
+                root.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
+                // z-order: frozen frame, then dimming strips.
+                root.addSublayer(&ivars.frame_layer);
+                for strip in ivars.dim_strips.borrow().iter() {
+                    Self::setup_strip(strip);
+                    root.addSublayer(strip);
+                }
+                self.setup_hud();
+                view_layer.addSublayer(root);
+            }
+        }
+        // The window joins all spaces for the whole session; the
+        // presentation below moves it onto the target's screen.
+        if let Some(window) = ivars.window.borrow().as_ref() {
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+        }
+        // This accessory app is not active when launched from a shell or
+        // when another app is frontmost: NSApp.activate() alone is
+        // silently denied without user-interaction attribution, the
+        // window never becomes key, and Esc goes nowhere until the
+        // first click activates the app. The deprecated
+        // activateIgnoringOtherApps is still honored for this exact
+        // case; the extra makeKeyAndOrderFront on the next runloop tick
+        // (after the presentation) locks the key status in after the
+        // activation lands.
+        let app =
+            NSApplication::sharedApplication(MainThreadMarker::new().expect("overlay on main thread"));
+        // SAFETY: deprecated NSObject method with a BOOL argument.
+        let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
+        app.activate();
+
+        self.present_target(t0.target, screen);
+
+        if let Some(window) = ivars.window.borrow().as_ref() {
+            // SAFETY: NSObject delayed-perform scheduling; the selector is a
+            // valid window method, the object argument is nil.
+            let _: () = unsafe {
+                msg_send![window,
+                    performSelector: objc2::sel!(makeKeyAndOrderFront:),
+                    withObject: None::<&AnyObject>,
+                    afterDelay: 0.05
+                ]
+            };
+        }
+
+        let key_state = ivars
+            .window
+            .borrow()
+            .as_ref()
+            .map(|w| w.isKeyWindow())
+            .unwrap_or(false);
+        let (w_px, h_px) = ivars.image_size_px.get();
         eprintln!(
-            "overlay: target switched to surface {index} on screen ({:.0},{:.0} {}x{}) scale={scale}",
+            "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, surfaces: {}, windows: {}, veils: {}",
+            w_px,
+            h_px,
             screen_frame.origin.x,
             screen_frame.origin.y,
             screen_frame.size.width,
-            screen_frame.size.height
+            screen_frame.size.height,
+            app.isActive(),
+            key_state,
+            ivars.surfaces.borrow().len(),
+            ivars.windows.borrow().len(),
+            ivars.veils.borrow().len()
+        );
+    }
+
+    /// Switch the capture target to the surface `index`: the shared
+    /// presentation path does the work (idle reset, frame swap, sampler,
+    /// veils, window move, border restart). Refuses a surface without a
+    /// live screen behind it and re-entrant calls (mode not active or
+    /// finishing, the current target). Returns whether the switch
+    /// happened.
+    fn switch_to_surface(&self, index: usize) -> bool {
+        let ivars = self.ivars();
+        if !ivars.active.get() || ivars.finishing.get() {
+            return false;
+        }
+        if index == ivars.target.get() {
+            return false;
+        }
+        let Some(screen) = ivars.surface_map.borrow().screen_of(index) else {
+            eprintln!("overlay: no live screen for surface {index}, target kept");
+            return false;
+        };
+        self.present_target(index, screen);
+        eprintln!(
+            "overlay: target switched to surface {index} on screen ({:.0},{:.0} {}x{}) scale={}",
+            screen.frame.origin.x,
+            screen.frame.origin.y,
+            screen.frame.size.width,
+            screen.frame.size.height,
+            screen.scale
         );
         true
     }
@@ -1733,12 +1712,7 @@ impl OverlayView {
             FinishRequest::Cancelled => OverlayOutcome::Cancelled,
         };
         *ivars.sampler.borrow_mut() = None;
-        ivars.loupe.setHidden(true);
-        ivars.size_label.setHidden(true);
-        ivars.axis_v_dark.setHidden(true);
-        ivars.axis_v_light.setHidden(true);
-        ivars.axis_h_dark.setHidden(true);
-        ivars.axis_h_light.setHidden(true);
+        self.hide_hud();
 
         // Get out of the user's way first: the window drops the moment the
         // mode ends, and only then the output stage runs on the exposed
