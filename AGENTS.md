@@ -56,6 +56,12 @@ While driving a worktree instance keep it the only running one: quit the
 main-checkout instance first if it is up, and bring it back afterwards
 (`open /Users/morr/develop/minisnap/target/release/minisnap.app`).
 
+Emulation vs. the user's own activity. When a session emulates mouse and
+window interaction with the running app and can't get through because the
+user is actively using the PC, stop retrying and ask the user: either keep
+attempting the emulation, or the user performs the actions themselves and
+reports the results.
+
 ## OpenSpec workflow
 
 This project is developed through OpenSpec: every feature starts as a change
