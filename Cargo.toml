@@ -65,6 +65,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSSlider",
     "NSPopover",
     "NSViewController",
+    "NSSound",
 ] }
 objc2-quartz-core = { version = "0.3", features = [
     "CALayer",
@@ -98,7 +99,7 @@ objc2-screen-capture-kit = { version = "0.3", features = [
     "SCShareableContent",
     "SCStream",
 ] }
-objc2-core-foundation = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFPreferences"] }
 block2 = "0.6"
 global-hotkey = { version = "0.9", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
