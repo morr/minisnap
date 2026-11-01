@@ -17,14 +17,13 @@ use objc2_app_kit::{
     NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBox,
     NSBoxType, NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent,
     NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightRegular, NSGraphicsContext, NSImage,
-    NSImageSymbolConfiguration, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSPopover,
+    NSImageSymbolConfiguration, NSPasteboard, NSPasteboardTypeString, NSPopover,
     NSPopoverDelegate, NSScreen, NSSlider, NSStackView, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTextView, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowButton,
     NSWindowTitleVisibility, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::NSAccessibility;
-use objc2_app_kit::NSLayoutConstraintOrientation;
 use objc2_quartz_core::CALayer;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
@@ -49,20 +48,18 @@ const MARKER_RADIUS_PT: f64 = 4.5;
 /// gray (#F2F2F2) of the zcode chrome — no vibrancy anywhere.
 const WINDOW_BG: [f64; 4] = [242.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0, 1.0];
 
-/// Height of the column's top row, in points: the traffic-light cluster
-/// and the leafing buttons share it.
-const TRAFFIC_ROW_HEIGHT: f64 = 40.0;
+/// Toolbar strip height, in points: room for the 28 pt buttons with air.
+const TOOLBAR_HEIGHT: f64 = 40.0;
 
-/// Leading padding of the top row, in points: the cluster of three visible
-/// traffic lights ends at ~64 pt (the yellow button's right edge), plus a
-/// gap so the controls next in the row never run under it.
-const TRAFFIC_ROW_PAD: f64 = 70.0;
+/// Leading padding of the toolbar row, in points: the cluster of three
+/// visible traffic lights ends at ~64 pt (the yellow button's right
+/// edge), plus a gap so the controls next in the row never run under it.
+/// The miniaturize and zoom buttons are hidden today; the pad is where
+/// they come back (editor-system-buttons).
+const BAR_LEADING_PAD: f64 = 70.0;
 
-/// Width of the toolbar column, in points: the top row's natural width —
-/// the leading pad, two 28 pt leafing buttons with 8 pt between them and
-/// a 12 pt trailing pad. The column never narrows below this.
-const TOOLBAR_WIDTH: f64 =
-    TRAFFIC_ROW_PAD + 2.0 * TOOLBAR_BUTTON_SIZE.width + BAR_SPACING + 12.0;
+/// Trailing padding of the toolbar row, in points.
+const BAR_TRAILING_PAD: f64 = 12.0;
 
 /// Gap between the image card and the window's top, right and bottom
 /// edges, in points; the card touches the toolbar column on the left.
@@ -96,9 +93,10 @@ const SLIDER_TRACK_HEIGHT: f64 = 3.0;
 /// Wash behind the active tool's button: the system accent at this alpha.
 const ACTIVE_WASH: f64 = 0.25;
 
-/// The part of the slider track ahead of the knob's reach: a faint white
-/// line reading as recessed.
-const TRACK_UNFILLED: f64 = 0.22;
+/// The part of the slider track ahead of the knob's reach: a faint black
+/// line reading as recessed on the light column (the dark theme's white
+/// one blended into the light bar).
+const TRACK_UNFILLED: f64 = 0.15;
 
 /// Alpha of the slider knob's soft shadow.
 const KNOB_SHADOW: f64 = 0.35;
@@ -135,9 +133,14 @@ const COLOR_BUTTON_TAG: isize = -1;
 /// the hover and active plates read with air around the icon.
 const TOOLBAR_BUTTON_SIZE: CGSize = CGSize::new(28.0, 28.0);
 
-/// Spacing between adjacent toolbar controls, in points: enough air that
-/// the plates of neighboring buttons never read as one strip.
-const BAR_SPACING: f64 = 8.0;
+/// Spacing between adjacent toolbar controls, in points: the tight
+/// packing of the reference toolbar, where the hover plates of neighbors
+/// nearly touch.
+const BAR_SPACING: f64 = 4.0;
+
+/// Spacing inside the ◄/► leafing pair, in points: the pair reads as one
+/// tight cluster, like the back/forward pair of the reference toolbar.
+const LEAF_PAIR_SPACING: f64 = 4.0;
 
 /// Spacing around the zone dividers and between the tool groups, in
 /// points: the wider gap that separates the toolbar's zones.
@@ -585,8 +588,9 @@ impl WidthSliderView {
         }
         let knob_x = self.knob_x(w);
         let track_y = h / 2.0 - SLIDER_TRACK_HEIGHT / 2.0;
-        // The recessed track behind the fill.
-        CGContext::set_rgb_fill_color(Some(&cg), 1.0, 1.0, 1.0, TRACK_UNFILLED);
+        // The recessed track behind the fill: black at a low alpha, so it
+        // stays visible on the light column.
+        CGContext::set_rgb_fill_color(Some(&cg), 0.0, 0.0, 0.0, TRACK_UNFILLED);
         CGContext::fill_rect(
             Some(&cg),
             CGRect::new(
@@ -1111,16 +1115,15 @@ impl EditorView {
             .unwrap_or((0, 0))
     }
 
-    /// The image card area: everything right of the toolbar column, inset
-    /// from the top, right and bottom window edges; the column side is in
-    /// contact. The card's own paint (fill, border, rounding) lives in
+    /// The image card area: the canvas inset by the card gap on all four
+    /// sides. The card's own paint (fill, border, rounding) lives in
     /// `draw`; this is the geometry the frame centers in.
     fn card_rect(&self) -> CGRect {
         let bounds = self.bounds();
         CGRect::new(
-            CGPoint::new(TOOLBAR_WIDTH, CARD_GAP),
+            CGPoint::new(CARD_GAP, CARD_GAP),
             CGSize::new(
-                (bounds.size.width - TOOLBAR_WIDTH - CARD_GAP).max(0.0),
+                (bounds.size.width - 2.0 * CARD_GAP).max(0.0),
                 (bounds.size.height - 2.0 * CARD_GAP).max(0.0),
             ),
         )
@@ -1182,20 +1185,11 @@ impl EditorView {
             return;
         }
 
-        // The window and the column: the flat light gray of the zcode
-        // chrome. The checker starts right of the toolbar column — the
-        // column itself stays solid.
-        let window_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
-            WINDOW_BG[0],
-            WINDOW_BG[1],
-            WINDOW_BG[2],
-            WINDOW_BG[3],
-        );
-        window_bg.setFill();
-        CGContext::fill_rect(Some(&cg), bounds);
         // Backdrop: the light checkerboard image editors draw behind
         // transparent areas — the frame floats on it, centered in the
-        // card.
+        // card. The canvas paints nothing else: the window background
+        // (the flat light gray) owns everything outside the card, so the
+        // system corner rounding survives.
         let mut cache = ivars.checker.borrow_mut();
         let checker = cache.get_or_insert_with(checker_color);
         checker.setFill();
@@ -2333,10 +2327,11 @@ impl EditorView {
                 fit_size(iw as f64 / density, ih as f64 / density, visible.width, visible.height)
             })
             .unwrap_or_else(|| CGSize::new(iw as f64 / density, ih as f64 / density));
-        // The window wraps the frame: the toolbar column on the left, the
-        // card gap on the other three sides.
-        let width = TOOLBAR_WIDTH + CARD_GAP + content_size.width;
-        let height = content_size.height + 2.0 * CARD_GAP;
+        // The window wraps the frame: the toolbar strip on top, the card
+        // gap on the other three sides. The width never drops below the
+        // toolbar's minimum.
+        let width = (content_size.width + 2.0 * CARD_GAP).max(self.ivars().min_width.get());
+        let height = TOOLBAR_HEIGHT + content_size.height + 2.0 * CARD_GAP;
         self.ivars().frame_size.set(content_size);
         if self.ivars().placed.get() {
             // Keep the window's top-left corner where it was: AppKit's frame
@@ -2487,11 +2482,28 @@ impl EditorView {
         });
     }
 
-    /// Tag of the toolbar-panel button under a window-space point.
+    /// Tag of the toolbar-panel button under a window-space point. The
+    /// buttons are matched by frame, not by `hitTest`: the system-hosted
+    /// buttons of recent macOS skip the classic hit-testing path (hover
+    /// silently found nothing), while their frames are plain geometry.
     fn panel_button_at(&self, point: CGPoint) -> Option<isize> {
-        let panel = self.ivars().toolbar_panel.borrow().clone()?;
-        let hit = panel.hitTest(panel.convertPoint_fromView(point, None))?;
-        hit.downcast_ref::<NSButton>().map(|button| button.tag() as isize)
+        let inside = |rect: CGRect| {
+            point.x >= rect.origin.x
+                && point.x <= rect.origin.x + rect.size.width
+                && point.y >= rect.origin.y
+                && point.y <= rect.origin.y + rect.size.height
+        };
+        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+            if inside(button.convertRect_toView(button.bounds(), None)) {
+                return Some(*tag);
+            }
+        }
+        if let Some(button) = self.ivars().color_button.borrow().as_ref() {
+            if inside(button.convertRect_toView(button.bounds(), None)) {
+                return Some(COLOR_BUTTON_TAG);
+            }
+        }
+        None
     }
 
     /// Tag of the palette preset under a window-space point, if the
@@ -2879,7 +2891,18 @@ fn icon_button(
     if let Some(layer) = button.layer() {
         layer.setCornerRadius(7.0);
     }
-    button.setFrame(CGRect::new(CGPoint::ZERO, TOOLBAR_BUTTON_SIZE));
+    // The 28×28 tile rides on constraints: the toolbar stack sizes
+    // arranged views by autolayout and hugs a frame-only button down to
+    // its glyph — the hover plate shrank with it.
+    button.setTranslatesAutoresizingMaskIntoConstraints(false);
+    button
+        .widthAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.width)
+        .setActive(true);
+    button
+        .heightAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
+        .setActive(true);
     let name = NSString::from_str(title);
     button.setToolTip(Some(&name));
     button.setAccessibilityLabel(Some(&name));
@@ -3220,7 +3243,10 @@ impl EditorWindow {
         let window = unsafe {
             KeyableWindow::init_with_content_rect(
                 KeyableWindow::alloc(mtm),
-                CGRect::new(CGPoint::ZERO, INITIAL_SIZE),
+                CGRect::new(
+                    CGPoint::ZERO,
+                    CGSize::new(INITIAL_SIZE.width, INITIAL_SIZE.height + TOOLBAR_HEIGHT),
+                ),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::FullSizeContentView
                     | NSWindowStyleMask::Closable,
@@ -3237,16 +3263,27 @@ impl EditorWindow {
         // An accessory app has no dock icon: a miniaturized window would be
         // unreachable, and zoom is meaningless — the window is refit to
         // every shot anyway. Hide both standard buttons; close stays.
+        // Bringing the three lights alive is editor-system-buttons.
         for role in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
             if let Some(button) = window.standardWindowButton(role) {
                 button.setHidden(true);
             }
         }
-        // The light appearance everywhere: the column, the color popover
-        // and every system control resolve against it.
+        // The light appearance everywhere: the popover and every system
+        // control resolve against it.
         if let Some(aqua) = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }) {
             window.setAppearance(Some(&aqua));
         }
+        // The flat light gray both the toolbar strip and the card margins
+        // read as. The window paints it — the canvas stays clear of the
+        // window background, so the system corner rounding survives.
+        let window_bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+            WINDOW_BG[0],
+            WINDOW_BG[1],
+            WINDOW_BG[2],
+            WINDOW_BG[3],
+        );
+        window.setBackgroundColor(Some(&window_bg));
         // Toolbar hover styling rides on mouse-moved events.
         window.setAcceptsMouseMovedEvents(true);
         // The window lives in the app controller for the whole process;
@@ -3279,6 +3316,9 @@ impl EditorWindow {
         toolbar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         toolbar.setSpacing(BAR_SPACING);
         let mut tool_buttons = Vec::new();
+        // The ◄/► leafing pair rides right of the traffic lights' leading
+        // pad, tight together like the back/forward pair of the reference.
+        let mut leaf_buttons = Vec::new();
         for (tag, symbol, title) in [
             (PAGE_PREV_TAG, "chevron.left", "Previous shot"),
             (PAGE_NEXT_TAG, "chevron.right", "Next shot"),
@@ -3290,21 +3330,13 @@ impl EditorWindow {
                 button.setAction(Some(sel!(pageClicked:)));
             }
             toolbar.addArrangedSubview(&button);
+            leaf_buttons.push(button.clone());
             tool_buttons.push((tag, button));
         }
-        let file_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        file_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        file_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-        // Long file names truncate instead of stretching the window's
-        // minimum width.
-        file_label.setContentCompressionResistancePriority_forOrientation(
-            250.0,
-            NSLayoutConstraintOrientation::Horizontal,
-        );
-        toolbar.addArrangedSubview(&file_label);
-        // Zones: leafing + file name | color + width | tools,
-        // separated by 1 pt dividers with a wider gap around them.
-        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &file_label);
+        toolbar.setCustomSpacing_afterView(LEAF_PAIR_SPACING, &leaf_buttons[0]);
+        // Zones: leafing | color + width | tools, separated by 1 pt
+        // dividers with a wider gap around them.
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leaf_buttons[1]);
         let leading_sep = bar_separator(mtm);
         toolbar.addArrangedSubview(&leading_sep);
         toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &leading_sep);
@@ -3365,19 +3397,6 @@ impl EditorWindow {
             color_button.setTarget(Some(&view));
             color_button.setAction(Some(sel!(colorClicked:)));
         }
-        // The swatch and the slider join the stack after the tools —
-        // they close the right-hand zone.
-        // The slider sizes itself through its intrinsicContentSize — the
-        // toolbar stack reads it for layout.
-        let slider = WidthSliderView::new(mtm);
-        // SAFETY: target is this canvas view, alive for the process; the
-        // action reads `doubleValue` off the sender.
-        unsafe {
-            slider.set_target(Some(&*view));
-            slider.set_action(Some(sel!(widthChanged:)));
-        }
-        // The color and the width follow the file name: they dress the
-        // element being drawn before the tools start.
         // The slider sizes itself through its intrinsicContentSize — the
         // toolbar stack reads it for layout.
         let slider = WidthSliderView::new(mtm);
@@ -3413,50 +3432,55 @@ impl EditorWindow {
             tool_buttons.push((tool.tag(), button));
         }
 
-        // Layout: the canvas fills the whole window and paints its
-        // background; the toolbar column overlays the left edge and hosts
-        // the controls. The canvas goes in first, so the column stays on
-        // top of it and keeps the clicks on its own surface.
+        // Layout: the toolbar strip across the top, the canvas filling
+        // everything below it. The canvas paints nothing outside the card,
+        // so the window background — the flat light gray — shows around
+        // it and under the transparent strip.
         let content = window.contentView().expect("content view");
         let size = content.bounds().size;
-        // The window cannot shrink below the controls: the stack's
-        // fitting width.
-        let min_width = toolbar.fittingSize().width;
+        // The window cannot shrink below the bar: the leading pad for the
+        // traffic lights, the row's fitting width, the trailing pad.
+        let min_width = toolbar.fittingSize().width + BAR_LEADING_PAD + BAR_TRAILING_PAD;
         window.setContentMinSize(CGSize::new(min_width, 0.0));
         view.ivars().min_width.set(min_width);
-        view.setFrame(CGRect::new(CGPoint::ZERO, size));
+        panel.setFrame(CGRect::new(
+            CGPoint::new(0.0, size.height - TOOLBAR_HEIGHT),
+            CGSize::new(size.width, TOOLBAR_HEIGHT),
+        ));
+        panel.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        content.addSubview(&panel);
+        toolbar.setFrame(CGRect::new(
+            CGPoint::new(BAR_LEADING_PAD, 0.0),
+            CGSize::new(size.width - BAR_LEADING_PAD - BAR_TRAILING_PAD, TOOLBAR_HEIGHT),
+        ));
+        toolbar.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        panel.addSubview(&toolbar);
+        view.setFrame(CGRect::new(
+            CGPoint::ZERO,
+            CGSize::new(size.width, size.height - TOOLBAR_HEIGHT),
+        ));
         view.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         content.addSubview(&view);
-        // The column: fixed width, full height at the left edge.
-        panel.setFrame(CGRect::new(
-            CGPoint::ZERO,
-            CGSize::new(TOOLBAR_WIDTH, size.height),
-        ));
-        panel.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
-        content.addSubview(&panel);
-        // The control stack rides the top of the column, in the row the
-        // traffic lights share.
-        toolbar.setFrame(CGRect::new(
-            CGPoint::new(0.0, size.height - TRAFFIC_ROW_HEIGHT),
-            CGSize::new(TOOLBAR_WIDTH, TRAFFIC_ROW_HEIGHT),
-        ));
-        toolbar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-        panel.addSubview(&toolbar);
         // Keys land on the canvas; the toolbar buttons refuse first
         // responder, so the window never opens with a focused button.
         window.setInitialFirstResponder(Some(&view));
 
-        // The arrow debug tuner overlays the canvas right of the toolbar
-        // column under MINISNAP_ARROW_DEBUG — a tuning instrument, not
-        // shipped UI.
+        // The arrow debug tuner overlays the canvas' top-left corner under
+        // MINISNAP_ARROW_DEBUG — a tuning instrument, not shipped UI.
         if std::env::var_os("MINISNAP_ARROW_DEBUG").is_some_and(|v| !v.is_empty()) {
             let tuner = arrow_tuner_panel(mtm, &view);
             let fit = tuner.frame().size;
             tuner.setFrame(CGRect::new(
-                CGPoint::new(TOOLBAR_WIDTH + 8.0, size.height - 8.0 - fit.height),
+                CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT - 8.0 - fit.height),
                 fit,
             ));
             tuner.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
@@ -3465,7 +3489,6 @@ impl EditorWindow {
 
         *view.ivars().tool_buttons.borrow_mut() = tool_buttons;
         *view.ivars().color_button.borrow_mut() = Some(color_button);
-        *view.ivars().file_label.borrow_mut() = Some(file_label);
         *view.ivars().width_slider.borrow_mut() = Some(slider);
         *view.ivars().toolbar_panel.borrow_mut() = Some(panel);
         view.update_tool_highlight();
