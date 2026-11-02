@@ -1,6 +1,8 @@
 //! Shared library of minisnap: the app binary and the `minisnap-mcp`
 //! agent bridge are both built on these modules.
 
+pub mod agent_proto;
+pub mod agent_server;
 pub mod app;
 pub mod capture;
 pub mod config;

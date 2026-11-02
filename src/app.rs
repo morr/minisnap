@@ -46,7 +46,7 @@ const TICK_INTERVAL: f64 = 0.05;
 /// Owned data produced on background threads, dispatched on the main thread
 /// by the tick. The controller itself is main-thread-only, so jobs carry
 /// data instead of closures over it.
-enum MainJob {
+pub(crate) enum MainJob {
     CaptureReady {
         result: Result<crate::capture::T0Capture, String>,
         /// Open the editor window after the usual output.
@@ -54,6 +54,10 @@ enum MainJob {
     },
     /// A finished capture produced a shot file to open in the editor.
     OpenEditor { path: std::path::PathBuf },
+    /// An agent-server request arrived over HTTP; the pump hands it to the
+    /// controller on the main thread and the reply goes back over the
+    /// channel.
+    Agent(crate::agent_server::MainJobAgent),
 }
 
 struct AppIvars {
@@ -178,6 +182,10 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
+            // The registry record belongs to this process only while it
+            // lives; an ungraceful death leaves a stale file the reader
+            // prunes by pid.
+            crate::agent_server::deregister(std::process::id());
             let mtm = MainThreadMarker::from(self);
             NSApplication::sharedApplication(mtm).terminate(None);
         }
@@ -201,6 +209,10 @@ define_class!(
                         self.capture_ready(result, edit)
                     }
                     Some(MainJob::OpenEditor { path }) => self.open_editor(path),
+                    Some(MainJob::Agent(job)) => {
+                        let result = self.handle_agent(job.request);
+                        let _ = job.reply.send(result);
+                    }
                     None => break,
                 }
             }
@@ -435,8 +447,39 @@ impl AppController {
             });
         }
 
+        // The agent server rides the same job pump: requests parsed on its
+        // listener thread arrive here as MainJob::Agent on the main thread.
+        let (_, identity_exe) = instance_identity();
+        let identity = crate::agent_proto::AgentIdentity {
+            pid: std::process::id(),
+            exe: identity_exe.display().to_string(),
+            // `checkout_label` moved into the ivars above; the identity
+            // needs the same value.
+            checkout: this.ivars().checkout_label.clone(),
+            port: 0,
+        };
+        crate::agent_server::start(&config, identity, this.ivars().jobs_tx.clone());
+
         this.schedule_tick(mtm);
         this
+    }
+
+    /// Execute one agent request on the main thread and produce the reply.
+    /// Every arm runs the same code path the corresponding menu item,
+    /// hotkey or mouse handler runs — the agent channel adds no new
+    /// behaviors, it drives the existing ones.
+    fn handle_agent(
+        &self,
+        request: crate::agent_server::AgentRequest,
+    ) -> Result<crate::agent_proto::AgentResponse, String> {
+        use crate::agent_server::AgentRequest;
+        match request {
+            AgentRequest::State => Err("state: not wired yet".into()),
+            AgentRequest::Action(_) => Err("action: not wired yet".into()),
+            AgentRequest::Editor(_) => Err("editor: not wired yet".into()),
+            AgentRequest::Screenshot { .. } => Err("screenshot: not wired yet".into()),
+            AgentRequest::Log { .. } => Err("log: not wired yet".into()),
+        }
     }
 
     fn apply_menu_hotkey(item: &NSMenuItem, hotkey: &HotKey) {

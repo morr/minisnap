@@ -23,6 +23,11 @@ pub struct Config {
     pub save_dir: PathBuf,
     /// Maximum number of saved shots kept on disk.
     pub retention: u32,
+    /// Whether the agent server (the MCP control channel) is raised at
+    /// startup.
+    pub agent_server_enabled: bool,
+    /// Agent server port override; `None` listens on the module default.
+    pub agent_server_port: Option<u16>,
 }
 
 /// The pre-editor default capture combination (⌘⌥5). configs written before
@@ -52,6 +57,8 @@ impl Config {
             open_hotkey: default_open_hotkey(),
             save_dir: pictures_dir.join("minisnap"),
             retention: 100,
+            agent_server_enabled: true,
+            agent_server_port: None,
         }
     }
 
@@ -78,6 +85,8 @@ impl Config {
             open_hotkey: raw.open_hotkey,
             save_dir: raw.save_dir,
             retention: raw.retention,
+            agent_server_enabled: raw.agent_server_enabled.unwrap_or(true),
+            agent_server_port: raw.agent_server_port,
         };
         let migrated = migrate_legacy_defaults(&mut config, raw.capture_edit_hotkey.is_some());
         Ok((config, migrated))
@@ -139,6 +148,9 @@ struct RawConfig {
     open_hotkey: HotKey,
     save_dir: PathBuf,
     retention: u32,
+    /// Optional so pre-agent-server files load unchanged.
+    agent_server_enabled: Option<bool>,
+    agent_server_port: Option<u16>,
 }
 
 /// One-time migration of configs written before the editor existed: a
