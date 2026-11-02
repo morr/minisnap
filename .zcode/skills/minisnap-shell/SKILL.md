@@ -11,7 +11,8 @@ description: minisnap shell domain map — app lifecycle, tray menu and instance
 
 | Модуль | Ответственность | Ключевое |
 |---|---|---|
-| `src/app.rs` | lifecycle, трей-меню, идентичность экземпляра, маршрутизация действий, тик-насос, диалог разрешения, логика рекордера | `run`, `AppController`, `AppIvars`, `MainJob`, `tick:`, `start_capture`, `recorded_key_event`, `finish_recording`, `show_permission_dialog`, `checkout_label`, `instance_identity` |
+| `src/app.rs` | lifecycle, трей-меню, идентичность экземпляра, маршрутизация действий, тик-насос, диалог разрешения, клей рекордера | `run`, `AppController`, `AppIvars`, `MainJob`, `tick:`, `start_capture`, `recorded_key_event`, `finish_recording`, `show_permission_dialog`, `checkout_label`, `instance_identity` |
+| `src/hotkey_recorder.rs` | чистая машина рекордера: правила записи комбинации без AppKit, юнит-тесты | `Recorder` (`idle`, `begin`, `feed`, `recording_row`), `FeedOutcome` |
 | `src/config.rs` | TOML-конфиг (хоткеи, `save_dir`, `retention`), дефолты, миграция легаси | `Config`, `standard_path`, `load_or_create`, `load_from_migrating`, `save_to`, `migrate_legacy_defaults`, `legacy_capture_hotkey` |
 | `src/prefs.rs` | окно настроек: три строки-рекордера, UI в коде (без xib) | `PrefsWindow` (`window`, `capture_button`, `capture_edit_button`, `open_button`), `build`, `ROW_CAPTURE`/`ROW_CAPTURE_EDIT`/`ROW_OPEN_LATEST` |
 | `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос, конверсии клавишных кодов | `HotkeyAction`, `HotkeyRegistry::apply`, `pending_actions`, `key_equivalent_string`, `modifiers_from_flags`, `scancode_to_key`, `render_combo` |
