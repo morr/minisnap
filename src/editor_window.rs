@@ -1079,6 +1079,98 @@ impl EditorView {
         self.redraw();
     }
 
+    /// Put the field editor's font at `size_px` image pixels: the field's
+    /// own font (used from the next edit on) and the live field editor's —
+    /// the one on screen, since editing carries its own font once begun.
+    fn set_field_font(&self, field: &NSTextField, size_px: f64) {
+        let font_pt = (size_px * self.view_scale().1).max(9.0);
+        let font = NSFont::fontWithName_size(&NSString::from_str(text::FONT_NAME), font_pt);
+        let Some(font) = font.as_ref() else {
+            return;
+        };
+        field.setFont(Some(font));
+        if let Some(editor) = field.currentEditor() {
+            editor.setFont(Some(font));
+        }
+    }
+
+    /// The slider's text mode: the open input's font size follows the drag.
+    /// The field font updates live, the field re-frames (the callout block
+    /// re-anchors beside the base, a plain text block shifts into the
+    /// frame), and for an existing element the size change lands as a
+    /// journal command — one undo step per drag, the file updates
+    /// immediately. The stroke width stays untouched: the slider returns to
+    /// it when the input ends.
+    fn slider_text_size(&self, size: f64) {
+        let ivars = self.ivars();
+        let Some(field) = ivars.text_editor.borrow().clone() else {
+            return;
+        };
+        ivars.text_size.set(size);
+        // Shift+Enter leaves a line separator (U+2028) until the commit
+        // normalizes it; measure it as the newline it will become.
+        let text = field.stringValue().to_string().replace('\u{2028}', "\n");
+        match ivars.text_target.get() {
+            // A pending callout: the machine re-anchors its block beside
+            // the base for the new size; the arrow's width and tip stay as
+            // drawn.
+            Some(TextTarget::New { callout: true, .. }) => {
+                let (w_pt, h_pt) = self.text_editor_size(&text, size, true);
+                let (sx, sy) = self.view_scale();
+                let (iw, ih) = self.image_size();
+                let anchor = ivars.machine.borrow_mut().set_pending_callout_size(
+                    size,
+                    Size::new(w_pt / sx, h_pt / sy),
+                    Size::new(iw as f64, ih as f64),
+                );
+                if let Some(anchor) = anchor {
+                    self.set_field_font(&field, size);
+                    field.setFrame(self.text_editor_frame(anchor, &text, size, true));
+                }
+            }
+            // A brand-new plain text: the field font and frame follow, the
+            // block shifted into the frame; the commit re-clamps from the
+            // original origin with the final text.
+            Some(TextTarget::New { origin, .. }) => {
+                let (w_pt, h_pt) = self.text_editor_size(&text, size, false);
+                let (sx, sy) = self.view_scale();
+                let (iw, ih) = self.image_size();
+                let clamped = clamp_block(
+                    origin,
+                    w_pt / sx,
+                    h_pt / sy,
+                    Rect::new(0.0, 0.0, iw as f64, ih as f64),
+                );
+                self.set_field_font(&field, size);
+                field.setFrame(self.text_editor_frame(clamped, &text, size, false));
+            }
+            // An existing element: the size change is a journal command
+            // (the drag coalesces into one undo step), then the font and
+            // the frame follow the updated element.
+            Some(TextTarget::Existing { id }) => {
+                let result = ivars
+                    .shot
+                    .borrow_mut()
+                    .as_mut()
+                    .map(|shot| shot.apply_text_size(id, size));
+                if let Some(Err(err)) = result {
+                    eprintln!("editor: failed to restyle the text size: {err}");
+                }
+                self.set_field_font(&field, size);
+                let shot = ivars.shot.borrow();
+                if let Some(el) = shot.as_ref().and_then(|shot| shot.doc.element(id)) {
+                    let (origin, callout) = match &el.kind {
+                        ElementKind::Text { origin, .. } => (*origin, false),
+                        ElementKind::Callout { anchor, .. } => (*anchor, true),
+                        _ => return,
+                    };
+                    field.setFrame(self.text_editor_frame(origin, &text, size, callout));
+                }
+            }
+            None => {}
+        }
+    }
+
     /// Finish the open field editor: commit its text as a command — add a
     /// new element, edit the existing one's text, or delete an emptied
     /// element. Safe to call when no editor is open.
@@ -1541,27 +1633,33 @@ impl EditorView {
             ToolbarEvent::PagePrevious => self.page(-1),
             ToolbarEvent::PageNext => self.page(1),
             ToolbarEvent::SliderChanged(value) => {
-                self.ivars().stroke_width.set(value);
-                // With a stroke-bearing element selected, the slider
-                // restyles that element live (one undo step per drag, not
-                // per tick).
-                if let Some(id) = self.ivars().selection.get() {
-                    let strokeable = self
-                        .ivars()
-                        .shot
-                        .borrow()
-                        .as_ref()
-                        .and_then(|shot| shot.doc.element(id))
-                        .is_some_and(|el| stroke_width_of(&el.kind).is_some());
-                    if strokeable {
-                        let result = self
+                if self.ivars().text_editor.borrow().is_some() {
+                    // Text mode: the open input's size follows the drag;
+                    // the stroke width wakes up when the input ends.
+                    self.slider_text_size(value);
+                } else {
+                    self.ivars().stroke_width.set(value);
+                    // With a stroke-bearing element selected, the slider
+                    // restyles that element live (one undo step per drag,
+                    // not per tick).
+                    if let Some(id) = self.ivars().selection.get() {
+                        let strokeable = self
                             .ivars()
                             .shot
-                            .borrow_mut()
-                            .as_mut()
-                            .map(|shot| shot.apply_width(id, value));
-                        if let Some(Err(err)) = result {
-                            eprintln!("editor: failed to restyle the element width: {err}");
+                            .borrow()
+                            .as_ref()
+                            .and_then(|shot| shot.doc.element(id))
+                            .is_some_and(|el| stroke_width_of(&el.kind).is_some());
+                        if strokeable {
+                            let result = self
+                                .ivars()
+                                .shot
+                                .borrow_mut()
+                                .as_mut()
+                                .map(|shot| shot.apply_width(id, value));
+                            if let Some(Err(err)) = result {
+                                eprintln!("editor: failed to restyle the element width: {err}");
+                            }
                         }
                     }
                 }

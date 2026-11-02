@@ -18,7 +18,7 @@
 ## 4. Окно: текстовая ветка слайдера
 
 - [x] 4.1 В `editor_window.rs`: ivar `text_size`; `begin_text_edit` выставляет его (элемент для `Existing`, дефолт для `New`); коммит `New` обычного текста — `clamp_block` на origin и размер из ivar в элемент. Verify: `cargo build` зелёный, юнит-тесты не красные.
-- [ ] 4.2 Обработчик `SliderChanged`: текстовая ветка по `text_target` (коллаут `New` — `set_pending_callout_size` + рамка; обычный `New` — шрифт + рамка с зажимом; `Existing` — `apply_text_size` + шрифт + рамка), толщинная ветка прежняя; `image_size` читается до `shot.borrow_mut()`; `stroke_width` в текстовой ветке не трогается. Verify: `cargo build` зелёный; ручной прогон веток в 5.1.
+- [x] 4.2 Обработчик `SliderChanged`: текстовая ветка по `text_target` (коллаут `New` — `set_pending_callout_size` + рамка; обычный `New` — шрифт + рамка с зажимом; `Existing` — `apply_text_size` + шрифт + рамка), толщинная ветка прежняя; `image_size` читается до `shot.borrow_mut()`; `stroke_width` в текстовой ветке не трогается. Verify: `cargo build` зелёный; ручной прогон веток в 5.1.
 - [ ] 4.3 `refit_callout_editor`: ветка `Existing` зажимает блок `clamp_block` при невлезании. Verify: `cargo build` зелёный; сценарий правки в 5.1.
 
 ## 5. Живая проверка и скилл
