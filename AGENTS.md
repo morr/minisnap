@@ -42,66 +42,165 @@ on demand.
 
 ## Working with a running app
 
-Talking to the running app: use the `minisnap` MCP server (workspace
-`.zcode/config.json`, binary `src/bin/minisnap-mcp.rs`) — tools `instances`,
-`state`, `screenshot`, `action`, `editor`, `log`. They drive the app's own
-code paths over its built-in HTTP agent server: window screenshots without
-Space/color-profile distortions, editor operations without synthetic mouse
-events, queryable document and window state. Do not build ad-hoc
-Swift/CGEvent/screencapture scripts for what the MCP tools already do;
-AppleScript and cursor emulation are the last resort, not the default. If
-the binary is missing, `cargo build --release` builds it (no bundle step
-needed for the bridge itself). The agent server listens on
-`127.0.0.1:15790` by default (`MINISNAP_AGENT_PORT` overrides); every
-response carries the instance identity, so two running checkouts cannot be
-confused.
+### The minisnap MCP — the way to talk to the running app
 
-Rebuilding for a live run: the runnable app is the `.app` bundle, and a
-plain `cargo build --release` does not produce it — it only refreshes the
-bare binary `target/release/minisnap`, while `target/release/minisnap.app`
-keeps whichever build was bundled last. Launching the bundle after a plain
-cargo build silently runs a stale app (a live run on 2026-11-02 spent the
-whole session testing hours-old code because of exactly this). Rebuild the
-bundle with `scripts/build_app.sh release` (debug: `scripts/build_app.sh
-debug`) — it runs cargo, repacks the bundle and re-signs it with the stable
-identity, so the Screen Recording grant survives the rebuild.
+The `minisnap` MCP server (workspace `.zcode/config.json`, binary
+`src/bin/minisnap-mcp.rs`) is the control channel to a running minisnap —
+the analog of BRP: it tells the app what to do and reads its state, over a
+built-in HTTP agent server on `127.0.0.1:15790` (override:
+`MINISNAP_AGENT_PORT`). Every request executes the same code path the tray
+menu, hotkeys and mouse handlers run — no AppleScript, no synthetic mouse
+events, no `screencapture`.
+
+**When to use it.** Any time a task needs truth about the running app or
+needs to drive it:
+
+- verifying a change live after a rebuild (the overlay opens, the tool
+  activates, the output file lands);
+- asking what the app is doing right now (is the overlay up? which tool is
+  active? what is selected? can it undo?);
+- screenshots of the editor document or window for visual checks;
+- driving the editor programmatically (add a callout, change a width, undo)
+  instead of moving the user's cursor;
+- reading the app's log without holding its launch stderr.
+
+Do not build ad-hoc Swift/CGEvent/screencapture/osascript tooling for what
+these tools already do — that class of scripts is how past sessions lost
+hours to silent click failures, Space-mismatched captures and color-profile
+confusion. Pixel-probing a screenshot to learn app state is archaeology;
+`state` is the source of truth. Two honest limits: the MCP captures only
+minisnap's own windows and document — for what the user's whole screen
+shows, `screencapture` + vision is still the tool; and it drives the app's
+own behaviors, not arbitrary macOS UI.
+
+**The tools.**
+
+- `instances` — live instances (checkout label, pid, port). Call it first.
+- `state` — full snapshot: open windows with frames, `overlay_active`,
+  `prefs_open`, the editor document (shot path, elements in journal shape
+  with geometry, selection, active tool, color, stroke width, undo/redo,
+  leafing availability) and the config. `editor: null` means the editor
+  window was never opened this run; a hidden-but-opened editor still
+  reports its document.
+- `screenshot {target, path?}` — `target: "composite"` renders the editor
+  document (pixel-exact code colors — no color-profile conversion);
+  `target: "window"` draws the editor window content (toolbar + canvas)
+  and works while the window is occluded or on another Space. Returns the
+  image plus the PNG path.
+- `action {action}` — app-level actions, serde enum shapes:
+  `{"Capture":{"edit":true}}`, `{"OpenEditor":{"path":"…"}}`,
+  `{"OverlaySelect":{"x":…,"y":…,"w":…,"h":…}}`, and the unit variants
+  `OpenLatest`, `"CloseEditor"`, `"OverlayCancel"`, `"PrefsOpen"`,
+  `"PrefsClose"`, `"Quit"`.
+- `editor {op}` — editor operations:
+  `{"SetTool":{"tool":"arrow"|"rect"|"line"|"pen"|"text"|"callout"|"blur"|"crop"|"resize"|null}}`,
+  `{"SetColor":{"rgba":[r,g,b,a]}}`, `{"SetWidth":{"width":…}}`,
+  `{"Command":{"AddElement":…}}` (any journal `Command` in journal shape),
+  `"Undo"`, `"Redo"`, `{"Select":{"id":…}}`,
+  `{"Page":{"direction":"prev"|"next"}}`.
+- `log {offset?}` — the app's log ring buffer; the response carries the
+  next offset to continue from.
+
+**Semantics worth knowing.**
+
+- Action/operation results carry a status: `done` (synchronous effect),
+  `initiated` (async — only `Capture`: poll `state` until
+  `overlay_active`), `rejected` (current state forbids it, with the
+  reason), `noop` (nothing to do). A dead or misconfigured app is a short
+  readable error, never a crash.
+- The capture flow: `Capture` → poll `state` → `OverlaySelect` with the
+  rect in the captured frame's pixel space (origin top-left) → the full
+  output pipeline runs exactly as for a user drag: crop, shutter sound,
+  clipboard overwrite, PNG in the save dir. Those are user-visible side
+  effects — in tests, point the config's `save_dir` at a temp dir and
+  restore it afterwards, and do not leave test shots in the real folder.
+- `SetTool` sets exactly (`null` = viewing mode); it does not toggle like
+  clicking an active tool button does. `SetColor`/`SetWidth` recolor and
+  restyle the selected element, like the palette and slider.
+- Closing (`CloseEditor`) hides the window; the editor object keeps the
+  document, so `editor` operations and `composite` screenshots keep
+  working on it — that is the way to edit without popping a window in the
+  user's face. An error comes only when the editor window never opened.
+- Every answer names the instance it came from (checkout label + pid).
+  With several instances alive and no `instance` argument, the tools
+  target the main checkout and mention the others; pass `"instance":
+  "<checkout label or pid>"` to reach a specific one.
+- `instances` listing nothing means: the app is not running, the server is
+  disabled (`agent-server-enabled = false` in the config), or the port was
+  taken at startup — the app's log has the explicit "cannot bind" line.
+  Stale registry records self-heal: a pid that no longer matches the port
+  is pruned on the next read.
+
+Rebuilding the bridge itself needs no bundle step: `cargo build --release`
+produces `target/release/minisnap-mcp` at the path the workspace config
+registers. Rebuild it whenever `src/agent_proto.rs` or the bridge changed,
+or the tools will disagree with the running app's protocol.
+
+### Rebuilding the app for a live run
+
+The runnable app is the `.app` bundle, and a plain `cargo build --release`
+does not produce it — it only refreshes the bare binary
+`target/release/minisnap`, while `target/release/minisnap.app` keeps
+whichever build was bundled last. Launching the bundle after a plain cargo
+build silently runs a stale app (a live run on 2026-11-02 spent the whole
+session testing hours-old code because of exactly this). Rebuild the
+bundle with `scripts/build_app.sh release` (debug:
+`scripts/build_app.sh debug`) — it runs cargo, repacks the bundle and
+re-signs it with the stable identity, so the Screen Recording grant
+survives the rebuild. After rebuilding, quit the running instance (by its
+matched PID) and relaunch the bundle — a running process keeps executing
+the old binary, and `state` will happily describe it. Verify who you are
+talking to via `instances` (new pid) or the exe path in any response.
+
+### Window hygiene while driving the app
 
 When a session drives a running minisnap — relaunching it after a rebuild,
 checking the editor window or overlay, any live interaction — hide the
 utility's windows immediately after each such action, before starting the
-next one. Hiding means closing the window (closing the editor/prefs window
-only hides it, the process stays in the tray), not quitting the app.
-Exception: windows the user explicitly opened themselves before the action —
-leave those as the user left them. The editor window and the overlay float
-above everything and ignore app deactivation, so a window left over from the
-previous step steals focus and shows up in the next verification screenshot.
-If the work happens in a worktree and is finished, quit the minisnap
-instance launched from that worktree — closing its windows only hides it
-into the tray, so a leftover worktree build would keep running alongside
-the main checkout's app.
+next one (`CloseEditor` / `PrefsClose` via MCP do exactly this). Hiding
+means closing the window (closing the editor/prefs window only hides it,
+the process stays in the tray), not quitting the app. Exception: windows
+the user explicitly opened themselves before the action — leave those as
+the user left them. The editor window and the overlay float above
+everything and ignore app deactivation, so a window left over from the
+previous step steals focus and shows up in the next verification
+screenshot. If the work happens in a worktree and is finished, quit the
+minisnap instance launched from that worktree — closing its windows only
+hides it into the tray, so a leftover worktree build would keep running
+alongside the main checkout's app.
 
-Telling instances apart. Minisnap has no single-instance guard, and every
-instance looks the same on screen — the same tray icon and menu, hidden
-editor titles, the same `Preferences` window, the same shared config — so
-the only reliable identity of a running instance is its executable path.
-Before touching a running minisnap, enumerate it with
-`ps -axo pid,comm | grep minisnap` and map each PID to its checkout: a
-path under the repo root is the main checkout's build, under
-`.worktrees/<branch>` is that worktree's. After launching an instance,
-re-run the check and record which PID you are driving; quit instances only
-by such a matched PID, never by name. Do not attribute windows or hotkey
-presses by eye: global hotkeys belong to whichever instance registered the
-combination first, so with two instances running the hotkey drives the
-older one — the user's main instance, not the build you just launched.
-While driving a worktree instance keep it the only running one: quit the
-main-checkout instance first if it is up, and bring it back afterwards
-(`open /Users/morr/develop/minisnap/target/release/minisnap.app`).
+### Telling instances apart
 
-Emulation vs. the user's own activity. When a session emulates mouse and
-window interaction with the running app and can't get through because the
-user is actively using the PC, stop retrying and ask the user: either keep
-attempting the emulation, or the user performs the actions themselves and
-reports the results.
+Minisnap has no single-instance guard, and every instance looks the same
+on screen — the same tray icon and menu, hidden editor titles, the same
+`Preferences` window, the same shared config. The `instances` tool is the
+first-line enumeration (checkout label, pid, port, exe); map a pid to its
+checkout by executable path the same way `ps -axo pid,comm | grep minisnap`
+does: under the repo root is the main checkout, under
+`.worktrees/<branch>` is that worktree. Quit instances only by a matched
+PID, never by name. Do not attribute hotkey presses by eye: global hotkeys
+belong to whichever instance registered the combination first, so with two
+instances running the hotkey drives the older one — the user's main
+instance, not the build you just launched. While driving a worktree
+instance keep it the only running one (quit the main-checkout instance
+first, bring it back afterwards with `open
+/Users/morr/develop/minisnap/target/release/minisnap.app`) — that rule is
+about hotkeys and screen capture, not about the MCP: state queries and
+screenshots over HTTP are pid-addressed and safe with several instances
+up.
+
+### Emulation vs. the user's own activity
+
+When a session emulates mouse and window interaction with the running app
+and can't get through because the user is actively using the PC, stop
+retrying and ask the user: either keep attempting the emulation, or the
+user performs the actions themselves and reports the results. Reaching for
+emulation at all is a smell — most of those tasks are expressible as MCP
+`action`/`editor` calls that need no cursor and no focus.
+
+Deeper references: the mechanism and gotchas of the agent server live in
+the `minisnap-shell` skill; the normative endpoint and MCP-tool contract
+is the `agent-control` spec (`openspec/specs/agent-control/spec.md`).
 
 ## OpenSpec workflow
 
