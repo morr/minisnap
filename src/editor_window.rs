@@ -1018,7 +1018,11 @@ impl EditorView {
                 };
                 (
                     String::new(),
-                    self.text_editor_frame(anchor, "", size, true),
+                    // A callout opens its field caret-wide (the anchor math
+                    // owns the placement); a plain text field keeps the
+                    // text tool's 200 pt minimum — a caret-wide box scrolls
+                    // the typed text down to its last three characters.
+                    self.text_editor_frame(anchor, "", size, callout),
                     color,
                     size,
                 )
