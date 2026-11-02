@@ -1101,7 +1101,10 @@ impl ToolbarView {
     /// nowhere to leaf wears the disabled gray tint, the other one the
     /// icon tint. The flags stay in the ivars — the click guard and the
     /// hover skip read them, so a disabled button neither reacts nor
-    /// highlights. Runs on every state push, like the other paint passes.
+    /// highlights. A disabled button also loses the hover plate right
+    /// here: the cursor may have settled on it while it was enabled, and
+    /// no mouse move would come to clear the stale wash. Runs on every
+    /// state push, like the other paint passes.
     fn update_page_buttons(&self, can_prev: bool, can_next: bool) {
         self.ivars().can_page_prev.set(can_prev);
         self.ivars().can_page_next.set(can_next);
@@ -1139,6 +1142,11 @@ impl ToolbarView {
             let cell = button.cell().and_then(|cell| cell.downcast::<NSButtonCell>().ok());
             if let Some(cell) = cell.as_ref() {
                 cell.setHighlightsBy(highlights);
+            }
+            if is_disabled {
+                if let Some(plate) = plate(button) {
+                    animate_plate_changes(|| plate.setBackgroundColor(None));
+                }
             }
         }
     }
