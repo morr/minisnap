@@ -128,6 +128,12 @@ const FILE_LABEL_WIDTH: f64 = 276.0;
 /// the light column whatever the surrounding colors are.
 const ICON_TINT: [f64; 4] = [38.0 / 255.0, 38.0 / 255.0, 38.0 / 255.0, 1.0];
 
+/// Tint of a leafing button with nowhere to leaf in its direction: flat
+/// gray (#999999), the disabled state the spec pins. The chevron wears it
+/// instead of the icon tint; the hover and click guards read the same
+/// state, not the color.
+const PAGE_DISABLED_TINT: [f64; 4] = [153.0 / 255.0, 153.0 / 255.0, 153.0 / 255.0, 1.0];
+
 /// Wash behind the active tool's button: the system accent at this alpha.
 const ACTIVE_WASH: f64 = 0.25;
 
@@ -533,6 +539,12 @@ pub struct ToolbarState {
     pub can_undo: bool,
     /// Whether the journal can redo.
     pub can_redo: bool,
+    /// Whether the "previous shot" button has an older shot to leaf to;
+    /// false paints its chevron in the disabled tint and deadens it.
+    pub can_page_prev: bool,
+    /// Whether the "next shot" button has a newer shot to leaf to; false
+    /// paints its chevron in the disabled tint and deadens it.
+    pub can_page_next: bool,
     /// The open shot's file name in the bar.
     pub file_label: String,
 }
@@ -542,7 +554,9 @@ pub struct ToolbarState {
 /// availability), the selection (a stroke-bearing element pins the slider
 /// to its own width, clamped into the slider's range) and the window-side
 /// pass-throughs (tool, current width for new elements, color, file name,
-/// the open text input's size). No document — no history, an empty label.
+/// the open text input's size, the leafing availability per direction —
+/// counted by the window off the folder listing, not here). No document —
+/// no history, an empty label.
 pub fn toolbar_state(
     doc: Option<&EditorDoc>,
     file_label: String,
@@ -551,6 +565,8 @@ pub fn toolbar_state(
     color: Rgba,
     selection: Option<u64>,
     text_input: Option<f64>,
+    can_page_prev: bool,
+    can_page_next: bool,
 ) -> ToolbarState {
     let (can_undo, can_redo) = doc
         .map(|doc| (doc.can_undo(), doc.can_redo()))
@@ -579,6 +595,8 @@ pub fn toolbar_state(
         color,
         can_undo,
         can_redo,
+        can_page_prev,
+        can_page_next,
         file_label,
     }
 }
@@ -1545,23 +1563,23 @@ mod tests {
     #[test]
     fn reduction_tracks_undo_redo_from_the_journal() {
         let mut doc = test_doc();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
         assert!(!state.can_undo);
         assert!(!state.can_redo);
 
         let id = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(id, 4.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
         assert!(state.can_undo);
         assert!(!state.can_redo);
 
         doc.undo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
         assert!(!state.can_undo);
         assert!(state.can_redo);
 
         doc.redo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
         assert!(state.can_undo);
         assert!(!state.can_redo);
     }
@@ -1579,6 +1597,8 @@ mod tests {
             [0.0, 0.0, 1.0, 1.0],
             Some(id),
             None,
+            true,
+            true,
         );
         // The selection's own width wins over the width for new elements.
         assert_eq!(state.slider_value, 7.0);
@@ -1594,13 +1614,13 @@ mod tests {
         let mut doc = test_doc();
         let high = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(high, 99.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high), None);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high), None, true, true);
         assert_eq!(state.slider_value, STROKE_MAX);
 
         doc.undo();
         let low = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(low, 0.2)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low), None);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low), None, true, true);
         assert_eq!(state.slider_value, STROKE_MIN);
     }
 
@@ -1618,11 +1638,11 @@ mod tests {
                 size: 32.0,
             },
         }));
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id), None);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id), None, true, true);
         assert_eq!(state.slider_value, 5.5);
 
         // No selection at all: same story.
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None, None);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None, None, true, true);
         assert_eq!(state.slider_value, 5.5);
     }
 
@@ -1641,12 +1661,14 @@ mod tests {
             [1.0; 4],
             Some(id),
             Some(32.0),
+            true,
+            true,
         );
         assert_eq!(state.slider_value, 32.0);
         assert_eq!(state.slider_range, (TEXT_SIZE_MIN, TEXT_SIZE_MAX));
 
         // A text size outside the range still clamps into it.
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], None, Some(500.0));
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], None, Some(500.0), true, true);
         assert_eq!(state.slider_value, TEXT_SIZE_MAX);
     }
 
@@ -1660,11 +1682,36 @@ mod tests {
             [1.0; 4],
             Some(7),
             None,
+            true,
+            true,
         );
         assert!(!state.can_undo);
         assert!(!state.can_redo);
         assert_eq!(state.file_label, "");
         // A selection without a document cannot pin anything.
         assert_eq!(state.slider_value, DEFAULT_STROKE_WIDTH);
+    }
+
+    #[test]
+    fn reduction_passes_leafing_availability_through() {
+        // The middle of the list: both directions available.
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        assert!(state.can_page_prev);
+        assert!(state.can_page_next);
+
+        // The oldest shot: the previous direction is out.
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, true);
+        assert!(!state.can_page_prev);
+        assert!(state.can_page_next);
+
+        // The newest shot: the next direction is out.
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, false);
+        assert!(state.can_page_prev);
+        assert!(!state.can_page_next);
+
+        // A single-shot folder, no folder, a shot missing from the listing.
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, false);
+        assert!(!state.can_page_prev);
+        assert!(!state.can_page_next);
     }
 }

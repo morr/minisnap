@@ -2,7 +2,7 @@
 
 ## 1. Тулбар: снимок и краска
 
-- [ ] 1.1 В `editor_toolbar.rs`: константа `PAGE_DISABLED_TINT` (`#999999`) рядом с `ICON_TINT`; поля `can_page_prev: bool`, `can_page_next: bool` в `ToolbarState`; параметры `can_page_prev`/`can_page_next` в редукции `toolbar_state` с пробросом в снимок; обновить существующие юнит-тесты редукции под новую сигнатуру, добавить тест проброса (край, середина, оба false). Verify: `cargo test editor_toolbar` — тесты редукции зелёные.
+- [x] 1.1 В `editor_toolbar.rs`: константа `PAGE_DISABLED_TINT` (`#999999`) рядом с `ICON_TINT`; поля `can_page_prev: bool`, `can_page_next: bool` в `ToolbarState`; параметры `can_page_prev`/`can_page_next` в редукции `toolbar_state` с пробросом в снимок; обновить существующие юнит-тесты редукции под новую сигнатуру, добавить тест проброса (край, середина, оба false). Verify: `cargo test editor_toolbar` — тесты редукции зелёные.
 - [ ] 1.2 В `editor_toolbar.rs`: проход `update_page_buttons(can_page_prev, can_page_next)` — тинг шевронов по доступности + ivars для hover/клика; вызов из `set_state`; skip листающих тегов при покраске тинга в `update_tool_highlight`; guard в `__page_clicked` (disabled — события нет); hover-скип disabled-кнопки в `hover_at`. Verify: `cargo build` и `cargo test` зелёные.
 
 ## 2. Окно: доступность листания

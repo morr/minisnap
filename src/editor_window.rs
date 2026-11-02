@@ -929,6 +929,10 @@ impl EditorView {
             ivars.color.get(),
             ivars.selection.get(),
             text_input,
+            // Until the window counts the listing (the next step of the
+            // change) every direction reads as available, like before.
+            true,
+            true,
         );
         if text_input.is_none() && state.slider_value != ivars.stroke_width.get() {
             // The slider pinned to a stroked selection: its width becomes
