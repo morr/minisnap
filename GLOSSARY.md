@@ -31,7 +31,7 @@
   композит; hit_test берёт геометрию стрелки отсюда.
 - **Тюнер стрелки (arrow tuner)** — debug-инструмент под `MINISNAP_ARROW_DEBUG`
   с собственным view-owner'ом: панель крутилок, таблица `ARROW_PARAM_SPECS`,
-  промпт (`src/editor_arrow_tuner.rs`, план: change arrow-tuner-module).
+  промпт (`src/editor_arrow_tuner.rs`).
   События уходят существующими вариантами `ToolbarEvent::ArrowParam*` — шов
   тулбара не меняется.
 
