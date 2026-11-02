@@ -125,7 +125,11 @@ pub fn resolve_port(config: &Config) -> u16 {
 /// silent bind failure is how a client ends up talking to the wrong
 /// process). Requests travel as `MainJob::Agent` on the app's existing
 /// job channel.
-pub fn start(config: &Config, mut identity: AgentIdentity, jobs_tx: mpsc::Sender<crate::app::MainJob>) {
+pub(crate) fn start(
+    config: &Config,
+    mut identity: AgentIdentity,
+    jobs_tx: mpsc::Sender<crate::app::MainJob>,
+) {
     if !config.agent_server_enabled {
         crate::log!("agent server: disabled by config");
         return;
