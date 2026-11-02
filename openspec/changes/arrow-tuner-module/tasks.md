@@ -2,7 +2,7 @@
 
 ## 1. Модуль `src/editor_arrow_tuner.rs` — панель-владелец
 
-- [ ] 1.1 Создать `src/editor_arrow_tuner.rs` (`mod editor_arrow_tuner;` в
+- [x] 1.1 Создать `src/editor_arrow_tuner.rs` (`mod editor_arrow_tuner;` в
   `main.rs`): построчный переезд из `editor_toolbar.rs` — `ArrowParamSpec`
   + `ARROW_PARAM_SPECS` (типы — `crate::editor::arrow::ArrowParams`),
   `arrow_params_prompt`, геометрия и сборка панели; новый objc2-класс
@@ -18,6 +18,18 @@
   новый модуль. Проверка: `cargo build`, `cargo clippy`, `cargo test`;
   live — панель тюнера над канвасом под `MINISNAP_ARROW_DEBUG` (если TCC
   позволит; иначе «ждёт ручной проверки»).
+  *(build/clippy/test зелёные: 128 тестов, промпт-тест едет из
+  `editor_arrow_tuner::tests`, clippy по тронутым файлам чист, прочие
+  предупреждения — прежние dead_code/deprecated/unused_unsafe; попутно из
+  импорта окна убраны давно мёртвые `STROKE_MIN`/`STROKE_MAX`. Live
+  (debug-билд, TCC сессии granted): A/B на белом снимке 800×600 — с
+  `MINISNAP_ARROW_DEBUG` в зоне панели (8,44)–(302,358) pt окна 89.6%
+  тёмных пикселей + 9.6% светлых (чёрный бокс 0.7 с белым текстом),
+  центр канвы чисто белый; без env та же зона — 0 тёмных, 100% светлых.
+  Интерактив — движение слайдеров меняет живую стрелку, reset/prompt:
+  ждёт ручной проверки (синтетические клики по контролам ненадёжны,
+  раунд 1 ловил SIGTRAP); путь событий — тот же `handle_toolbar_event`,
+  селекторы и редукция rows переехали построчно)*
 
 ## 2. Семья стрелки — пути напрямую через `arrow`, re-export схлопнут
 

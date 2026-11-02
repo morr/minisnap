@@ -2,6 +2,7 @@ mod app;
 mod capture;
 mod config;
 mod editor;
+mod editor_arrow_tuner;
 mod editor_toolbar;
 mod editor_window;
 mod hotkeys;

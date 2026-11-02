@@ -31,9 +31,10 @@ use crate::editor::text;
 use crate::editor::{
     name_density, render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba, Size,
 };
+use crate::editor_arrow_tuner::{arrow_tuner_panel, ARROW_PARAM_SPECS};
 use crate::editor_toolbar::{
-    arrow_tuner_panel, stroke_width_of, ARROW_PARAM_SPECS, COLOR_PRESETS, DEFAULT_STROKE_WIDTH,
-    STROKE_MAX, STROKE_MIN, ToolbarEvent, ToolbarState, ToolbarView, Tool, TOOLBAR_HEIGHT,
+    stroke_width_of, COLOR_PRESETS, DEFAULT_STROKE_WIDTH, ToolbarEvent, ToolbarState,
+    ToolbarView, Tool, TOOLBAR_HEIGHT,
 };
 
 /// Checkerboard cell of the transparent-backdrop fill, in points: the
@@ -1691,12 +1692,14 @@ impl EditorWindow {
         // the slider keep their canvas handlers until they move behind the
         // same seam.
         let weak_view: Weak<EditorView> = Weak::new(view.as_ref());
-        let toolbar = ToolbarView::new(mtm, size, move |event| {
+        let toolbar = ToolbarView::new(mtm, size, {
+            let weak_view = weak_view.clone();
+            move |event| {
                 if let Some(view) = weak_view.load() {
                     view.handle_toolbar_event(event);
                 }
-            },
-        );
+            }
+        });
         // The window cannot shrink below the bar: the leading pad for the
         // traffic lights, the row's fitting width, the trailing pad.
         window.setContentMinSize(CGSize::new(toolbar.min_width(), 0.0));
@@ -1719,9 +1722,17 @@ impl EditorWindow {
         window.setInitialFirstResponder(Some(&view));
 
         // The arrow debug tuner overlays the canvas' top-left corner under
-        // MINISNAP_ARROW_DEBUG — a tuning instrument, not shipped UI.
+        // MINISNAP_ARROW_DEBUG — a tuning instrument, not shipped UI. It
+        // reports through the same callback the toolbar uses.
         if std::env::var_os("MINISNAP_ARROW_DEBUG").is_some_and(|v| !v.is_empty()) {
-            let tuner = arrow_tuner_panel(mtm, &toolbar);
+            let tuner = arrow_tuner_panel(mtm, {
+                let weak_view = weak_view.clone();
+                move |event| {
+                    if let Some(view) = weak_view.load() {
+                        view.handle_toolbar_event(event);
+                    }
+                }
+            });
             let fit = tuner.frame().size;
             tuner.setFrame(CGRect::new(
                 CGPoint::new(8.0, size.height - TOOLBAR_HEIGHT - 8.0 - fit.height),
