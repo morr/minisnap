@@ -29,6 +29,7 @@ use objc2_core_graphics::{CGBitmapContextCreateImage, CGContext};
 use objc2_foundation::{NSDate, NSString, NSNotification, NSRectEdge};
 use objc2_quartz_core::CALayer;
 
+use crate::editor::arrow;
 use crate::editor::render;
 use crate::editor::{EditorDoc, ElementKind, Point, Rgba};
 use crate::plates::{
@@ -1464,7 +1465,7 @@ fn callout_icon() -> Retained<NSImage> {
             CGRect::new(CGPoint::new(4.0, y), CGSize::new(len, 2.2)),
         );
     }
-    render::draw_arrow(
+    arrow::draw_arrow(
         &ctx,
         Point::new(15.0, 3.0),
         Point::new(26.0, 13.0),

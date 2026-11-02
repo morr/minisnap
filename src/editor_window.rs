@@ -24,6 +24,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use objc2_foundation::{NSDate, NSString, NSNotification};
 
+use crate::editor::arrow;
 use crate::editor::drag::{
     DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX,
 };
@@ -1576,9 +1577,9 @@ impl EditorView {
             }
             ToolbarEvent::ArrowParamChanged { index, value } => {
                 if let Some(spec) = ARROW_PARAM_SPECS.get(index) {
-                    let mut params = render::arrow_params();
+                    let mut params = arrow::arrow_params();
                     (spec.set)(&mut params, value);
-                    render::set_arrow_params(params);
+                    arrow::set_arrow_params(params);
                 }
                 // Instant feedback: the canvas re-renders every element
                 // from the live params on each draw. No command is
@@ -1588,16 +1589,16 @@ impl EditorView {
             }
             ToolbarEvent::ArrowParamReset(index) => {
                 if let Some(spec) = ARROW_PARAM_SPECS.get(index) {
-                    let defaults = render::ArrowParams::DEFAULT;
+                    let defaults = arrow::ArrowParams::DEFAULT;
                     let value = (spec.get)(defaults);
-                    let mut params = render::arrow_params();
+                    let mut params = arrow::arrow_params();
                     (spec.set)(&mut params, value);
-                    render::set_arrow_params(params);
+                    arrow::set_arrow_params(params);
                 }
                 self.redraw();
             }
             ToolbarEvent::ArrowParamsReset => {
-                render::set_arrow_params(render::ArrowParams::DEFAULT);
+                arrow::set_arrow_params(arrow::ArrowParams::DEFAULT);
                 self.redraw();
             }
         }
