@@ -62,6 +62,6 @@
 - **Машина рекордера хоткеев** — чистые правила записи комбинации в
   настройках: `Recorder::begin(row)` / `feed(mods, keycode) → FeedOutcome`
   (`Recorded`/`Cancelled`/`Swallowed`/`Passthrough`) без AppKit-типов в
-  interface (`src/hotkey_recorder.rs`, план: change hotkey-recorder-machine).
-  Правила (голый Esc отменяет и глотает, неизвестный keycode глотается,
-  пустые модификаторы валидны) покрыты юнит-тестами.
+  interface (`src/hotkey_recorder.rs`). Правила (голый Esc отменяет и
+  глотает, неизвестный keycode глотается, голая клавиша без модификаторов
+  не фиксируется — запись продолжается) покрыты юнит-тестами.
