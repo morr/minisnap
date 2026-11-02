@@ -17,6 +17,10 @@ pub(crate) const MIN_DRAG_PX: f64 = 4.0;
 /// in image pixels.
 const CALLOUT_TEXT_OFFSET_PX: f64 = 16.0;
 
+/// Inward margin a text block keeps from the frame edges whenever it is
+/// clamped (shared by `callout_anchor` and `clamp_block`), in image pixels.
+const EDGE_MARGIN_PX: f64 = 4.0;
+
 /// The in-progress mouse interaction; committed as one command on mouse-up.
 pub(crate) enum Drag {
     /// Drawing a new element; live-previewed until mouse-up.
@@ -160,7 +164,7 @@ pub(crate) fn callout_anchor(
     block_h: f64,
     frame: Rect,
 ) -> Point {
-    let margin = 4.0;
+    let margin = EDGE_MARGIN_PX;
     let gap = CALLOUT_TEXT_OFFSET_PX;
     let max_x = (frame.max_x() - block_w - margin).max(margin);
     let max_y = (frame.max_y() - block_h - margin).max(margin);
@@ -185,6 +189,21 @@ pub(crate) fn callout_anchor(
         (base.x - block_w / 2.0, y)
     };
     Point::new(x.clamp(margin, max_x), y.clamp(margin, max_y))
+}
+
+/// Minimal shift of a block (`w` × `h`) whose top-left sits at `origin` so
+/// it fits inside `frame` with the shared edge margin. A block wider or
+/// taller than the frame parks at the margin on that axis, like
+/// `callout_anchor`'s clamp. The axes shift independently, so a block
+/// clamped at an edge by a previous, larger size does not spring back when
+/// the size shrinks.
+pub(crate) fn clamp_block(origin: Point, w: f64, h: f64, frame: Rect) -> Point {
+    let margin = EDGE_MARGIN_PX;
+    let min_x = frame.x + margin;
+    let min_y = frame.y + margin;
+    let max_x = (frame.max_x() - w - margin).max(min_x);
+    let max_y = (frame.max_y() - h - margin).max(min_y);
+    Point::new(origin.x.clamp(min_x, max_x), origin.y.clamp(min_y, max_y))
 }
 
 /// The eight frame handles of a rect (image pixels), corners first for hit
@@ -1289,6 +1308,48 @@ mod tests {
             Rect::new(0.0, 0.0, 400.0, 300.0),
         );
         assert_eq!(anchor, Point::new(70.0, 116.0));
+    }
+
+    #[test]
+    fn clamp_block_keeps_a_fitting_block_in_place() {
+        let frame = Rect::new(0.0, 0.0, 400.0, 300.0);
+        // Fully inside with room to spare: a pass-through.
+        assert_eq!(clamp_block(pt(100.0, 100.0), 60.0, 30.0, frame), pt(100.0, 100.0));
+        // Exactly on the margin lines: still a no-op.
+        assert_eq!(clamp_block(pt(336.0, 266.0), 60.0, 30.0, frame), pt(336.0, 266.0));
+    }
+
+    #[test]
+    fn clamp_block_presses_each_edge_with_the_margin() {
+        let frame = Rect::new(0.0, 0.0, 400.0, 300.0);
+        // Overshooting right and bottom: pressed to max - block - margin.
+        assert_eq!(clamp_block(pt(380.0, 280.0), 60.0, 30.0, frame), pt(336.0, 266.0));
+        // Negative origin: pressed to the margin itself.
+        assert_eq!(clamp_block(pt(-10.0, -5.0), 60.0, 30.0, frame), pt(4.0, 4.0));
+        // A frame away from the origin clamps against its own edges.
+        let shifted = Rect::new(50.0, 50.0, 100.0, 100.0);
+        assert_eq!(clamp_block(pt(0.0, 0.0), 20.0, 10.0, shifted), pt(54.0, 54.0));
+        assert_eq!(clamp_block(pt(200.0, 200.0), 20.0, 10.0, shifted), pt(126.0, 136.0));
+    }
+
+    #[test]
+    fn clamp_block_parks_an_oversized_block_at_the_margin() {
+        let frame = Rect::new(0.0, 0.0, 50.0, 50.0);
+        // Wider than the frame: that axis parks at the margin.
+        assert_eq!(clamp_block(pt(10.0, 10.0), 80.0, 10.0, frame), pt(4.0, 10.0));
+        // Taller than the frame on one axis only: the other still clamps.
+        assert_eq!(clamp_block(pt(10.0, 10.0), 10.0, 90.0, frame), pt(10.0, 4.0));
+    }
+
+    #[test]
+    fn clamp_block_does_not_bounce_after_a_shrink() {
+        let frame = Rect::new(0.0, 0.0, 400.0, 300.0);
+        // Grown past the right edge and clamped; shrinking the size keeps
+        // the shifted position.
+        let grown = clamp_block(pt(380.0, 100.0), 200.0, 40.0, frame);
+        assert_eq!(grown, pt(196.0, 100.0));
+        let shrunk = clamp_block(grown, 60.0, 40.0, frame);
+        assert_eq!(shrunk, pt(196.0, 100.0), "a smaller block stays put");
     }
 }
 
