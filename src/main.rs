@@ -5,6 +5,7 @@ mod editor;
 mod editor_arrow_tuner;
 mod editor_toolbar;
 mod editor_window;
+mod hotkey_recorder;
 mod hotkeys;
 mod overlay;
 mod overlay_hud;

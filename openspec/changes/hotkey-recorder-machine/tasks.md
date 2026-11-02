@@ -2,7 +2,7 @@
 
 ## 1. Машина рекордера
 
-- [ ] 1.1 Новый `src/hotkey_recorder.rs`: `Recorder` (`idle`, `begin`,
+- [x] 1.1 Новый `src/hotkey_recorder.rs`: `Recorder` (`idle`, `begin`,
   `feed`, `recording_row`), `FeedOutcome`; `mod` в `main.rs`. Табличные
   юнит-тесты на правила: повторный вход, голый Esc (отмена + глотание),
   неизвестный keycode (глотание при продолжающейся записи), пустые
