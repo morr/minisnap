@@ -49,6 +49,11 @@ pub const DEFAULT_STROKE_WIDTH: f64 = 4.0;
 pub const STROKE_MIN: f64 = 1.0;
 pub const STROKE_MAX: f64 = 12.0;
 
+/// Range of the slider's text mode — the font sizes it drives while a text
+/// input is open, in image pixels; the default 32 px sits inside.
+pub const TEXT_SIZE_MIN: f64 = 12.0;
+pub const TEXT_SIZE_MAX: f64 = 96.0;
+
 /// Width of the stroke-width slider in the toolbar, in points.
 const STROKE_SLIDER_WIDTH_PT: f64 = 90.0;
 
@@ -497,10 +502,13 @@ impl WidthSliderView {
 pub struct ToolbarState {
     /// The active annotation tool (None: viewing mode).
     pub tool: Option<Tool>,
-    /// The width the stroke-width slider shows: the selected element's
-    /// width when it is one the slider styles, else the width for new
-    /// elements.
-    pub stroke_width: f64,
+    /// The value the slider shows: in text mode the open input's font
+    /// size, otherwise the selected element's width (when it is one the
+    /// slider styles) or the width for new elements.
+    pub slider_value: f64,
+    /// The range the slider maps onto right now: text sizes while a text
+    /// input is open, stroke widths otherwise.
+    pub slider_range: (f64, f64),
     /// The color the swatch disc shows (and new elements draw with).
     pub color: Rgba,
     /// Whether the journal can undo (a knob for the day undo gets a
@@ -516,8 +524,8 @@ pub struct ToolbarState {
 /// what the strip displays is a function of the journal (undo/redo
 /// availability), the selection (a stroke-bearing element pins the slider
 /// to its own width, clamped into the slider's range) and the window-side
-/// pass-throughs (tool, current width for new elements, color, file
-/// name). No document — no history, an empty label.
+/// pass-throughs (tool, current width for new elements, color, file name,
+/// the open text input's size). No document — no history, an empty label.
 pub fn toolbar_state(
     doc: Option<&EditorDoc>,
     file_label: String,
@@ -525,18 +533,32 @@ pub fn toolbar_state(
     stroke_width: f64,
     color: Rgba,
     selection: Option<u64>,
+    text_input: Option<f64>,
 ) -> ToolbarState {
     let (can_undo, can_redo) = doc
         .map(|doc| (doc.can_undo(), doc.can_redo()))
         .unwrap_or((false, false));
-    let stroke_width = selection
-        .and_then(|id| doc.and_then(|doc| doc.element(id)))
-        .and_then(|el| stroke_width_of(&el.kind))
-        .map(|width| width.clamp(STROKE_MIN, STROKE_MAX))
-        .unwrap_or(stroke_width);
+    let (slider_value, slider_range) = match text_input {
+        // The slider's text mode: it rides the open input's font size on
+        // the text range, and a stroked selection does not pinch it — the
+        // stroke width wakes up when the input ends.
+        Some(size) => (
+            size.clamp(TEXT_SIZE_MIN, TEXT_SIZE_MAX),
+            (TEXT_SIZE_MIN, TEXT_SIZE_MAX),
+        ),
+        None => {
+            let value = selection
+                .and_then(|id| doc.and_then(|doc| doc.element(id)))
+                .and_then(|el| stroke_width_of(&el.kind))
+                .map(|width| width.clamp(STROKE_MIN, STROKE_MAX))
+                .unwrap_or(stroke_width);
+            (value, (STROKE_MIN, STROKE_MAX))
+        }
+    };
     ToolbarState {
         tool,
-        stroke_width,
+        slider_value,
+        slider_range,
         color,
         can_undo,
         can_redo,
@@ -963,7 +985,7 @@ impl ToolbarView {
         // The slider skips an equal value, so a push never re-enters the
         // width handler as a phantom drag.
         if let Some(slider) = self.ivars().width_slider.borrow().as_ref() {
-            slider.set_double_value(state.stroke_width);
+            slider.set_double_value(state.slider_value);
         }
         self.align_traffic_lights();
     }
@@ -1504,23 +1526,23 @@ mod tests {
     #[test]
     fn reduction_tracks_undo_redo_from_the_journal() {
         let mut doc = test_doc();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
         assert!(!state.can_undo);
         assert!(!state.can_redo);
 
         let id = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(id, 4.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
         assert!(state.can_undo);
         assert!(!state.can_redo);
 
         doc.undo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
         assert!(!state.can_undo);
         assert!(state.can_redo);
 
         doc.redo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None);
         assert!(state.can_undo);
         assert!(!state.can_redo);
     }
@@ -1537,9 +1559,11 @@ mod tests {
             3.0,
             [0.0, 0.0, 1.0, 1.0],
             Some(id),
+            None,
         );
         // The selection's own width wins over the width for new elements.
-        assert_eq!(state.stroke_width, 7.0);
+        assert_eq!(state.slider_value, 7.0);
+        assert_eq!(state.slider_range, (STROKE_MIN, STROKE_MAX));
         assert_eq!(state.tool, Some(Tool::Arrow));
         assert_eq!(state.color, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(state.file_label, "shot.png");
@@ -1551,14 +1575,14 @@ mod tests {
         let mut doc = test_doc();
         let high = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(high, 99.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high));
-        assert_eq!(state.stroke_width, STROKE_MAX);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high), None);
+        assert_eq!(state.slider_value, STROKE_MAX);
 
         doc.undo();
         let low = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(low, 0.2)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low));
-        assert_eq!(state.stroke_width, STROKE_MIN);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low), None);
+        assert_eq!(state.slider_value, STROKE_MIN);
     }
 
     #[test]
@@ -1575,12 +1599,36 @@ mod tests {
                 size: 32.0,
             },
         }));
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id));
-        assert_eq!(state.stroke_width, 5.5);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id), None);
+        assert_eq!(state.slider_value, 5.5);
 
         // No selection at all: same story.
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None);
-        assert_eq!(state.stroke_width, 5.5);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None, None);
+        assert_eq!(state.slider_value, 5.5);
+    }
+
+    #[test]
+    fn reduction_text_mode_rides_the_open_input_and_ignores_the_selection() {
+        let mut doc = test_doc();
+        // A stroked selection would pin the width-mode slider; in text
+        // mode the open input's size wins instead.
+        let id = doc.next_element_id();
+        doc.apply(Command::AddElement(arrow_element(id, 7.0)));
+        let state = toolbar_state(
+            Some(&doc),
+            String::new(),
+            Some(Tool::Text),
+            3.0,
+            [1.0; 4],
+            Some(id),
+            Some(32.0),
+        );
+        assert_eq!(state.slider_value, 32.0);
+        assert_eq!(state.slider_range, (TEXT_SIZE_MIN, TEXT_SIZE_MAX));
+
+        // A text size outside the range still clamps into it.
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], None, Some(500.0));
+        assert_eq!(state.slider_value, TEXT_SIZE_MAX);
     }
 
     #[test]
@@ -1592,11 +1640,12 @@ mod tests {
             DEFAULT_STROKE_WIDTH,
             [1.0; 4],
             Some(7),
+            None,
         );
         assert!(!state.can_undo);
         assert!(!state.can_redo);
         assert_eq!(state.file_label, "");
         // A selection without a document cannot pin anything.
-        assert_eq!(state.stroke_width, DEFAULT_STROKE_WIDTH);
+        assert_eq!(state.slider_value, DEFAULT_STROKE_WIDTH);
     }
 }

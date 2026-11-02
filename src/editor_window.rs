@@ -916,11 +916,12 @@ impl EditorView {
             ivars.stroke_width.get(),
             ivars.color.get(),
             ivars.selection.get(),
+            None,
         );
-        if state.stroke_width != ivars.stroke_width.get() {
+        if state.slider_value != ivars.stroke_width.get() {
             // The slider pinned to a stroked selection: its width becomes
             // the width for new elements, like every redraw has done.
-            ivars.stroke_width.set(state.stroke_width);
+            ivars.stroke_width.set(state.slider_value);
         }
         state
     }
@@ -1100,6 +1101,9 @@ impl EditorView {
                 self.redraw();
                 return;
             }
+            // image_size borrows the shot, so the size is read before the
+            // mutable borrow below; nothing runs in between.
+            let (iw, ih) = self.image_size();
             let mut shot_slot = ivars.shot.borrow_mut();
             let Some(shot) = shot_slot.as_mut() else {
                 drop(shot_slot);
@@ -1108,7 +1112,6 @@ impl EditorView {
             };
             let id = shot.doc.next_element_id();
             let command = if callout {
-                let (iw, ih) = self.image_size();
                 ivars.machine.borrow_mut().commit_callout_text(
                     &text,
                     Size::new(iw as f64, ih as f64),
