@@ -24,6 +24,16 @@
   без AppKit-типов в interface. Держит три семьи состояния — тянущийся
   `Drag`, двухфазный коллаут, рамку кропа/ресайза
   (`src/editor/drag.rs`).
+- **arrow-модуль** — параметризованная геометрия Monosnap-стрелки:
+  `ArrowParams` с глобальными крутилками (`arrow_params`/`set_arrow_params`),
+  силуэт `arrow_outline(_with)` и отрисовка `draw_arrow` в
+  `src/editor/arrow.rs` (план: change arrow-render-module). render — чистый
+  композит; hit_test берёт геометрию стрелки отсюда.
+- **Тюнер стрелки (arrow tuner)** — debug-инструмент под `MINISNAP_ARROW_DEBUG`
+  с собственным view-owner'ом: панель крутилок, таблица `ARROW_PARAM_SPECS`,
+  промпт (`src/editor_arrow_tuner.rs`, план: change arrow-tuner-module).
+  События уходят существующими вариантами `ToolbarEvent::ArrowParam*` — шов
+  тулбара не меняется.
 
 ## Захват
 
@@ -41,3 +51,17 @@
 - **SurfaceMap** — спаривание поверхностей T0 с экранами (приватный
   `mod presentation` в `src/overlay.rs`); считается один раз за сессию
   оверлея, а не на каждое движение курсора.
+- **HUD оверлея** — весь хром над слоем кадра: dim-полосы, лупа, оси, подпись,
+  красная рамка с пульсом и FrameSampler за одним interface'ом
+  (`struct Hud`: attach/present/update/dim/hide/stop_border_pulse, план:
+  change overlay-hud-module). Размещение лупы и подписи — чистая функция с
+  юнит-тестами; новые HUD-слои не требуют правок present_target.
+
+## Оболочка
+
+- **Машина рекордера хоткеев** — чистые правила записи комбинации в
+  настройках: `Recorder::begin(row)` / `feed(mods, keycode) → FeedOutcome`
+  (`Recorded`/`Cancelled`/`Swallowed`/`Passthrough`) без AppKit-типов в
+  interface (`src/hotkey_recorder.rs`, план: change hotkey-recorder-machine).
+  Правила (голый Esc отменяет и глотает, неизвестный keycode глотается,
+  пустые модификаторы валидны) покрыты юнит-тестами.
