@@ -556,6 +556,20 @@ impl EditorDoc {
         self.apply(Command::SetWidth(id, width));
     }
 
+    /// Apply a text-size change for `id`. Consecutive changes for the same
+    /// element — a slider drag emits a stream of them — replace the previous
+    /// journal entry instead of growing it, so one undo reverts the whole
+    /// drag. The same rule `apply_width` follows for stroke widths.
+    pub fn apply_text_size(&mut self, id: u64, size: f64) {
+        let merges = self.applied == self.log.len()
+            && matches!(self.log.last(), Some(Command::SetTextSize(prev, _)) if *prev == id);
+        if merges {
+            self.log.pop();
+            self.applied -= 1;
+        }
+        self.apply(Command::SetTextSize(id, size));
+    }
+
     /// Revert the last applied command. False when nothing to undo.
     pub fn undo(&mut self) -> bool {
         if !self.can_undo() {
@@ -966,6 +980,35 @@ mod tests {
             }
             other => panic!("expected text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_text_size_coalesces_a_slider_drag_into_one_undo_step() {
+        let mut doc = EditorDoc::new(solid_frame(400, 300));
+        doc.apply(Command::AddElement(text_element_at(1, pt(40.0, 40.0), "WW", 24.0)));
+        let size = |doc: &EditorDoc| match &doc.element(1).expect("text").kind {
+            ElementKind::Text { size, .. } => *size,
+            other => panic!("expected text, got {other:?}"),
+        };
+
+        // A slider drag's stream of events lands as one journal entry.
+        doc.apply_text_size(1, 30.0);
+        doc.apply_text_size(1, 44.0);
+        doc.apply_text_size(1, 36.0);
+        assert_eq!(doc.applied_log().len(), 2);
+        assert_eq!(size(&doc), 36.0);
+
+        // One undo reverts the whole drag to the authored size.
+        assert!(doc.undo());
+        assert_eq!(size(&doc), 24.0);
+        assert!(doc.redo());
+        assert_eq!(size(&doc), 36.0);
+
+        // Another element's change breaks the run.
+        doc.apply(Command::AddElement(text_element_at(2, pt(10.0, 10.0), "x", 16.0)));
+        doc.apply_text_size(2, 20.0);
+        doc.apply_text_size(1, 40.0);
+        assert_eq!(doc.applied_log().len(), 5);
     }
 
     #[test]

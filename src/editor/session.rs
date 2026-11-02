@@ -76,6 +76,13 @@ impl OpenShot {
         self.persist()
     }
 
+    /// Apply a text-size change (consecutive slider events coalesce in the
+    /// journal) and auto-save.
+    pub fn apply_text_size(&mut self, id: u64, size: f64) -> Result<(), String> {
+        self.doc.apply_text_size(id, size);
+        self.persist()
+    }
+
     /// Undo the last command and auto-save. False when nothing to undo.
     pub fn undo(&mut self) -> Result<bool, String> {
         if !self.doc.undo() {
