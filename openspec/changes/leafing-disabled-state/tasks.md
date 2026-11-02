@@ -7,7 +7,7 @@
 
 ## 2. Окно: доступность листания
 
-- [ ] 2.1 В `editor_window.rs` `toolbar_state()`: `output::sorted_shots(&ivars.save_dir.borrow())`, позиция открытого снимка; `can_page_prev = index > 0`, `can_page_next = index + 1 < len`; снимка нет или не найден в листинге — оба `false`; передать в редукцию. Verify: `cargo build` зелёный, юнит-тесты не красные.
+- [x] 2.1 В `editor_window.rs` `toolbar_state()`: `output::sorted_shots(&ivars.save_dir.borrow())`, позиция открытого снимка; `can_page_prev = index > 0`, `can_page_next = index + 1 < len`; снимка нет или не найден в листинге — оба `false`; передать в редукцию. Verify: `cargo build` зелёный, юнит-тесты не красные.
 
 ## 3. Живая проверка и скилл
 

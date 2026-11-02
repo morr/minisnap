@@ -919,6 +919,18 @@ impl EditorView {
             false => None,
         };
         let shot = ivars.shot.borrow();
+        // The leafing availability rides the save-folder listing on every
+        // push: the open shot's position in it decides whether either
+        // direction has a neighbor. No shot, or a shot missing from the
+        // listing (deleted, no folder, empty folder) — both disabled.
+        let (can_page_prev, can_page_next) = shot
+            .as_ref()
+            .and_then(|shot| {
+                let shots = crate::output::sorted_shots(&ivars.save_dir.borrow());
+                let index = shots.iter().position(|path| *path == shot.shot_path)?;
+                Some((index > 0, index + 1 < shots.len()))
+            })
+            .unwrap_or((false, false));
         let state = crate::editor_toolbar::toolbar_state(
             shot.as_ref().map(|shot| &shot.doc),
             shot.as_ref()
@@ -929,10 +941,8 @@ impl EditorView {
             ivars.color.get(),
             ivars.selection.get(),
             text_input,
-            // Until the window counts the listing (the next step of the
-            // change) every direction reads as available, like before.
-            true,
-            true,
+            can_page_prev,
+            can_page_next,
         );
         if text_input.is_none() && state.slider_value != ivars.stroke_width.get() {
             // The slider pinned to a stroked selection: its width becomes
