@@ -11,8 +11,11 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 
 | Модуль | Ответственность |
 |---|---|
-| `src/main.rs` | входная точка — `app::run()` |
+| `src/lib.rs` + `src/main.rs` | библиотека модулей + тонкий бинарник приложения (`app::run()`); второй бинарник — `src/bin/minisnap-mcp.rs` |
 | `src/app.rs` | жизненный цикл, трей-меню, идентичность экземпляра, маршрутизация действий; тик-насос — перекачка `MainJob` из `mpsc` и опрос хоткеев в главный поток |
+| `src/agent_proto.rs` | типы протокола agent-канала (serde), идентичность экземпляра, общие для приложения и MCP-моста |
+| `src/agent_server.rs` | HTTP agent-сервер: listener-поток, разбор запросов, реестр экземпляров, доставка в главный поток через `MainJob::Agent` |
+| `src/logbuf.rs` | кольцевой буфер журнала (макрос `log!` вместо `eprintln!`), читается агентом по `/log` |
 | `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос событий, клавишные соответствия сканкодов |
 | `src/hotkey_recorder.rs` | чистая машина рекордера комбинаций для настроек: правила записи (повторный вход, Esc-отмена, голая клавиша/неизвестный keycode), без AppKit, юнит-тесты |
 | `src/permission.rs` | разрешения Screen Recording / Accessibility |
@@ -52,7 +55,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 
 | Скил | Домен | Модули | Спеки |
 |---|---|---|---|
-| `minisnap-shell` | оболочка приложения | `app.rs`, `config.rs`, `prefs.rs`, `hotkeys.rs`, `hotkey_recorder.rs`, `permission.rs` | `tray-app`, `global-hotkeys`, `preferences`, `screen-recording-permission` |
+| `minisnap-shell` | оболочка приложения | `app.rs`, `config.rs`, `prefs.rs`, `hotkeys.rs`, `hotkey_recorder.rs`, `permission.rs`, `agent_server.rs`, `agent_proto.rs`, `logbuf.rs` | `tray-app`, `global-hotkeys`, `preferences`, `screen-recording-permission`, `agent-control` |
 | `minisnap-capture` | заморозка и выделение | `capture.rs`, `overlay.rs` | `frozen-capture` |
 | `minisnap-output` | вывод снимков | `output.rs`, `sound.rs` | `capture-output` |
 | `minisnap-editor` | аннотирование | `editor_window.rs`, `src/editor/` | `shot-editor` |

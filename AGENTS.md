@@ -42,6 +42,20 @@ on demand.
 
 ## Working with a running app
 
+Talking to the running app: use the `minisnap` MCP server (workspace
+`.zcode/config.json`, binary `src/bin/minisnap-mcp.rs`) — tools `instances`,
+`state`, `screenshot`, `action`, `editor`, `log`. They drive the app's own
+code paths over its built-in HTTP agent server: window screenshots without
+Space/color-profile distortions, editor operations without synthetic mouse
+events, queryable document and window state. Do not build ad-hoc
+Swift/CGEvent/screencapture scripts for what the MCP tools already do;
+AppleScript and cursor emulation are the last resort, not the default. If
+the binary is missing, `cargo build --release` builds it (no bundle step
+needed for the bridge itself). The agent server listens on
+`127.0.0.1:15790` by default (`MINISNAP_AGENT_PORT` overrides); every
+response carries the instance identity, so two running checkouts cannot be
+confused.
+
 Rebuilding for a live run: the runnable app is the `.app` bundle, and a
 plain `cargo build --release` does not produce it — it only refreshes the
 bare binary `target/release/minisnap`, while `target/release/minisnap.app`

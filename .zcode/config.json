@@ -1,0 +1,11 @@
+{
+  "mcp": {
+    "servers": {
+      "minisnap": {
+        "command": "/Users/morr/develop/minisnap/target/release/minisnap-mcp",
+        "args": [],
+        "cwd": "/Users/morr/develop/minisnap"
+      }
+    }
+  }
+}
