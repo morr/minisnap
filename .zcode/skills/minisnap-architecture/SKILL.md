@@ -27,7 +27,8 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/plates.rs` | общая механика подсвеченных подложек (плит) и hover для тулбара и палитры | `plate`, `disc`, `center_toolbar_layers`, `animate_plate_changes` |
 | `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса по чистому оригиналу | `Element`, `ElementKind`, `Command`, `EditorDoc`, `Point`/`Rect`/`Rgba`, `Tool`, `clamp_crop_rect` |
 | `src/editor/drag.rs` | машина драга: события мыши в пикселях → превью, `Command` для журнала, сигналы (`BeginText`, `DragWindow`); двухфазный коллаут и рамка кропа/ресайза — её состояния; юнит-тесты через interface без окна | `DragMachine`, `Drag`, `FrameSpot`, `PendingCallout`, `TextTarget`, `Signal`, `MIN_DRAG_PX`, `draft_is_real`, `frame_rect`, `callout_anchor` |
-| `src/editor/render.rs` | рендер элементов и композита, стрелка-клин, пикселизация блюра | `render_composite`, `draw_elements`, `pixelate_region` |
+| `src/editor/arrow.rs` | геометрия стрелки-клина: параметризация (`ARROW_PARAMS`), силуэт, отрисовка | `ArrowParams`, `arrow_outline(_with)`, `draw_arrow` |
+| `src/editor/render.rs` | рендер элементов и композита, пикселизация блюра | `render_composite`, `draw_elements`, `pixelate_region` |
 | `src/editor/hit_test.rs` | попадания клика по элементам, границы текстовых блоков | `Hit`, `top_hit`, `text_bounds` |
 | `src/editor/session.rs` | сессии правок в tmp: оригинал + журнал, автосейв после каждой команды | `OpenShot`, `MAX_SESSIONS`, `default_root` |
 | `src/editor/text.rs` | замеры и отрисовка текста (Core Text) | `measure`, `measure_block`, `line_height`, `draw_text` |

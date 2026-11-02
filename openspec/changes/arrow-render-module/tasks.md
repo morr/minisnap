@@ -50,11 +50,25 @@
 
 ## 3. Domain-skills pass
 
-- [ ] 3.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (таблица
+- [x] 3.1 Обновить `.zcode/skills/minisnap-editor/SKILL.md` (таблица
   модулей: строка `src/editor/arrow.rs` — параметризация, силуэт,
   отрисовка, глобал крутилок; строка `render.rs` — чистый композит без
   стрелки; зависимость `hit_test → arrow` за геометрию, `callout_tail`
   остаётся в render; буллет про `MINISNAP_ARROW_DEBUG` — панель крутит
   `arrow::ARROW_PARAMS` через re-export `render::`) и строку
   `src/editor/render.rs` в `.zcode/skills/minisnap-architecture/SKILL.md`.
-  Проверка: текст скиллов соответствует коду.
+  Проверка: текст скиллов соответствует коду. *(minisnap-editor: новая
+  строка `src/editor/arrow.rs` — `ArrowParams`(+`DEFAULT`),
+  `arrow_params`/`set_arrow_params`, `arrow_outline(_with)`, `draw_arrow`,
+  `ARROW_PARAMS`; строка render.rs — чистый композит
+  (`render_composite`/`draw_elements`/`callout_tail`/`pixelate_region`/
+  `bitmap_context`); строка hit_test.rs называет источник силуэта и
+  `callout_tail`; буллет тюнера — `arrow::ARROW_PARAMS` через re-export.
+  references/render-and-hit.md: в заголовок добавлен `arrow.rs`, секция
+  стрелки адресована `arrow.rs`, в коллауте `callout_tail` помечен как
+  render.rs — механика не менялась, только адреса. minisnap-architecture:
+  новая строка arrow.rs, строка render.rs без «стрелки-клина». Сверено с
+  кодом: 6 публичных символов в arrow.rs, 5 в render.rs, 2 вызова
+  `super::arrow::arrow_outline` и 1 `render::callout_tail` в hit_test.rs,
+  re-export и 2 вызова `super::arrow::draw_arrow` в render.rs
+  существуют)*
