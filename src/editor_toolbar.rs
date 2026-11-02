@@ -636,6 +636,11 @@ pub(crate) struct ToolbarIvars {
     /// pass skips the active tool's button (its accent reads as a
     /// highlight already).
     active_tool: Cell<Option<Tool>>,
+    /// Whether each leafing button currently has a shot to leaf to, as
+    /// the last state push painted it: the click guard and the hover
+    /// skip read these, not the tint.
+    can_page_prev: Cell<bool>,
+    can_page_next: Cell<bool>,
     /// The window-side sink for everything the user does to the toolbar.
     on_event: RefCell<Option<OnEvent>>,
 }
@@ -667,6 +672,8 @@ define_class!(
                 color_popover: RefCell::new(None),
                 min_width: Cell::new(0.0),
                 active_tool: Cell::new(None),
+                can_page_prev: Cell::new(false),
+                can_page_next: Cell::new(false),
                 on_event: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -703,6 +710,14 @@ define_class!(
             // SAFETY: the sender is the clicked NSButton; `tag` is the
             // NSView accessor we stamped on the button.
             let tag: isize = unsafe { msg_send![sender, tag] };
+            // A disabled leafing button swallows the click: no event, the
+            // window's shot stays put.
+            if tag == PAGE_PREV_TAG && !self.ivars().can_page_prev.get() {
+                return;
+            }
+            if tag == PAGE_NEXT_TAG && !self.ivars().can_page_next.get() {
+                return;
+            }
             let event = if tag == PAGE_PREV_TAG {
                 ToolbarEvent::PagePrevious
             } else {
@@ -1016,6 +1031,7 @@ impl ToolbarView {
             label.setStringValue(&NSString::from_str(&state.file_label));
         }
         self.update_tool_highlight(state.tool);
+        self.update_page_buttons(state.can_page_prev, state.can_page_next);
         self.show_color(state.color);
         // The slider skips an equal value, so a push never re-enters the
         // slider handler as a phantom drag; the range rides along, so a
@@ -1044,7 +1060,10 @@ impl ToolbarView {
         disc.setBackgroundColor(Some(&color.CGColor()));
     }
 
-    /// Accent-wash the active tool's button, white-tint the others.
+    /// Accent-wash the active tool's button, white-tint the others. The
+    /// leafing pair is not this pass's: it tints itself in
+    /// `update_page_buttons` — retinting it here would repaint a disabled
+    /// gray chevron back to the icon tint on every push.
     fn update_tool_highlight(&self, active: Option<Tool>) {
         self.ivars().active_tool.set(active);
         let accent: Retained<NSColor> = NSColor::controlAccentColor();
@@ -1056,6 +1075,9 @@ impl ToolbarView {
         );
         animate_plate_changes(|| {
             for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+                if *tag == PAGE_PREV_TAG || *tag == PAGE_NEXT_TAG {
+                    continue;
+                }
                 if let Some(plate) = plate(button) {
                     let bg: Option<Retained<NSColor>> = if Some(*tag) == active.map(|tool| tool.tag())
                     {
@@ -1073,6 +1095,37 @@ impl ToolbarView {
                 center_toolbar_layers(button);
             }
         });
+    }
+
+    /// Paint the leafing pair from the availability flags: a chevron with
+    /// nowhere to leaf wears the disabled gray tint, the other one the
+    /// icon tint. The flags stay in the ivars — the click guard and the
+    /// hover skip read them, so a disabled button neither reacts nor
+    /// highlights. Runs on every state push, like the other paint passes.
+    fn update_page_buttons(&self, can_prev: bool, can_next: bool) {
+        self.ivars().can_page_prev.set(can_prev);
+        self.ivars().can_page_next.set(can_next);
+        let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
+            ICON_TINT[0],
+            ICON_TINT[1],
+            ICON_TINT[2],
+            ICON_TINT[3],
+        );
+        let disabled = NSColor::colorWithSRGBRed_green_blue_alpha(
+            PAGE_DISABLED_TINT[0],
+            PAGE_DISABLED_TINT[1],
+            PAGE_DISABLED_TINT[2],
+            PAGE_DISABLED_TINT[3],
+        );
+        for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
+            let tint = match *tag {
+                PAGE_PREV_TAG if !can_prev => &disabled,
+                PAGE_NEXT_TAG if !can_next => &disabled,
+                PAGE_PREV_TAG | PAGE_NEXT_TAG => &icon,
+                _ => continue,
+            };
+            button.setContentTintColor(Some(tint));
+        }
     }
 
     /// Slide the system traffic lights' hosting view vertically so their
@@ -1146,6 +1199,14 @@ impl ToolbarView {
             None
         } else {
             toolbar_hit
+        };
+        // A disabled leafing button does not highlight: its gray chevron
+        // already says the click would do nothing. The hit is dropped, so
+        // the pass below clears the plate like over dead space.
+        let toolbar_hit = match toolbar_hit {
+            Some(PAGE_PREV_TAG) if !self.ivars().can_page_prev.get() => None,
+            Some(PAGE_NEXT_TAG) if !self.ivars().can_page_next.get() => None,
+            hit => hit,
         };
         let hover = NSColor::colorWithSRGBRed_green_blue_alpha(
             HOVER_BG[0],
