@@ -72,9 +72,20 @@
 
 ## 4. Domain-skills pass
 
-- [ ] 4.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (карта
+- [x] 4.1 Обновить `.zcode/skills/minisnap-capture/SKILL.md` (карта
   модулей: строка `src/overlay_hud.rs` — семья HUD за `Hud`; строка
   `overlay.rs` без HUD-полей; инварианты: новый HUD-слой не требует правок
   `present_target`, контейнер — второй ребёнок root) и строку `overlay.rs`
   в `.zcode/skills/minisnap-architecture/SKILL.md` (модульная карта).
-  Проверка: текст скиллов соответствует коду.
+  Проверка: текст скиллов соответствует коду. *(minisnap-capture:
+  описание и вводка называют оба файла; таблица overlay.rs без HUD-строк
+  «лупа»/«затемнение и рамка», `OverlayIvars` с полем `hud`; новая
+  таблица `src/overlay_hud.rs` — chrome-слои/сэмплер/раскладка; шаги 1–4
+  и 6 потока переведены на вызовы `hud.*`; инвариант «HUD — один
+  владелец» добавлен, в буллете FrameSampler — судьба `buf` (продакшн не
+  читает, обязан жить рядом с image), буллет про `line_brightness_in`
+  удалён; минус устаревший буллет про мёртвый код. minisnap-architecture:
+  строка overlay.rs без FrameSampler, новая строка overlay_hud.rs.
+  Сверено с кодом: все 8 методов `Hud`, `FrameSampler::new`,
+  `loupe_layout`/`LoupeLayout`, поле `hud: Hud` и 14 вызовов `hud.*` в
+  overlay.rs существуют)*
