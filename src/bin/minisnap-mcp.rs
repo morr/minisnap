@@ -216,6 +216,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Vec<Value>, String> {
         "state" => {
             let instance = pick_instance(instance_arg(args))?;
             let response = http_json(instance.record.port, "GET", "/state", None)?;
+            check_envelope_error(&response)?;
             Ok(vec![text_content(format!(
                 "state of {}:\n{}",
                 instance.label(),
@@ -235,6 +236,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Vec<Value>, String> {
                 query.push_str(&url_encode(path));
             }
             let response = http_json(instance.record.port, "GET", &format!("/screenshot?{query}"), None)?;
+            check_envelope_error(&response)?;
             let screenshot = response
                 .get("screenshot")
                 .ok_or_else(|| format!("unexpected response: {response}"))?;
@@ -293,6 +295,16 @@ fn call_tool(name: &str, args: &Value) -> Result<Vec<Value>, String> {
     }
 }
 
+/// Surface the app's own error (an envelope with `"error"`) as a tool
+/// error, so an agent sees the app's message instead of "unexpected
+/// response".
+fn check_envelope_error(response: &Value) -> Result<(), String> {
+    match response.get("error").and_then(Value::as_str) {
+        Some(error) => Err(error.to_string()),
+        None => Ok(()),
+    }
+}
+
 /// Pull `"result": {"status": …, "detail": …}` (or the error) out of an
 /// envelope and phrase it with the instance label.
 fn format_result(instance: &Instance, response: &Value) -> String {
@@ -337,9 +349,17 @@ fn discover() -> Result<Vec<Instance>, String> {
             continue;
         };
         match http_json(record.port, "GET", "/ping", None) {
-            Ok(response) if response.get("error").is_none() => instances.push(Instance { record }),
-            // Dead or foreign: prune the stale record so the registry
-            // self-heals.
+            // The identity must match the record: a port can outlive its
+            // instance and land on a different one.
+            Ok(response)
+                if response.get("error").is_none()
+                    && response.pointer("/identity/pid").and_then(Value::as_u64)
+                        == Some(u64::from(record.pid)) =>
+            {
+                instances.push(Instance { record })
+            }
+            // Dead, foreign, or a port that moved on: prune the stale
+            // record so the registry self-heals.
             _ => {
                 let _ = std::fs::remove_file(&path);
             }

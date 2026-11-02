@@ -180,8 +180,11 @@ pub struct LogResult {
 }
 
 /// What the main thread produced for one agent request; the HTTP layer
-/// wraps it with the instance identity.
+/// wraps it with the instance identity. Untagged: the payload serializes
+/// bare (the envelope's key already names the kind), and the app only
+/// ever serializes this enum — nothing deserializes it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum AgentResponse {
     State(AppState),
     Result(ActionResult),
