@@ -23,8 +23,8 @@
 
 ## 5. Скриншоты и журнал
 
-- [ ] 5.1 `GET /screenshot`: `composite` через `render_composite` + PNG; `window` через `cacheDisplayInRect` contentView'а; запись в файл, путь и размеры в ответе.
-- [ ] 5.2 `GET /log` поверх кольцевого буфера.
+- [x] 5.1 `GET /screenshot`: `composite` через `render_composite` + PNG; `window` через `cacheDisplayInRect` contentView'а; запись в файл, путь и размеры в ответе.
+- [x] 5.2 `GET /log` поверх кольцевого буфера.
 
 ## 6. MCP-бинарник
 

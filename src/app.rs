@@ -480,9 +480,68 @@ impl AppController {
                 Ok(AgentResponse::Result(self.agent_action(action)))
             }
             AgentRequest::Editor(op) => Ok(AgentResponse::Result(self.agent_editor(op))),
-            AgentRequest::Screenshot { .. } => Err("screenshot: not wired yet".into()),
-            AgentRequest::Log { .. } => Err("log: not wired yet".into()),
+            AgentRequest::Screenshot { target, path } => Ok(AgentResponse::Screenshot(
+                self.agent_screenshot(&target, path)?,
+            )),
+            AgentRequest::Log { offset } => {
+                let (lines, next_offset) = crate::logbuf::read_from(offset);
+                Ok(AgentResponse::Log(crate::agent_proto::LogResult {
+                    lines,
+                    next_offset,
+                }))
+            }
         }
+    }
+
+    /// Produce a screenshot PNG: `composite` is the pure document render,
+    /// `window` draws the view hierarchy (works occluded and across
+    /// Spaces). The path defaults under the temp dir.
+    fn agent_screenshot(
+        &self,
+        target: &str,
+        path: Option<String>,
+    ) -> Result<crate::agent_proto::ScreenshotResult, String> {
+        use crate::agent_proto::ScreenshotResult;
+        let editor = self.ivars().editor.borrow();
+        let Some(editor) = editor.as_ref() else {
+            return Err("the editor window is not open; nothing to screenshot".into());
+        };
+        let path = match path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                std::env::temp_dir()
+                    .join(format!("minisnap-agent-{}", std::process::id()))
+                    .join(format!("{target}-{stamp}.png"))
+            }
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let (width, height) = match target {
+            "composite" => editor.agent_composite_png(&path)?,
+            "window" => {
+                let (bytes, width, height) = editor.agent_window_png()?;
+                std::fs::write(&path, bytes)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                (width, height)
+            }
+            other => {
+                return Err(format!(
+                    "unknown screenshot target '{other}' (composite|window)"
+                ))
+            }
+        };
+        Ok(ScreenshotResult {
+            target: target.to_string(),
+            path: path.display().to_string(),
+            width,
+            height,
+        })
     }
 
     /// Execute an app-level agent action; the result says what happened

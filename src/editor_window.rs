@@ -14,7 +14,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBezierPath, NSButton,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSBezierPath,
+    NSBitmapImageFileType, NSButton,
     NSColor, NSControl, NSControlTextEditingDelegate, NSCursor, NSEvent, NSEventMask,
     NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
     NSGraphicsContext, NSImage, NSScreen, NSTextField, NSTextFieldDelegate, NSTextView,
@@ -22,7 +23,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
-use objc2_foundation::{NSDate, NSString, NSNotification};
+use objc2_foundation::{NSDate, NSDictionary, NSString, NSNotification};
 
 use crate::editor::arrow;
 use crate::editor::drag::{
@@ -1082,6 +1083,52 @@ impl EditorView {
         Ok(())
     }
 
+    /// Agent: write the document composite to `path` and report its pixel
+    /// size — a pure render, no display involved, so it works with the
+    /// window hidden and the colors are exactly the code's values.
+    fn agent_composite_png(&self, path: &std::path::Path) -> Result<(u32, u32), String> {
+        let ivars = self.ivars();
+        let shot = ivars.shot.borrow();
+        let Some(shot) = shot.as_ref() else {
+            return Err("editor: no document open".into());
+        };
+        let image = render::render_composite(shot.doc.base(), shot.doc.elements())
+            .ok_or("editor: composite render failed")?;
+        crate::output::encode_png_atomic(&image, path)?;
+        Ok((
+            CGImage::width(Some(&image)) as u32,
+            CGImage::height(Some(&image)) as u32,
+        ))
+    }
+
+    /// Agent: render the window content (toolbar + canvas) into a PNG —
+    /// it draws the view hierarchy, not the screen, so an occluded window
+    /// or another Space does not matter. Returns the bytes with the pixel
+    /// size.
+    fn agent_window_png(&self) -> Result<(Vec<u8>, u32, u32), String> {
+        let Some(window) = self.window() else {
+            return Err("editor: no window".into());
+        };
+        let content = window
+            .contentView()
+            .ok_or_else(|| "editor: no content view".to_string())?;
+        let bounds = content.bounds();
+        let Some(rep) = content.bitmapImageRepForCachingDisplayInRect(bounds) else {
+            return Err("editor: cannot allocate the window bitmap".into());
+        };
+        content.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+        // SAFETY: the rep was produced by cacheDisplayInRect and the empty
+        // properties dictionary carries no typed values to misuse.
+        let data = unsafe {
+            rep.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }
+        .ok_or_else(|| "editor: PNG encode failed".to_string())?;
+        Ok((data.to_vec(), rep.pixelsWide() as u32, rep.pixelsHigh() as u32))
+    }
+
     /// Scale factors from image pixels to view points.
     fn view_scale(&self) -> (f64, f64) {
         let frame = self.frame_rect();
@@ -2111,6 +2158,17 @@ impl EditorWindow {
     /// Agent: leaf to the previous (-1) or next (1) shot of the folder.
     pub fn agent_page(&self, delta: isize) {
         self.view.page(delta);
+    }
+
+    /// Agent: write the document composite to `path`; returns pixel size.
+    pub fn agent_composite_png(&self, path: &std::path::Path) -> Result<(u32, u32), String> {
+        self.view.agent_composite_png(path)
+    }
+
+    /// Agent: PNG bytes of the window content (toolbar + canvas) with the
+    /// pixel size; see `EditorView::agent_window_png`.
+    pub fn agent_window_png(&self) -> Result<(Vec<u8>, u32, u32), String> {
+        self.view.agent_window_png()
     }
 }
 
