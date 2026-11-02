@@ -1,9 +1,11 @@
 //! Core Text drawing for text and callout elements: colored fill over a
 //! white halo stroke, readable on any background.
 
-use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString};
-use objc2_core_graphics::{CGContext, CGTextDrawingMode};
-use objc2_core_text::{kCTFontAttributeName, CTFont, CTLine};
+use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString, CFType};
+use objc2_core_graphics::{CGColor, CGColorSpace, CGContext, CGTextDrawingMode};
+use objc2_core_text::{
+    kCTFontAttributeName, kCTForegroundColorAttributeName, CTFont, CTLine,
+};
 
 use super::{Point, Rgba};
 
@@ -67,20 +69,30 @@ impl TextMetrics {
     }
 }
 
-/// Build a one-line attributed string with `FONT_NAME` at `size`.
-fn make_line(text: &str, size: f64) -> Option<CFRetained<CTLine>> {
+/// Build a one-line attributed string with `FONT_NAME` at `size`, to be
+/// drawn in `color`. The color rides the string as
+/// `kCTForegroundColorAttributeName`: macOS 26's CoreText stopped
+/// delivering the context fill color to `CTLineDraw` (the glyphs come out
+/// black), while the attribute works.
+fn make_line(text: &str, size: f64, color: Rgba) -> Option<CFRetained<CTLine>> {
     if text.is_empty() {
         return None;
     }
     let font = // SAFETY: null matrix means the default transform.
         unsafe { CTFont::with_name(&CFString::from_str(FONT_NAME), size, std::ptr::null()) };
-    // SAFETY: the attribute key is a valid static CFString, the value a live
-    // font; the dictionary borrows both for its lifetime.
+    let space = CGColorSpace::new_device_rgb()?;
+    // SAFETY: a live colorspace and a live four-component array.
+    let cg_color = unsafe { CGColor::new(Some(&space), color.as_ptr())? };
+    // SAFETY: reading extern static CFString constants.
+    let keys = unsafe { [kCTFontAttributeName, kCTForegroundColorAttributeName] };
+    let values: [&CFType; 2] = [&*font, &*cg_color];
+    // SAFETY: the keys are static CFStrings, the values live CF objects;
+    // the dictionary borrows them for its lifetime.
     let attributes = unsafe {
-        CFDictionary::<CFString, CTFont>::from_slices(&[&kCTFontAttributeName], &[&font])
+        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
     };
-    // SAFETY: the only attribute (a live CTFont) is a valid value for
-    // kCTFontAttributeName.
+    // SAFETY: the attributes are valid keys and values for an attributed
+    // string.
     let attributed = unsafe {
         CFAttributedString::new(
             None,
@@ -94,7 +106,8 @@ fn make_line(text: &str, size: f64) -> Option<CFRetained<CTLine>> {
 
 /// Measure a text line: width plus ascent/descent.
 pub fn measure(text: &str, size: f64) -> Option<TextMetrics> {
-    let line = make_line(text, size)?;
+    // The metrics do not depend on the color; black is as good as any.
+    let line = make_line(text, size, [0.0, 0.0, 0.0, 1.0])?;
     let (mut ascent, mut descent, mut leading) = (0.0f64, 0.0f64, 0.0f64);
     // SAFETY: the out-parameters are plain locals.
     let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, &mut leading) };
@@ -111,41 +124,37 @@ pub fn measure(text: &str, size: f64) -> Option<TextMetrics> {
 pub fn draw_text(ctx: &CGContext, origin: Point, text: &str, color: Rgba, size: f64) {
     let lh = line_height(size);
     for (index, line_text) in text.split('\n').enumerate() {
-        let Some(line) = make_line(line_text, size) else {
+        let Some(line) = make_line(line_text, size, color) else {
             continue;
         };
         let Some(metrics) = measure(line_text, size) else {
             continue;
         };
         let line_origin = Point::new(origin.x, origin.y + index as f64 * lh);
-        draw_line(ctx, line_origin, &line, &metrics, color, size);
+        draw_line(ctx, line_origin, &line, &metrics, size);
     }
 }
 
 /// Draw one measured line with `origin` at the top-left of the line box.
-fn draw_line(
-    ctx: &CGContext,
-    origin: Point,
-    line: &CTLine,
-    metrics: &TextMetrics,
-    color: Rgba,
-    size: f64,
-) {
+/// The glyphs' color rides the attributed string (see `make_line`); the
+/// text position resets before each pass — macOS 26's CoreText advances it
+/// across a draw, which used to shove the fill pass one line-width aside.
+fn draw_line(ctx: &CGContext, origin: Point, line: &CTLine, metrics: &TextMetrics, size: f64) {
     CGContext::save_g_state(Some(ctx));
     // Core Text draws upright in a Y-up space; undo the caller's flip
     // locally and put the baseline one ascent below the block's top.
     CGContext::translate_ctm(Some(ctx), origin.x, origin.y + metrics.ascent);
     CGContext::scale_ctm(Some(ctx), 1.0, -1.0);
-    CGContext::set_text_position(Some(ctx), 0.0, 0.0);
     // Pass 1: the white halo.
+    CGContext::set_text_position(Some(ctx), 0.0, 0.0);
     CGContext::set_text_drawing_mode(Some(ctx), CGTextDrawingMode::Stroke);
     CGContext::set_rgb_stroke_color(Some(ctx), 1.0, 1.0, 1.0, 1.0);
     CGContext::set_line_width(Some(ctx), size * HALO_FRACTION);
     // SAFETY: plain draw on a live line/context pair.
     unsafe { line.draw(ctx) };
     // Pass 2: the colored fill.
+    CGContext::set_text_position(Some(ctx), 0.0, 0.0);
     CGContext::set_text_drawing_mode(Some(ctx), CGTextDrawingMode::Fill);
-    CGContext::set_rgb_fill_color(Some(ctx), color[0], color[1], color[2], color[3]);
     // SAFETY: plain draw on a live line/context pair.
     unsafe { line.draw(ctx) };
     CGContext::restore_g_state(Some(ctx));
@@ -202,6 +211,31 @@ mod tests {
         };
         assert!(non_gray_in(0, 32), "first line missing");
         assert!(non_gray_in(32, 64), "second line missing");
+    }
+
+    #[test]
+    fn text_fill_renders_in_the_element_color() {
+        // Regression guard for macOS 26: CoreText stopped delivering the
+        // context fill color to CTLineDraw, so the color must ride the
+        // attributed string — the glyphs used to come out black.
+        let base = solid_frame(96, 64);
+        let element = Element {
+            id: 1,
+            kind: ElementKind::Text {
+                origin: Point::new(10.0, 10.0),
+                text: "WW".into(),
+                color: MAGENTA,
+                size: 32.0,
+            },
+        };
+        let composite =
+            super::super::render::render_composite(&base, &[element]).expect("composite");
+        let bytes = pixel_bytes(&composite);
+        let magenta = bytes
+            .chunks_exact(4)
+            .filter(|px| px[0] > 180 && px[2] > 180 && px[1] < 120)
+            .count();
+        assert!(magenta > 0, "the fill did not render in the element color");
     }
 
     #[test]
