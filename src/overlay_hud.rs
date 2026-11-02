@@ -504,55 +504,18 @@ impl Hud {
         let Some(sampler) = sampler.as_ref() else {
             return;
         };
-        let factor = sampler.factor as f64;
-        let lw = sampler.width as f64;
-        let lh = sampler.height as f64;
         let dragging = selection_px.is_some();
 
-        // Logical-pixel sample around the cursor, kept fully inside the
-        // bitmap; the cursor pixel stays the center cell.
-        let half = LOUPE_SAMPLE_PX / 2.0;
-        let cursor_logical = crate::capture::geometry::display_point_to_logical_pixel(
-            cursor,
-            screen.height,
-            scale,
-            factor,
-        );
-        let px = cursor_logical.x.round().clamp(half, lw - half);
-        let py = cursor_logical.y.round().clamp(half, lh - half);
-        let sample = CGRect::new(
-            CGPoint::new(px - half, py - half),
-            CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
-        );
+        let layout = loupe_layout(cursor, screen, scale, sampler);
         let loupe = &self.loupe;
-        if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), sample) {
+        if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), layout.sample_rect) {
             // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
             // expects it as AnyObject.
             let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
             // SAFETY: contents setter with a valid image object.
             unsafe { loupe.setContents(Some(as_any)) };
         }
-
-        // Place the loupe by the cursor, flipping at the screen edges. The
-        // origin snaps to whole points so the squares inside stay pinned to
-        // the screen grid while the crop steps in whole pixels — otherwise
-        // the picture visibly slides under the cursor in sub-pixel steps.
-        let lx = if cursor.x + LOUPE_GAP_PT + LOUPE_SIZE_PT <= screen.width {
-            cursor.x + LOUPE_GAP_PT
-        } else {
-            cursor.x - LOUPE_GAP_PT - LOUPE_SIZE_PT
-        }
-        .round();
-        let ly = if cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT >= 0.0 {
-            cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT
-        } else {
-            cursor.y + LOUPE_GAP_PT
-        }
-        .round();
-        loupe.setFrame(CGRect::new(
-            CGPoint::new(lx, ly),
-            CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
-        ));
+        loupe.setFrame(layout.loupe_frame);
         loupe.setHidden(false);
 
         // Monosnap-style readout pinned under the loupe: cursor coordinates
@@ -561,21 +524,13 @@ impl Hud {
             Some((w, h)) => format!("{} × {}", w.round() as i64, h.round() as i64),
             None => format!(
                 "{} × {}",
-                cursor_logical.x.round() as i64,
-                cursor_logical.y.round() as i64
+                layout.cursor_logical.x.round() as i64,
+                layout.cursor_logical.y.round() as i64
             ),
         };
         let label = &self.size_label;
         set_label_text(label, &text);
-        let ty = if ly >= HUD_LABEL_H_PT + 6.0 {
-            ly - HUD_LABEL_H_PT - 6.0
-        } else {
-            ly + LOUPE_SIZE_PT + 6.0
-        };
-        label.setFrame(CGRect::new(
-            CGPoint::new(lx, ty),
-            CGSize::new(LOUPE_SIZE_PT, HUD_LABEL_H_PT),
-        ));
+        label.setFrame(layout.label_frame);
         label.setHidden(false);
 
         // Idle: full-screen guides through the cursor with coordinate labels.
@@ -669,6 +624,79 @@ impl Hud {
     }
 }
 
+/// Placement math for the loupe and its readout, factored out of the
+/// per-frame update as a pure function (unit-tested on a synthetic
+/// sampler, no live layers involved).
+struct LoupeLayout {
+    /// Loupe frame in display-local points; the origin is snapped to whole
+    /// points so the magnified squares stay pinned to the screen grid while
+    /// the crop steps in whole pixels — otherwise the picture visibly
+    /// slides under the cursor in sub-pixel steps.
+    loupe_frame: CGRect,
+    /// Readout bar frame: pinned under the loupe, flipped above it near the
+    /// top edge of the screen.
+    label_frame: CGRect,
+    /// Logical-pixel sample rect around the cursor, kept fully inside the
+    /// sampler bitmap; the cursor pixel stays the center cell.
+    sample_rect: CGRect,
+    /// The cursor in logical pixels (the readout text speaks them).
+    cursor_logical: CGPoint,
+}
+
+/// Compute the loupe placement for the cursor: the loupe sits in the
+/// gap-sized corner away from the cursor, flipping horizontally at the
+/// right edge and vertically at the bottom edge (AppKit points, bottom-left
+/// origin).
+fn loupe_layout(cursor: CGPoint, screen: CGSize, scale: f64, sampler: &FrameSampler) -> LoupeLayout {
+    let factor = sampler.factor as f64;
+    let lw = sampler.width as f64;
+    let lh = sampler.height as f64;
+    let half = LOUPE_SAMPLE_PX / 2.0;
+
+    let cursor_logical =
+        crate::capture::geometry::display_point_to_logical_pixel(cursor, screen.height, scale, factor);
+    let px = cursor_logical.x.round().clamp(half, lw - half);
+    let py = cursor_logical.y.round().clamp(half, lh - half);
+    let sample_rect = CGRect::new(
+        CGPoint::new(px - half, py - half),
+        CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
+    );
+
+    let lx = if cursor.x + LOUPE_GAP_PT + LOUPE_SIZE_PT <= screen.width {
+        cursor.x + LOUPE_GAP_PT
+    } else {
+        cursor.x - LOUPE_GAP_PT - LOUPE_SIZE_PT
+    }
+    .round();
+    let ly = if cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT >= 0.0 {
+        cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT
+    } else {
+        cursor.y + LOUPE_GAP_PT
+    }
+    .round();
+    let loupe_frame = CGRect::new(
+        CGPoint::new(lx, ly),
+        CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
+    );
+
+    let ty = if ly >= HUD_LABEL_H_PT + 6.0 {
+        ly - HUD_LABEL_H_PT - 6.0
+    } else {
+        ly + LOUPE_SIZE_PT + 6.0
+    };
+    let label_frame = CGRect::new(
+        CGPoint::new(lx, ty),
+        CGSize::new(LOUPE_SIZE_PT, HUD_LABEL_H_PT),
+    );
+
+    LoupeLayout {
+        loupe_frame,
+        label_frame,
+        sample_rect,
+        cursor_logical,
+    }
+}
+
 /// Replace the text of a CATextLayer-backed HUD label.
 fn set_label_text(layer: &CATextLayer, text: &str) {
     let s = NSString::from_str(text);
@@ -743,5 +771,83 @@ mod tests {
         let image = synthetic_frame(64, 64);
         let sampler = FrameSampler::new(64, 64, 1.0, &image).expect("sampler");
         assert_eq!((sampler.width, sampler.height, sampler.factor), (64, 64, 1));
+    }
+
+    /// A 64×64 sampler at scale 1 (64×64 logical pixels) for layout math;
+    /// the pixel content is irrelevant here.
+    fn layout_sampler() -> FrameSampler {
+        let image = synthetic_frame(64, 64);
+        FrameSampler::new(64, 64, 1.0, &image).expect("sampler")
+    }
+
+    #[test]
+    fn loupe_flips_away_from_the_screen_edges() {
+        let sampler = layout_sampler();
+        let screen = CGSize::new(800.0, 600.0);
+        // Near the right edge the loupe flips to the left of the cursor.
+        let l = loupe_layout(CGPoint::new(790.0, 300.0), screen, 1.0, &sampler);
+        assert_eq!(l.loupe_frame.origin.x, 790.0 - LOUPE_GAP_PT - LOUPE_SIZE_PT);
+        // Near the bottom edge (AppKit y grows up) it flips above.
+        let l = loupe_layout(CGPoint::new(100.0, 5.0), screen, 1.0, &sampler);
+        assert_eq!(l.loupe_frame.origin.y, 5.0 + LOUPE_GAP_PT);
+        // Room on both sides: the loupe sits right and below.
+        let l = loupe_layout(CGPoint::new(100.0, 300.0), screen, 1.0, &sampler);
+        assert_eq!(l.loupe_frame.origin.x, 100.0 + LOUPE_GAP_PT);
+        assert_eq!(l.loupe_frame.origin.y, 300.0 - LOUPE_GAP_PT - LOUPE_SIZE_PT);
+        assert_eq!(l.loupe_frame.size, CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT));
+    }
+
+    #[test]
+    fn loupe_origin_snaps_to_whole_points() {
+        let sampler = layout_sampler();
+        let screen = CGSize::new(800.0, 600.0);
+        let l = loupe_layout(CGPoint::new(100.4, 200.6), screen, 1.0, &sampler);
+        assert_eq!(l.loupe_frame.origin.x, 118.0);
+        assert_eq!(l.loupe_frame.origin.y, 43.0);
+    }
+
+    #[test]
+    fn sample_rect_stays_inside_the_bitmap() {
+        let sampler = layout_sampler();
+        // A tiny screen so the cursor maps past the sampler bounds.
+        let screen = CGSize::new(40.0, 30.0);
+        // Logical (70, 3): x clamps to the right edge, y stays.
+        let l = loupe_layout(CGPoint::new(70.0, 3.0), screen, 1.0, &sampler);
+        assert_eq!(l.sample_rect.max().x, 64.0);
+        assert!(l.sample_rect.min().x >= 0.0);
+        // Logical (70, 29): y clamps to the bottom of the bitmap.
+        let l = loupe_layout(CGPoint::new(70.0, 29.0), screen, 1.0, &sampler);
+        assert_eq!(l.sample_rect.min().y, 0.0);
+        assert!(l.sample_rect.max().y <= 64.0);
+    }
+
+    #[test]
+    fn label_flips_to_the_other_side_of_the_loupe() {
+        let sampler = layout_sampler();
+        let screen = CGSize::new(800.0, 600.0);
+        // Cursor at the very top: the loupe sits below the cursor, the
+        // label flips under the loupe.
+        let l = loupe_layout(CGPoint::new(100.0, 2.0), screen, 1.0, &sampler);
+        let loupe_top = l.loupe_frame.origin.y;
+        assert!(loupe_top < 6.0 + HUD_LABEL_H_PT);
+        assert_eq!(
+            l.label_frame.origin.y,
+            loupe_top + LOUPE_SIZE_PT + 6.0
+        );
+        // Mid-screen: the label rides above the loupe.
+        let l = loupe_layout(CGPoint::new(100.0, 200.0), screen, 1.0, &sampler);
+        assert_eq!(
+            l.label_frame.origin.y,
+            l.loupe_frame.origin.y - HUD_LABEL_H_PT - 6.0
+        );
+        assert_eq!(l.label_frame.size, CGSize::new(LOUPE_SIZE_PT, HUD_LABEL_H_PT));
+    }
+
+    #[test]
+    fn idle_readout_speaks_logical_pixels() {
+        let sampler = layout_sampler();
+        let screen = CGSize::new(800.0, 600.0);
+        let l = loupe_layout(CGPoint::new(100.0, 200.0), screen, 1.0, &sampler);
+        assert_eq!((l.cursor_logical.x, l.cursor_logical.y), (100.0, 400.0));
     }
 }
