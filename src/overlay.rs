@@ -10,20 +10,16 @@ use objc2::{
     define_class, extern_methods, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSScreen, NSView, NSWindow,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSScreen, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_core_foundation::{CFType, CGPoint, CGRect};
-use objc2_core_graphics::{CGColor, CGImage, CGMutablePath, CGPath};
-use objc2_foundation::{NSNotification, NSNumber, NSString};
-use objc2_quartz_core::{
-    kCAAlignmentCenter, kCAFilterNearest, kCAMediaTimingFunctionEaseInEaseOut, CABasicAnimation,
-    CACurrentMediaTime, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer, CATextLayer,
-    CATransaction,
-};
+use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSNotification, NSString};
+use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::capture::{T0Capture, T0Surface, T0Window};
-use crate::overlay_hud::FrameSampler;
+use crate::overlay_hud::{Hud, DIM_ALPHA};
 
 use presentation::{ScreenPair, SurfaceMap};
 
@@ -365,70 +361,10 @@ struct OverlayIvars {
     /// Layer tree root; attached to the view's layer on the first show.
     root_layer: Retained<CALayer>,
     layers_attached: Cell<bool>,
-    /// Four black strips around the selection rectangle (top, bottom, left,
-    /// right) forming the dimming with a "hole" for the selection.
-    dim_strips: RefCell<[Retained<CALayer>; 4]>,
-    /// Magnifier: nearest-neighbor sample of the T0 bitmap by the cursor.
-    loupe: Retained<CALayer>,
-    /// Pixel grid over the loupe sample.
-    loupe_grid: Retained<CAShapeLayer>,
-    /// Crosshair through the loupe's center (cursor-pixel) cell.
-    loupe_cross: Retained<CAShapeLayer>,
-    /// Two-tone frame over the loupe edge: a white outline ring under a
-    /// thin black core ring, so the boundary reads on any content.
-    loupe_frame_light: Retained<CAShapeLayer>,
-    loupe_frame_dark: Retained<CAShapeLayer>,
-    /// Full-screen guide lines through the cursor (idle only): a white
-    /// outline layer under a thin black core layer, Monosnap-style. The pair
-    /// reads on any background and never flickers, unlike content-sampled
-    /// coloring.
-    axis_v_dark: Retained<CAShapeLayer>,
-    axis_v_light: Retained<CAShapeLayer>,
-    axis_h_dark: Retained<CAShapeLayer>,
-    axis_h_light: Retained<CAShapeLayer>,
-    /// Readout pinned under the loupe: cursor coordinates while idle, the
-    /// selection size while dragging (logical pixels).
-    size_label: Retained<CATextLayer>,
-    /// Red mode border along the display perimeter.
-    border: Retained<CAShapeLayer>,
-    /// The logical-pixel copy of the frozen frame, alive while the mode is
-    /// active (the context and its backing bytes must live together).
-    sampler: RefCell<Option<FrameSampler>>,
+    /// All chrome above the frame layer: dimming, loupe, guides, readout,
+    /// mode border and the frame sampler (see `overlay_hud`).
+    hud: Hud,
 }
-
-/// Dimming opacity over the frozen frame outside the selection.
-const DIM_ALPHA: f64 = 0.4;
-
-/// Loupe magnification: on-screen points per logical (UI) pixel.
-const LOUPE_ZOOM_PT: f64 = 7.0;
-/// Loupe sample side, in logical pixels (the loupe is square). 20 × 7pt
-/// keeps the loupe's on-screen size at 140pt while showing more pixels.
-const LOUPE_SAMPLE_PX: f64 = 20.0;
-/// Guide line widths, in points: white outline underneath, black core on
-/// top.
-const AXIS_OUTLINE_W_PT: f64 = 1.5;
-const AXIS_CORE_W_PT: f64 = 0.75;
-/// Loupe side, in points.
-const LOUPE_SIZE_PT: f64 = LOUPE_SAMPLE_PX * LOUPE_ZOOM_PT;
-/// Loupe frame rings, in points: a white outline ring with a black core
-/// ring on top — the same two-tone scheme as the axis guides — so the
-/// loupe edge reads on light and dark content alike.
-const LOUPE_FRAME_OUTLINE_W_PT: f64 = 3.0;
-const LOUPE_FRAME_CORE_W_PT: f64 = 1.5;
-/// Gap between the cursor and the loupe corner.
-const LOUPE_GAP_PT: f64 = 18.0;
-/// Height of the HUD readout bar under the loupe, in points. The text layer
-/// draws from the top; 18pt for a 14pt font leaves near-equal gaps above
-/// and below the digits.
-const HUD_LABEL_H_PT: f64 = 18.0;
-/// Red mode border along the display perimeter, in points.
-const BORDER_W_PT: f64 = 4.0;
-/// Opacity floor of the idle pulse.
-const BORDER_MIN_OPACITY: f64 = 0.55;
-const BORDER_FADE_IN_DUR: f64 = 0.25;
-const BORDER_PULSE_DUR: f64 = 0.8;
-/// Animation key of the idle pulse on the border layer.
-const BORDER_PULSE_KEY: &str = "border-pulse";
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -466,19 +402,7 @@ define_class!(
                 mouse: Cell::new(CGPoint::ZERO),
                 root_layer: CALayer::new(),
                 layers_attached: Cell::new(false),
-                dim_strips: RefCell::new([CALayer::new(), CALayer::new(), CALayer::new(), CALayer::new()]),
-                loupe: CALayer::new(),
-                loupe_grid: CAShapeLayer::new(),
-                loupe_cross: CAShapeLayer::new(),
-                loupe_frame_light: CAShapeLayer::new(),
-                loupe_frame_dark: CAShapeLayer::new(),
-                axis_v_dark: CAShapeLayer::new(),
-                axis_v_light: CAShapeLayer::new(),
-                axis_h_dark: CAShapeLayer::new(),
-                axis_h_light: CAShapeLayer::new(),
-                size_label: CATextLayer::new(),
-                border: CAShapeLayer::new(),
-                sampler: RefCell::new(None),
+                hud: Hud::new(),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -610,12 +534,6 @@ impl OverlayView {
         view
     }
 
-    /// Style a dimming strip once.
-    fn setup_strip(strip: &CALayer) {
-        let dim_color = NSColor::blackColor().colorWithAlphaComponent(DIM_ALPHA);
-        strip.setBackgroundColor(Some(&dim_color.CGColor()));
-    }
-
     /// Build a veil window over one of the other displays: same shielding
     /// level, translucent black, a click cancels the mode.
     fn make_veil(mtm: MainThreadMarker, frame: CGRect, view: &OverlayView) -> Retained<NSWindow> {
@@ -677,414 +595,6 @@ impl OverlayView {
         *ivars.veils.borrow_mut() = veils;
     }
 
-    /// Place the four dimming strips around `hole` (display-local points);
-    /// `None` hides them (no active selection yet).
-    fn update_dim(&self, hole: Option<CGRect>) {
-        // Strip frames must follow the cursor instantly, without Core
-        // Animation's implicit transitions.
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.update_dim_inner(hole);
-        CATransaction::commit();
-    }
-
-    fn update_dim_inner(&self, hole: Option<CGRect>) {
-        let ivars = self.ivars();
-        let strips = ivars.dim_strips.borrow();
-        let screen_size = ivars.screen_frame.get().size;
-        let Some(rect) = hole else {
-            for strip in strips.iter() {
-                strip.setHidden(true);
-            }
-            return;
-        };
-        let rect = rect.standardize();
-        let w = screen_size.width;
-        let h = screen_size.height;
-        let frames = [
-            // top: from the hole's top edge up to the screen top
-            CGRect::new(CGPoint::new(0.0, rect.max().y), objc2_core_foundation::CGSize::new(w, h - rect.max().y)),
-            // bottom
-            CGRect::new(CGPoint::ZERO, objc2_core_foundation::CGSize::new(w, rect.min().y)),
-            // left
-            CGRect::new(CGPoint::new(0.0, rect.min().y), objc2_core_foundation::CGSize::new(rect.min().x, rect.size.height)),
-            // right
-            CGRect::new(
-                CGPoint::new(rect.max().x, rect.min().y),
-                objc2_core_foundation::CGSize::new(w - rect.max().x, rect.size.height),
-            ),
-        ];
-        for (strip, frame) in strips.iter().zip(frames) {
-            strip.setHidden(false);
-            strip.setFrame(frame);
-        }
-    }
-
-    /// Style the HUD layers and hang them into the layer tree (called once,
-    /// on the first attach).
-    fn setup_hud(&self) {
-        let ivars = self.ivars();
-
-        let loupe = &ivars.loupe;
-        loupe.setMasksToBounds(true);
-        loupe.setContentsScale(ivars.scale.get());
-        // Magnified source pixels must stay sharp squares.
-        loupe.setMagnificationFilter(unsafe { kCAFilterNearest });
-        loupe.setHidden(true);
-
-        let grid = &ivars.loupe_grid;
-        grid.setFrame(CGRect::new(
-            CGPoint::ZERO,
-            objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
-        ));
-        let grid_color = NSColor::grayColor().colorWithAlphaComponent(0.35);
-        grid.setStrokeColor(Some(&grid_color.CGColor()));
-        grid.setLineWidth(0.5);
-        grid.setContentsScale(ivars.scale.get());
-        let grid_path = CGMutablePath::new();
-        let cells = (LOUPE_SIZE_PT / LOUPE_ZOOM_PT) as i64;
-        for i in 1..cells {
-            let p = i as f64 * LOUPE_ZOOM_PT;
-            // SAFETY: plain C path builders with a null transform.
-            unsafe {
-                CGMutablePath::move_to_point(Some(&grid_path), std::ptr::null(), p, 0.0);
-                CGMutablePath::add_line_to_point(Some(&grid_path), std::ptr::null(), p, LOUPE_SIZE_PT);
-                CGMutablePath::move_to_point(Some(&grid_path), std::ptr::null(), 0.0, p);
-                CGMutablePath::add_line_to_point(Some(&grid_path), std::ptr::null(), LOUPE_SIZE_PT, p);
-            }
-        }
-        let grid_ref: &CGPath = &grid_path;
-        grid.setPath(Some(grid_ref));
-        loupe.addSublayer(grid);
-
-        // Crosshair through the center cell = the pixel under the cursor.
-        let cross = &ivars.loupe_cross;
-        cross.setFrame(CGRect::new(
-            CGPoint::ZERO,
-            objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
-        ));
-        // Crosshair through the center cell = the logical pixel under the
-        // cursor (the contents image is drawn top-down; layer coords grow up).
-        let cell_center = (LOUPE_SAMPLE_PX / 2.0 + 0.5) * LOUPE_ZOOM_PT;
-        let cross_y = LOUPE_SIZE_PT - cell_center;
-        let cross_path = CGMutablePath::new();
-        // SAFETY: plain C path builders with a null transform.
-        unsafe {
-            CGMutablePath::move_to_point(Some(&cross_path), std::ptr::null(), 0.0, cross_y);
-            CGMutablePath::add_line_to_point(Some(&cross_path), std::ptr::null(), LOUPE_SIZE_PT, cross_y);
-            CGMutablePath::move_to_point(Some(&cross_path), std::ptr::null(), cell_center, 0.0);
-            CGMutablePath::add_line_to_point(Some(&cross_path), std::ptr::null(), cell_center, LOUPE_SIZE_PT);
-        }
-        let cross_ref: &CGPath = &cross_path;
-        cross.setPath(Some(cross_ref));
-        cross.setStrokeColor(Some(&NSColor::redColor().CGColor()));
-        cross.setLineWidth(1.0);
-        cross.setContentsScale(ivars.scale.get());
-        loupe.addSublayer(cross);
-
-        // Two-tone frame over the loupe edge, on top of the grid and the
-        // crosshair: the white outline reads on dark content, the black
-        // core on light. The band sits fully inside the clipped bounds.
-        let frame_inset = LOUPE_FRAME_OUTLINE_W_PT / 2.0;
-        let frame_path = CGMutablePath::new();
-        // SAFETY: plain C path builders with a null transform.
-        unsafe {
-            CGMutablePath::move_to_point(
-                Some(&frame_path),
-                std::ptr::null(),
-                frame_inset,
-                frame_inset,
-            );
-            CGMutablePath::add_line_to_point(
-                Some(&frame_path),
-                std::ptr::null(),
-                LOUPE_SIZE_PT - frame_inset,
-                frame_inset,
-            );
-            CGMutablePath::add_line_to_point(
-                Some(&frame_path),
-                std::ptr::null(),
-                LOUPE_SIZE_PT - frame_inset,
-                LOUPE_SIZE_PT - frame_inset,
-            );
-            CGMutablePath::add_line_to_point(
-                Some(&frame_path),
-                std::ptr::null(),
-                frame_inset,
-                LOUPE_SIZE_PT - frame_inset,
-            );
-            CGMutablePath::close_subpath(Some(&frame_path));
-        }
-        let frame_ref: &CGPath = &frame_path;
-        let white = NSColor::whiteColor().colorWithAlphaComponent(0.9).CGColor();
-        let black = NSColor::blackColor().colorWithAlphaComponent(0.9).CGColor();
-        for (ring, color, width) in [
-            (&ivars.loupe_frame_light, &white, LOUPE_FRAME_OUTLINE_W_PT),
-            (&ivars.loupe_frame_dark, &black, LOUPE_FRAME_CORE_W_PT),
-        ] {
-            ring.setFrame(CGRect::new(
-                CGPoint::ZERO,
-                objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
-            ));
-            ring.setPath(Some(frame_ref));
-            ring.setStrokeColor(Some(color));
-            ring.setLineWidth(width);
-            // A closed rect path would otherwise fill with the default
-            // opaque black.
-            ring.setFillColor(None);
-            ring.setContentsScale(ivars.scale.get());
-            loupe.addSublayer(ring);
-        }
-
-        // Guides: white outline first, black cores on top of it.
-        let outline = NSColor::whiteColor().colorWithAlphaComponent(0.9).CGColor();
-        let core = NSColor::blackColor().colorWithAlphaComponent(0.9).CGColor();
-        let axes: [(&Retained<CAShapeLayer>, &CGColor, f64); 4] = [
-            (&ivars.axis_v_light, &outline, AXIS_OUTLINE_W_PT),
-            (&ivars.axis_h_light, &outline, AXIS_OUTLINE_W_PT),
-            (&ivars.axis_v_dark, &core, AXIS_CORE_W_PT),
-            (&ivars.axis_h_dark, &core, AXIS_CORE_W_PT),
-        ];
-        for (axis, color, width) in axes {
-            axis.setStrokeColor(Some(color));
-            axis.setLineWidth(width);
-            axis.setContentsScale(ivars.scale.get());
-            axis.setHidden(true);
-            ivars.root_layer.addSublayer(axis);
-        }
-        // The loupe rides above the axis lines, its grid and crosshair on top.
-        ivars.root_layer.addSublayer(loupe);
-
-        let font = NSFont::monospacedDigitSystemFontOfSize_weight(14.0, 0.4);
-        // SAFETY: NSFont is an ObjC object at runtime; CATextLayer.font
-        // expects it as CFType.
-        let as_cf: &CFType = unsafe { &*(std::ptr::from_ref(&*font).cast::<CFType>()) };
-        for label in [&ivars.size_label] {
-            // SAFETY: plain property setters.
-            unsafe { label.setFont(Some(as_cf)) };
-            label.setFontSize(14.0);
-            label.setForegroundColor(Some(&NSColor::whiteColor().CGColor()));
-            let bg = NSColor::blackColor().colorWithAlphaComponent(0.65);
-            label.setBackgroundColor(Some(&bg.CGColor()));
-            label.setCornerRadius(3.0);
-            label.setMasksToBounds(true);
-            label.setAlignmentMode(unsafe { kCAAlignmentCenter });
-            label.setContentsScale(ivars.scale.get());
-            label.setHidden(true);
-            ivars.root_layer.addSublayer(label);
-        }
-
-        // Red mode border along the display perimeter, Monosnap-style: the
-        // stroke color and geometry style once, the path rebuilt per target
-        // (it follows the display size). Invisible until show() fades it in.
-        let border = &ivars.border;
-        border.setPath(None);
-        border.setStrokeColor(Some(&NSColor::redColor().CGColor()));
-        border.setFillColor(None);
-        border.setLineWidth(BORDER_W_PT);
-        border.setContentsScale(ivars.scale.get());
-        border.setOpacity(0.0);
-        // On top of every other HUD element.
-        ivars.root_layer.addSublayer(border);
-        self.rebuild_border_path();
-    }
-
-    /// Rebuild the red border path along the current display's perimeter.
-    /// The rect is inset by half the stroke so the line stays fully inside
-    /// the window. Called on the first attach and on every target switch
-    /// (displays differ in size and scale).
-    fn rebuild_border_path(&self) {
-        let ivars = self.ivars();
-        let inset = BORDER_W_PT / 2.0;
-        let size = ivars.screen_frame.get().size;
-        let border_path = CGMutablePath::new();
-        // SAFETY: plain C path builders with a null transform.
-        unsafe {
-            CGMutablePath::move_to_point(Some(&border_path), std::ptr::null(), inset, inset);
-            CGMutablePath::add_line_to_point(
-                Some(&border_path),
-                std::ptr::null(),
-                size.width - inset,
-                inset,
-            );
-            CGMutablePath::add_line_to_point(
-                Some(&border_path),
-                std::ptr::null(),
-                size.width - inset,
-                size.height - inset,
-            );
-            CGMutablePath::add_line_to_point(
-                Some(&border_path),
-                std::ptr::null(),
-                inset,
-                size.height - inset,
-            );
-            CGMutablePath::add_line_to_point(Some(&border_path), std::ptr::null(), inset, inset);
-        }
-        let border_ref: &CGPath = &border_path;
-        ivars.border.setPath(Some(border_ref));
-        ivars.border.setContentsScale(ivars.scale.get());
-    }
-
-    /// Arm the idle pulse on the border. The model opacity stays 1.0, so
-    /// removing the pulse key drops the border back to full red while
-    /// dragging.
-    fn start_border_pulse(border: &CAShapeLayer) {
-        let pulse = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
-        let from = NSNumber::numberWithDouble(1.0);
-        let to = NSNumber::numberWithDouble(BORDER_MIN_OPACITY);
-        // SAFETY: opacity animations encode from/to values as NSNumber.
-        unsafe {
-            pulse.setFromValue(Some(&*(std::ptr::from_ref(&*from).cast::<AnyObject>())));
-            pulse.setToValue(Some(&*(std::ptr::from_ref(&*to).cast::<AnyObject>())));
-        }
-        pulse.setDuration(BORDER_PULSE_DUR);
-        pulse.setAutoreverses(true);
-        pulse.setRepeatCount(f32::INFINITY);
-        pulse.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(unsafe {
-            kCAMediaTimingFunctionEaseInEaseOut
-        })));
-        // No overlap with the fade-in: the pulse starts only after the fade
-        // completes.
-        pulse.setBeginTime(CACurrentMediaTime() + BORDER_FADE_IN_DUR);
-        border.addAnimation_forKey(&pulse, Some(&NSString::from_str(BORDER_PULSE_KEY)));
-    }
-
-    /// Replace the text of a CATextLayer-backed HUD label.
-    fn set_label_text(layer: &CATextLayer, text: &str) {
-        let s = NSString::from_str(text);
-        // SAFETY: NSString is an ObjC object at runtime; CATextLayer.string
-        // expects it as AnyObject.
-        let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(&*s).cast::<AnyObject>()) };
-        // SAFETY: plain string setter.
-        unsafe { layer.setString(Some(as_any)) };
-    }
-
-    /// Reposition the HUD for the cursor. `selection_px` is the live pixel
-    /// size of the selection during a drag; `None` means idle, where the
-    /// guides show the cursor coordinates instead.
-    fn update_hud(&self, cursor: CGPoint, selection_px: Option<(f64, f64)>) {
-        // The loupe and guides must track the cursor instantly: without this,
-        // Core Animation tweens every frame and contents change over ~0.25s
-        // and the loupe visibly lags behind.
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.update_hud_inner(cursor, selection_px);
-        CATransaction::commit();
-    }
-
-    fn update_hud_inner(&self, cursor: CGPoint, selection_px: Option<(f64, f64)>) {
-        let ivars = self.ivars();
-        let screen = ivars.screen_frame.get().size;
-        let scale = ivars.scale.get();
-        let sampler = ivars.sampler.borrow();
-        let Some(sampler) = sampler.as_ref() else {
-            return;
-        };
-        let factor = sampler.factor as f64;
-        let lw = sampler.width as f64;
-        let lh = sampler.height as f64;
-        let dragging = selection_px.is_some();
-
-        // Logical-pixel sample around the cursor, kept fully inside the
-        // bitmap; the cursor pixel stays the center cell.
-        let half = LOUPE_SAMPLE_PX / 2.0;
-        let cursor_logical =
-            crate::capture::geometry::display_point_to_logical_pixel(cursor, screen.height, scale, factor);
-        let px = cursor_logical.x.round().clamp(half, lw - half);
-        let py = cursor_logical.y.round().clamp(half, lh - half);
-        let sample = CGRect::new(
-            CGPoint::new(px - half, py - half),
-            objc2_core_foundation::CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
-        );
-        let loupe = &ivars.loupe;
-        if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), sample) {
-            // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
-            // expects it as AnyObject.
-            let as_any: &AnyObject =
-                unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
-            // SAFETY: contents setter with a valid image object.
-            unsafe { loupe.setContents(Some(as_any)) };
-        }
-
-        // Place the loupe by the cursor, flipping at the screen edges. The
-        // origin snaps to whole points so the squares inside stay pinned to
-        // the screen grid while the crop steps in whole pixels — otherwise
-        // the picture visibly slides under the cursor in sub-pixel steps.
-        let lx = if cursor.x + LOUPE_GAP_PT + LOUPE_SIZE_PT <= screen.width {
-            cursor.x + LOUPE_GAP_PT
-        } else {
-            cursor.x - LOUPE_GAP_PT - LOUPE_SIZE_PT
-        }
-        .round();
-        let ly = if cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT >= 0.0 {
-            cursor.y - LOUPE_GAP_PT - LOUPE_SIZE_PT
-        } else {
-            cursor.y + LOUPE_GAP_PT
-        }
-        .round();
-        loupe.setFrame(CGRect::new(
-            CGPoint::new(lx, ly),
-            objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT),
-        ));
-        loupe.setHidden(false);
-
-        // Monosnap-style readout pinned under the loupe: cursor coordinates
-        // while idle, the selection size while dragging. Logical pixels.
-        let text = match selection_px {
-            Some((w, h)) => format!("{} × {}", w.round() as i64, h.round() as i64),
-            None => format!(
-                "{} × {}",
-                cursor_logical.x.round() as i64,
-                cursor_logical.y.round() as i64
-            ),
-        };
-        let label = &ivars.size_label;
-        Self::set_label_text(label, &text);
-        let ty = if ly >= HUD_LABEL_H_PT + 6.0 {
-            ly - HUD_LABEL_H_PT - 6.0
-        } else {
-            ly + LOUPE_SIZE_PT + 6.0
-        };
-        label.setFrame(CGRect::new(
-            CGPoint::new(lx, ty),
-            objc2_core_foundation::CGSize::new(LOUPE_SIZE_PT, HUD_LABEL_H_PT),
-        ));
-        label.setHidden(false);
-
-        // Idle: full-screen guides through the cursor with coordinate labels.
-        // Drag: guides off — the rectangle is feedback enough. The line
-        // color adapts to the content underneath, so the old thin hairlines
-        // stay readable on light and dark backgrounds alike.
-        if dragging {
-            ivars.axis_v_dark.setHidden(true);
-            ivars.axis_v_light.setHidden(true);
-            ivars.axis_h_dark.setHidden(true);
-            ivars.axis_h_light.setHidden(true);
-        } else {
-            // One path per direction, shared by the outline and the core.
-            let v_path = CGMutablePath::new();
-            let h_path = CGMutablePath::new();
-            // SAFETY: plain C path builders with a null transform.
-            unsafe {
-                CGMutablePath::move_to_point(Some(&v_path), std::ptr::null(), cursor.x, 0.0);
-                CGMutablePath::add_line_to_point(Some(&v_path), std::ptr::null(), cursor.x, screen.height);
-                CGMutablePath::move_to_point(Some(&h_path), std::ptr::null(), 0.0, cursor.y);
-                CGMutablePath::add_line_to_point(Some(&h_path), std::ptr::null(), screen.width, cursor.y);
-            }
-            let v_ref: &CGPath = &v_path;
-            let h_ref: &CGPath = &h_path;
-            for layer in [&ivars.axis_v_dark, &ivars.axis_v_light] {
-                layer.setPath(Some(v_ref));
-                layer.setHidden(false);
-            }
-            for layer in [&ivars.axis_h_dark, &ivars.axis_h_light] {
-                layer.setPath(Some(h_ref));
-                layer.setHidden(false);
-            }
-        }
-    }
-
     /// Cursor moved without a button: with the cursor over another
     /// display — switch the capture target to it (the overlay is the key
     /// window, so mouseMoved keeps arriving even over a veiled screen, and
@@ -1111,7 +621,7 @@ impl OverlayView {
             CGRect::new(CGPoint::ZERO, ivars.screen_frame.get().size),
         );
         ivars.mouse.set(point);
-        self.update_hud(point, None);
+        ivars.hud.update(point, None);
     }
 
     /// Point the flat ivars (frozen frame, display frames, scale) at the
@@ -1129,25 +639,14 @@ impl OverlayView {
         ivars.scale.set(scale);
     }
 
-    /// Hide the idle HUD: loupe, readout label, the four axis guides.
-    /// Shared by the target presentation (idle reset) and finish().
-    fn hide_hud(&self) {
-        let ivars = self.ivars();
-        ivars.loupe.setHidden(true);
-        ivars.size_label.setHidden(true);
-        ivars.axis_v_dark.setHidden(true);
-        ivars.axis_v_light.setHidden(true);
-        ivars.axis_h_dark.setHidden(true);
-        ivars.axis_h_light.setHidden(true);
-    }
-
     /// The single target presentation path, shared by show() and
     /// switch_to_surface(): point the ivars at surface `index`, reset the
     /// HUD to the idle look, swap the frozen frame and the layer geometry
-    /// without implicit animations, rebuild the loupe sampler and the
-    /// veils, move the window onto the paired screen, restart the border
-    /// fade-in/pulse. One presentation change has one home: this method
-    /// (its twin paths once cost a 166-line rewrite to keep in sync).
+    /// without implicit animations, hand the HUD its new sharpness, border
+    /// and sampler (`Hud::present`), rebuild the veils, move the window
+    /// onto the paired screen. One presentation change has one home: this
+    /// method (its twin paths once cost a 166-line rewrite to keep in
+    /// sync).
     fn present_target(&self, index: usize, screen: ScreenPair) {
         let ivars = self.ivars();
         let (screen_frame, scale) = (screen.frame, screen.scale);
@@ -1159,12 +658,11 @@ impl OverlayView {
         // the previous session left behind (a drag interrupted by Esc
         // leaves the state machine in Drag and the dim strips on screen).
         ivars.state.set(OverlayState::Idle);
-        self.update_dim(None);
-        self.hide_hud();
+        ivars.hud.dim(None);
+        ivars.hud.hide();
 
-        // Layers follow the display: root/frame geometry, the frozen
-        // bitmap and HUD sharpness (displays differ in size and backing
-        // scale). Without disabling actions Core Animation tweens the
+        // Layers follow the display: root/frame geometry and the frozen
+        // bitmap. Without disabling actions Core Animation tweens the
         // swap, and the frame visibly cross-fades from the previous
         // session's frame.
         CATransaction::begin();
@@ -1181,31 +679,14 @@ impl OverlayView {
             // SAFETY: contents setter with a valid image object.
             unsafe { frame_layer.setContents(Some(as_any)) };
         }
-        let hud_layers: [&CALayer; 10] = [
-            &ivars.loupe,
-            &ivars.loupe_grid,
-            &ivars.loupe_cross,
-            &ivars.loupe_frame_light,
-            &ivars.loupe_frame_dark,
-            &ivars.axis_v_dark,
-            &ivars.axis_v_light,
-            &ivars.axis_h_dark,
-            &ivars.axis_h_light,
-            &ivars.size_label,
-        ];
-        for layer in hud_layers {
-            layer.setContentsScale(scale);
-        }
-        self.rebuild_border_path();
         CATransaction::commit();
 
-        // Downsample the new frame to logical pixels for the loupe and for
-        // the axis-guide brightness sampling.
+        // HUD sharpness, border path and the sampler follow the new display;
+        // the border fade-in and idle pulse restart inside.
         let (w_px, h_px) = ivars.image_size_px.get();
         let source = ivars.image.borrow();
-        *ivars.sampler.borrow_mut() = source
-            .as_ref()
-            .and_then(|image| FrameSampler::new(w_px, h_px, scale, image));
+        let frame = source.as_ref().map(|image| (&**image, w_px, h_px));
+        ivars.hud.present(scale, screen_frame.size, frame);
         drop(source);
 
         // Veils flip with the target: the new display is uncovered, the
@@ -1217,21 +698,6 @@ impl OverlayView {
             window.setFrame_display(screen_frame, false);
             window.makeKeyAndOrderFront(None);
         }
-
-        // Border: reset invisible without animation, fade in, arm the idle
-        // pulse (it starts only after the fade completes).
-        let border = &ivars.border;
-        border.removeAllAnimations();
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        border.setHidden(false);
-        border.setOpacity(0.0);
-        CATransaction::commit();
-        CATransaction::begin();
-        CATransaction::setAnimationDuration(BORDER_FADE_IN_DUR);
-        border.setOpacity(1.0);
-        CATransaction::commit();
-        Self::start_border_pulse(border);
     }
 
     /// Point the frame layer at the T0 frame of the target surface (the
@@ -1272,13 +738,9 @@ impl OverlayView {
             if let Some(view_layer) = self.layer() {
                 let root = &ivars.root_layer;
                 root.setFrame(CGRect::new(CGPoint::ZERO, screen_frame.size));
-                // z-order: frozen frame, then dimming strips.
+                // z-order: frozen frame, then the HUD chrome on top.
                 root.addSublayer(&ivars.frame_layer);
-                for strip in ivars.dim_strips.borrow().iter() {
-                    Self::setup_strip(strip);
-                    root.addSublayer(strip);
-                }
-                self.setup_hud();
+                ivars.hud.attach(root, ivars.scale.get());
                 view_layer.addSublayer(root);
             }
         }
@@ -1401,12 +863,10 @@ impl OverlayView {
         ivars.mouse.set(point);
         ivars.state.set(OverlayState::Drag);
         // Drag: the border holds full red, no pulse.
-        ivars
-            .border
-            .removeAnimationForKey(&NSString::from_str(BORDER_PULSE_KEY));
+        ivars.hud.stop_border_pulse();
         // Zero-size hole: full dimming until the drag opens a rectangle.
-        self.update_dim(Some(CGRect::new(point, objc2_core_foundation::CGSize::ZERO)));
-        self.update_hud(point, Some((0.0, 0.0)));
+        ivars.hud.dim(Some(CGRect::new(point, objc2_core_foundation::CGSize::ZERO)));
+        ivars.hud.update(point, Some((0.0, 0.0)));
     }
 
     fn handle_mouse_dragged(&self, event: &NSEvent) {
@@ -1426,7 +886,7 @@ impl OverlayView {
             CGPoint::new(start.x.min(point.x), start.y.min(point.y)),
             objc2_core_foundation::CGSize::new((point.x - start.x).abs(), (point.y - start.y).abs()),
         );
-        self.update_dim(Some(rect));
+        ivars.hud.dim(Some(rect));
         let pixel_rect = crate::capture::geometry::selection_to_pixel_rect(
             rect,
             ivars.screen_frame.get().size,
@@ -1434,7 +894,7 @@ impl OverlayView {
         );
         // The HUD speaks logical pixels, like the loupe.
         let factor = ivars.scale.get().round().max(1.0);
-        self.update_hud(
+        ivars.hud.update(
             point,
             Some((pixel_rect.size.width / factor, pixel_rect.size.height / factor)),
         );
@@ -1468,7 +928,7 @@ impl OverlayView {
         let up = self.local_point(event);
         ivars.mouse.set(up);
         ivars.state.set(OverlayState::Idle);
-        self.update_dim(None);
+        ivars.hud.dim(None);
 
         let start = ivars.drag_start.get();
         let moved = (up.x - start.x).abs() > CLICK_TOLERANCE_PT
@@ -1581,15 +1041,14 @@ impl OverlayView {
             },
             FinishRequest::Cancelled => OverlayOutcome::Cancelled,
         };
-        *ivars.sampler.borrow_mut() = None;
-        self.hide_hud();
+        ivars.hud.drop_sampler();
+        ivars.hud.hide();
 
         // Get out of the user's way first: the window drops the moment the
         // mode ends, and only then the output stage runs on the exposed
         // desktop (crop, shutter, clipboard, file). Nothing of the capture
         // pipeline lingers on screen.
-        let border = &ivars.border;
-        border.removeAnimationForKey(&NSString::from_str(BORDER_PULSE_KEY));
+        ivars.hud.stop_border_pulse();
         if let Some(window) = ivars.window.borrow().as_ref() {
             window.orderOut(None);
         }
