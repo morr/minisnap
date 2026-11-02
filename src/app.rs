@@ -27,10 +27,11 @@ use crate::config::Config;
 use crate::editor::session;
 use crate::editor::OpenShot;
 use crate::editor_window::EditorWindow;
+use crate::hotkey_recorder::{FeedOutcome, Recorder};
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
 use crate::overlay::{Overlay, OverlayOutcome};
 use crate::prefs;
-use global_hotkey::hotkey::{HotKey, Modifiers};
+use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
 /// brand icon appears.
@@ -61,14 +62,10 @@ struct AppIvars {
     #[allow(dead_code)]
     status_item: Retained<NSStatusItem>,
     // Kept for re-reading the shortcuts from the preferences window.
-    #[allow(dead_code)]
     capture_item: Retained<NSMenuItem>,
-    #[allow(dead_code)]
     capture_edit_item: Retained<NSMenuItem>,
-    #[allow(dead_code)]
     open_latest_item: Retained<NSMenuItem>,
     // The capture action consults the config when the mode is wired up.
-    #[allow(dead_code)]
     config: RefCell<Config>,
     hotkeys: RefCell<HotkeyRegistry>,
     jobs_tx: mpsc::Sender<MainJob>,
@@ -80,10 +77,11 @@ struct AppIvars {
     // Created lazily on the first editor-relevant capture; kept afterwards
     // so every shot reuses the same window (no second editor window).
     editor: RefCell<Option<EditorWindow>>,
-    // The hotkey row currently recording a new combination, if any.
-    recording: Cell<Option<isize>>,
-    // Permanent local key-event monitor that serves the recorder while
-    // `recording` is set; installed once at startup.
+    // The hotkey recorder machine: which prefs row (if any) is recording
+    // a new combination. The rules live in `hotkey_recorder.rs`.
+    recorder: RefCell<Recorder>,
+    // Permanent local key-event monitor that serves the recorder while it
+    // records; installed once at startup.
     #[allow(dead_code)]
     monitor: RefCell<Option<Retained<AnyObject>>>,
     // Screen Recording state: whether the explanatory dialog is up (the
@@ -172,7 +170,10 @@ define_class!(
             // SAFETY: the sender is the clicked NSButton; `tag` is the
             // NSView accessor we stamped on the button when building.
             let tag: isize = unsafe { msg_send![sender, tag] };
-            self.start_recording(tag);
+            let started = self.ivars().recorder.borrow_mut().begin(tag);
+            if started {
+                self.update_prefs_row_titles();
+            }
         }
 
         #[unsafe(method(quit:))]
@@ -361,7 +362,7 @@ impl AppController {
             overlay: RefCell::new(overlay),
             prefs: RefCell::new(None),
             editor: RefCell::new(None),
-            recording: Cell::new(None),
+            recorder: RefCell::new(Recorder::idle()),
             monitor: RefCell::new(None),
             permission_dialog_visible: Cell::new(false),
             permission_granted: Cell::new(crate::permission::preflight_screen_capture()),
@@ -549,55 +550,46 @@ impl AppController {
         }
     }
 
-    /// Begin recording a new combination for the row with the given tag.
-    fn start_recording(&self, row: isize) {
-        if row != prefs::ROW_CAPTURE
-            && row != prefs::ROW_CAPTURE_EDIT
-            && row != prefs::ROW_OPEN_LATEST
-        {
-            return;
-        }
-        if self.ivars().recording.get().is_some() {
-            return;
-        }
-        self.ivars().recording.set(Some(row));
-        self.update_prefs_row_titles();
-    }
-
     /// Local key-event monitor callback. While a row records, the first
     /// keydown fixes the new combination (the event is swallowed); a bare
     /// Esc cancels. Everything passes through untouched when not recording.
+    /// NSEvent unpacking only: the recording rules live in the
+    /// `hotkey_recorder` machine.
     fn recorded_key_event(&self, event: NonNull<NSEvent>) -> *mut NSEvent {
-        let Some(row) = self.ivars().recording.get() else {
-            return event.as_ptr();
-        };
         let pointer = event.as_ptr();
         let event = unsafe { event.as_ref() };
         if event.r#type() != NSEventType::KeyDown {
             return pointer;
         }
-        let modifiers = hotkeys::modifiers_from_flags(event.modifierFlags());
+        let mods = hotkeys::modifiers_from_flags(event.modifierFlags());
         let keycode = event.keyCode();
-        if keycode == 0x35 && modifiers == Modifiers::empty() {
-            // Bare Esc: cancel the recording, keep the previous combination.
-            eprintln!("prefs: recording cancelled");
-            self.finish_recording(None);
-            return std::ptr::null_mut();
+        // The borrow must end before the arms run: finishing a recording
+        // re-reads the machine for the row titles.
+        let outcome = self.ivars().recorder.borrow_mut().feed(mods, keycode);
+        match outcome {
+            FeedOutcome::Passthrough => pointer,
+            FeedOutcome::Swallowed => {
+                // A bare key or an unknown key code: not a combination.
+                eprintln!("prefs: key code {keycode:#04x} swallowed, still recording");
+                std::ptr::null_mut()
+            }
+            FeedOutcome::Cancelled => {
+                eprintln!("prefs: recording cancelled");
+                self.finish_recording(None);
+                std::ptr::null_mut()
+            }
+            FeedOutcome::Recorded { row, hotkey } => {
+                self.finish_recording(Some((row, hotkey)));
+                std::ptr::null_mut()
+            }
         }
-        let Some(key) = hotkeys::scancode_to_key(keycode) else {
-            eprintln!("prefs: unknown key code {keycode:#04x}, still recording");
-            return std::ptr::null_mut();
-        };
-        let hotkey =
-            HotKey::new(if modifiers.is_empty() { None } else { Some(modifiers) }, key);
-        self.finish_recording(Some((row, hotkey)));
-        std::ptr::null_mut()
     }
 
     /// Apply (or cancel) a recorded combination: persist the config,
-    /// re-register the global hotkeys and refresh menu + row titles.
+    /// re-register the global hotkeys and refresh menu + row titles. The
+    /// recorder machine has already ended the recording; this applies the
+    /// result.
     fn finish_recording(&self, recorded: Option<(isize, HotKey)>) {
-        self.ivars().recording.set(None);
         if let Some((row, hotkey)) = recorded {
             let mut config = self.ivars().config.borrow_mut();
             match row {
@@ -634,7 +626,7 @@ impl AppController {
             return;
         };
         let config = self.ivars().config.borrow();
-        let recording = self.ivars().recording.get();
+        let recording = self.ivars().recorder.borrow().recording_row();
         let capture_title = match recording {
             Some(row) if row == prefs::ROW_CAPTURE => "Press keys…".to_string(),
             _ => hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
