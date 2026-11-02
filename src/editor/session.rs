@@ -375,6 +375,36 @@ mod tests {
     }
 
     #[test]
+    fn set_text_size_survives_a_session_roundtrip() {
+        let root = tmp_root("textsize");
+        let shot = root.join("MiniSnap_2026-11-02_12-00-00.png");
+        let frame = solid_frame(200, 200);
+        crate::output::encode_png(&frame, &shot).expect("write the shot file");
+
+        let mut open = OpenShot::open(shot.clone(), &root).expect("open");
+        open.apply(Command::AddElement(Element {
+            id: 1,
+            kind: ElementKind::Text {
+                origin: Point::new(180.0, 40.0),
+                text: "WW".into(),
+                color: [1.0, 0.0, 1.0, 1.0],
+                size: 20.0,
+            },
+        }))
+        .expect("add");
+        open.apply(Command::SetTextSize(1, 48.0)).expect("set size");
+        let before: Vec<Element> = open.doc.elements().to_vec();
+        drop(open);
+
+        // The persisted journal carries the command; the replay on reopen
+        // lands on the same resized, clamped state.
+        let mut reopened = OpenShot::open(shot.clone(), &root).expect("reopen");
+        assert!(reopened.doc.can_undo());
+        assert_eq!(reopened.doc.applied_log().len(), 2);
+        assert_eq!(reopened.doc.elements(), before.as_slice());
+    }
+
+    #[test]
     fn retention_keeps_the_newest_directories() {
         let root = tmp_root("retention");
         let extra = 2;

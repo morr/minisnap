@@ -201,6 +201,10 @@ pub enum Command {
     /// Restyle the stroke width of an element (kinds without a stroke stay
     /// as they are).
     SetWidth(u64, f64),
+    /// Restyle the font size of a text/callout element (other kinds stay
+    /// as they are); the block shifts minimally to stay inside the base
+    /// frame.
+    SetTextSize(u64, f64),
     /// Cut the base frame to the rect (in the current base pixel space).
     Crop(Rect),
     /// Resample the base frame to the size.
@@ -255,6 +259,15 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
             for el in &mut state.elements {
                 if el.id == *id {
                     set_element_width(&mut el.kind, *width);
+                }
+            }
+        }
+        Command::SetTextSize(id, size) => {
+            let (w, h) = image_size(&state.base);
+            for el in &mut state.elements {
+                if el.id == *id {
+                    set_element_size(&mut el.kind, *size);
+                    clamp_text_block(&mut el.kind, w, h);
                 }
             }
         }
@@ -433,6 +446,32 @@ fn set_element_width(kind: &mut ElementKind, width: f64) {
         | ElementKind::Callout { width: w, .. } => *w = width,
         _ => {}
     }
+}
+
+/// Restyle the font size of a text/callout element; other kinds (no font)
+/// stay as they are.
+fn set_element_size(kind: &mut ElementKind, size: f64) {
+    match kind {
+        ElementKind::Text { size: s, .. } | ElementKind::Callout { size: s, .. } => *s = size,
+        _ => {}
+    }
+}
+
+/// Clamp a text/callout block into the base frame at its (new) size: the
+/// authored position holds while the block fits, a block pushed past an
+/// edge shifts inward minimally. Lives inside `apply_cmd`, so the journal
+/// replay reproduces the shift without storing it in the command — and a
+/// later, smaller size does not spring the block back.
+fn clamp_text_block(kind: &mut ElementKind, frame_w: f64, frame_h: f64) {
+    let (origin, text, size) = match kind {
+        ElementKind::Text { origin, text, size, .. } => (origin, text, *size),
+        ElementKind::Callout { anchor, text, size, .. } => (anchor, text, *size),
+        _ => return,
+    };
+    let (w, h) = text::measure_block(text, size)
+        .map(|m| (m.width, m.height))
+        .unwrap_or((size * 4.0, size * 1.25));
+    *origin = drag::clamp_block(*origin, w, h, Rect::new(0.0, 0.0, frame_w, frame_h));
 }
 
 /// The editor document: pristine base frame + replayed state + journal.
@@ -828,6 +867,105 @@ mod tests {
             replayed.apply(cmd.clone());
         }
         assert_eq!(replayed.elements(), doc.elements());
+    }
+
+    fn text_element_at(id: u64, origin: Point, text: &str, size: f64) -> Element {
+        Element {
+            id,
+            kind: ElementKind::Text {
+                origin,
+                text: text.to_string(),
+                color: [1.0, 0.0, 1.0, 1.0],
+                size,
+            },
+        }
+    }
+
+    #[test]
+    fn set_text_size_applies_and_clamps_the_block_into_the_frame() {
+        let mut doc = EditorDoc::new(solid_frame(200, 200));
+        // A block near the right edge: growing it past the edge shifts it
+        // inward, its y (still fitting) holds.
+        doc.apply(Command::AddElement(text_element_at(1, pt(180.0, 40.0), "WW", 20.0)));
+        doc.apply(Command::SetTextSize(1, 48.0));
+        let (w, _) = text::measure_block("WW", 48.0)
+            .map(|m| (m.width, m.height))
+            .expect("metrics");
+        match &doc.element(1).expect("text").kind {
+            ElementKind::Text { origin, size, .. } => {
+                assert_eq!(*size, 48.0);
+                assert_eq!(*origin, pt(200.0 - w - 4.0, 40.0));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        // A callout's font restyles; its pointer width and tip stay as
+        // authored, its anchor clamps when the grown block needs it.
+        doc.apply(Command::AddElement(Element {
+            id: 2,
+            kind: ElementKind::Callout {
+                tip: pt(5.0, 5.0),
+                anchor: pt(185.0, 30.0),
+                text: "hi".into(),
+                color: [1.0, 0.0, 1.0, 1.0],
+                size: 14.0,
+                width: 4.0,
+            },
+        }));
+        doc.apply(Command::SetTextSize(2, 40.0));
+        let (cw, _) = text::measure_block("hi", 40.0)
+            .map(|m| (m.width, m.height))
+            .expect("metrics");
+        match &doc.element(2).expect("callout").kind {
+            ElementKind::Callout { tip, anchor, size, width, .. } => {
+                assert_eq!(*size, 40.0);
+                assert_eq!(*width, 4.0);
+                assert_eq!(*tip, pt(5.0, 5.0));
+                assert_eq!(*anchor, pt(200.0 - cw - 4.0, 30.0));
+            }
+            other => panic!("expected callout, got {other:?}"),
+        }
+
+        // Replaying the journal reproduces the resized, clamped state
+        // exactly — the shift is a function of the command, not stored
+        // state.
+        let mut replayed = EditorDoc::new(solid_frame(200, 200));
+        for cmd in doc.applied_log() {
+            replayed.apply(cmd.clone());
+        }
+        assert_eq!(replayed.elements(), doc.elements());
+
+        // One undo brings the authored size and position back.
+        assert!(doc.undo());
+        match &doc.element(2).expect("callout").kind {
+            ElementKind::Callout { anchor, size, .. } => {
+                assert_eq!(*size, 14.0);
+                assert_eq!(*anchor, pt(185.0, 30.0));
+            }
+            other => panic!("expected callout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_text_size_does_not_bounce_when_the_size_shrinks() {
+        let mut doc = EditorDoc::new(solid_frame(200, 200));
+        doc.apply(Command::AddElement(text_element_at(1, pt(180.0, 40.0), "WW", 20.0)));
+        doc.apply(Command::SetTextSize(1, 48.0));
+        let (w, _) = text::measure_block("WW", 48.0)
+            .map(|m| (m.width, m.height))
+            .expect("metrics");
+        let shifted = pt(200.0 - w - 4.0, 40.0);
+
+        // Shrinking back keeps the shifted position: the clamp of the
+        // smaller block at the same origin is a no-op.
+        doc.apply(Command::SetTextSize(1, 20.0));
+        match &doc.element(1).expect("text").kind {
+            ElementKind::Text { origin, size, .. } => {
+                assert_eq!(*size, 20.0);
+                assert_eq!(*origin, shifted);
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[test]

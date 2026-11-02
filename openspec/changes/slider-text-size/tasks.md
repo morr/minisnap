@@ -3,7 +3,7 @@
 ## 1. Команда размера в журнале
 
 - [x] 1.1 `clamp_block(origin, w, h, frame) -> Point` — чистая функция минимального сдвига блока в кадр, отступ общий с `callout_anchor` (4 px), рядом с ней в `editor/drag.rs` или `editor/mod.rs`; юнит-тесты: no-op когда блок влезает, зажим у каждого края, отступ соблюдён. Verify: `cargo test` — новые тесты зелёные.
-- [ ] 1.2 `Command::SetTextSize(id, size)` в `editor/mod.rs`: `apply_cmd` меняет `size` у `Text`/`Callout` и зажимает блок через `clamp_block` от размеров базы; юнит-тесты: размер применился, блок у края сдвинулся, уменьшение после сдвига не отскакивает, команда переживает persist/реплей сессии. Verify: `cargo test` — тесты команды и roundtrip сессии зелёные.
+- [x] 1.2 `Command::SetTextSize(id, size)` в `editor/mod.rs`: `apply_cmd` меняет `size` у `Text`/`Callout` и зажимает блок через `clamp_block` от размеров базы; юнит-тесты: размер применился, блок у края сдвинулся, уменьшение после сдвига не отскакивает, команда переживает persist/реплей сессии. Verify: `cargo test` — тесты команды и roundtrip сессии зелёные.
 - [ ] 1.3 `EditorDoc::apply_text_size` со слиянием тяг (зеркало `apply_width`) и `OpenShot::apply_text_size` с persist в `editor/session.rs`; юнит-тест: тяга из нескольких шагов — один undo. Verify: `cargo test` — тест слияния зелёный.
 
 ## 2. Машина драга
