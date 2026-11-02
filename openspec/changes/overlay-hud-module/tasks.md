@@ -2,7 +2,7 @@
 
 ## 1. FrameSampler → `src/overlay_hud.rs`
 
-- [ ] 1.1 Создать `src/overlay_hud.rs` (`mod overlay_hud;` в `main.rs`):
+- [x] 1.1 Создать `src/overlay_hud.rs` (`mod overlay_hud;` в `main.rs`):
   структура `FrameSampler` с конструктором
   `FrameSampler::new(w_px, h_px, scale, &image)` (тело бывшего
   `OverlayView::make_sampler`), крейт-импорт `CGBitmapContextCreate` из
@@ -15,7 +15,15 @@
   `line_brightness_in` и `LIGHT_CONTENT_THRESHOLD` не переезжают и
   удаляются — тесты читают `buf` напрямую. Проверка: `cargo build`,
   `cargo clippy`, `cargo test`; live — лупа у курсора (если TCC позволит;
-  иначе «ждёт ручной проверки»).
+  иначе «ждёт ручной проверки»). *(build/clippy/test зелёные: 123 теста,
+  clippy-профиль overlay-файлов идентичен базе; конструктор крейта
+  возвращает `Option<CFRetained<CGContext>>` — форма вызова сведена к
+  capture.rs. Live: экземпляр release-билда PID 99575, «Capture Frozen
+  Area» через трей по PID — `overlay: frozen 5120x2880 … surfaces: 2,
+  veils: 1`, оверлей жил при движениях мыши, Esc отменил, лог без ошибок;
+  визуальная проверка лупы — screencapture не берёт shielding-окно,
+  синтетический move ловит SIGTRAP, пользователь активно работал — лупа
+  ждёт ручной проверки)*
 
 ## 2. `struct Hud` — весь хром за одним interface'ом
 

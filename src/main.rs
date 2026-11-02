@@ -6,6 +6,7 @@ mod editor_toolbar;
 mod editor_window;
 mod hotkeys;
 mod overlay;
+mod overlay_hud;
 mod output;
 mod permission;
 mod plates;

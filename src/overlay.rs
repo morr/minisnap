@@ -13,11 +13,8 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSFont, NSScreen, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect};
-use objc2_core_graphics::{
-    CGBitmapContextCreateImage, CGColor, CGColorSpace, CGImage, CGImageAlphaInfo, CGMutablePath,
-    CGPath, CGContext,
-};
+use objc2_core_foundation::{CFType, CGPoint, CGRect};
+use objc2_core_graphics::{CGColor, CGImage, CGMutablePath, CGPath};
 use objc2_foundation::{NSNotification, NSNumber, NSString};
 use objc2_quartz_core::{
     kCAAlignmentCenter, kCAFilterNearest, kCAMediaTimingFunctionEaseInEaseOut, CABasicAnimation,
@@ -26,43 +23,13 @@ use objc2_quartz_core::{
 };
 
 use crate::capture::{T0Capture, T0Surface, T0Window};
+use crate::overlay_hud::FrameSampler;
 
 use presentation::{ScreenPair, SurfaceMap};
 
 // The shielding window level sits above the menu bar and everything else.
 extern "C" {
     fn CGShieldingWindowLevel() -> i64;
-}
-
-// The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
-// only wraps the block-based adaptive variant).
-extern "C-unwind" {
-    fn CGBitmapContextCreate(
-        data: *mut std::ffi::c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: &CGColorSpace,
-        bitmap_info: u32,
-    ) -> *mut CGContext;
-}
-
-/// The frozen frame downsampled to logical pixels (one Retina pixel pair
-/// becomes one unit): the loupe magnifies UI pixels instead of physical
-/// ones, and the axis guides sample content brightness from `buf`.
-struct FrameSampler {
-    /// Kept alive alongside the image: the exported image references the
-    /// context's buffer.
-    #[allow(dead_code)]
-    ctx: CFRetained<CGContext>,
-    image: CFRetained<CGImage>,
-    /// Backing bytes of `ctx`; the context does not own them.
-    buf: Vec<u8>,
-    width: usize,
-    height: usize,
-    /// Physical pixels per logical pixel (backing scale).
-    factor: usize,
 }
 
 /// What the user did inside the overlay mode.
@@ -437,10 +404,6 @@ const LOUPE_ZOOM_PT: f64 = 7.0;
 /// Loupe sample side, in logical pixels (the loupe is square). 20 × 7pt
 /// keeps the loupe's on-screen size at 140pt while showing more pixels.
 const LOUPE_SAMPLE_PX: f64 = 20.0;
-/// Brightness (0..255 per channel) above which content counts as light.
-/// Used by the sampler tests; production guides are constant two-tone.
-#[allow(dead_code)]
-const LIGHT_CONTENT_THRESHOLD: u32 = 128;
 /// Guide line widths, in points: white outline underneath, black core on
 /// top.
 const AXIS_OUTLINE_W_PT: f64 = 1.5;
@@ -997,92 +960,6 @@ impl OverlayView {
         unsafe { layer.setString(Some(as_any)) };
     }
 
-    /// Downsample the frozen frame to logical pixels (one backing-scale
-    /// pixel group per unit). Returns None when the bitmap context could not
-    /// be created; the HUD then works without the loupe.
-    fn make_sampler(w_px: usize, h_px: usize, scale: f64, image: &CGImage) -> Option<FrameSampler> {
-        let factor = (scale.round() as usize).max(1);
-        let lw = (w_px / factor).max(1);
-        let lh = (h_px / factor).max(1);
-        let space = CGColorSpace::new_device_rgb()?;
-        let mut buf = vec![0u8; lw * lh * 4];
-        // SAFETY: plain CGBitmapContextCreate; buf is stored in the sampler
-        // alongside the context whose buffer it backs.
-        let ctx_ptr = unsafe {
-            CGBitmapContextCreate(
-                buf.as_mut_ptr().cast(),
-                lw,
-                lh,
-                8,
-                lw * 4,
-                &space,
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        };
-        // SAFETY: ctx_ptr comes from a Create-rule constructor; on success we
-        // take ownership of the +1 reference.
-        let ctx = unsafe {
-            std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))?
-        };
-        CGContext::draw_image(
-            Some(&ctx),
-            CGRect::new(
-                CGPoint::ZERO,
-                objc2_core_foundation::CGSize::new(lw as f64, lh as f64),
-            ),
-            Some(image),
-        );
-        let down = CGBitmapContextCreateImage(Some(&ctx))?;
-        Some(FrameSampler {
-            ctx,
-            image: down,
-            buf,
-            width: lw,
-            height: lh,
-            factor,
-        })
-    }
-
-    /// Mean per-channel brightness (0..255) of the content along a
-    /// logical-pixel line through `at`, over the range `from..=to` along the
-    /// line (rows for a vertical line, columns for a horizontal one).
-    /// Production HUD uses constant two-tone guides; this stays for the
-    /// sampler tests and possible future content-aware styling.
-    #[allow(dead_code)]
-    fn line_brightness_in(
-        sampler: &FrameSampler,
-        vertical: bool,
-        at: usize,
-        from: usize,
-        to: usize,
-    ) -> u32 {
-        let (w, h) = (sampler.width, sampler.height);
-        let buf = &sampler.buf;
-        let dim = if vertical { h } else { w };
-        let lo = from.min(dim.saturating_sub(1));
-        let hi = to.min(dim.saturating_sub(1));
-        let (lo, hi) = (lo.min(hi), hi.max(lo));
-        let mut total: u64 = 0;
-        let mut n: u64 = 0;
-        if vertical {
-            for v in lo..=hi {
-                let i = (v * w + at) * 4;
-                total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
-                n += 1;
-            }
-        } else {
-            for v in lo..=hi {
-                let i = (at * w + v) * 4;
-                total += (buf[i] as u64) + (buf[i + 1] as u64) + (buf[i + 2] as u64);
-                n += 1;
-            }
-        }
-        if n == 0 {
-            return 0;
-        }
-        (total / (n * 3)) as u32
-    }
-
     /// Reposition the HUD for the cursor. `selection_px` is the live pixel
     /// size of the selection during a drag; `None` means idle, where the
     /// guides show the cursor coordinates instead.
@@ -1121,7 +998,7 @@ impl OverlayView {
             objc2_core_foundation::CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
         );
         let loupe = &ivars.loupe;
-        if let Some(cropped) = CGImage::with_image_in_rect(Some(&sampler.image), sample) {
+        if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), sample) {
             // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
             // expects it as AnyObject.
             let as_any: &AnyObject =
@@ -1328,7 +1205,7 @@ impl OverlayView {
         let source = ivars.image.borrow();
         *ivars.sampler.borrow_mut() = source
             .as_ref()
-            .and_then(|image| Self::make_sampler(w_px, h_px, scale, image));
+            .and_then(|image| FrameSampler::new(w_px, h_px, scale, image));
         drop(source);
 
         // Veils flip with the target: the new display is uncovered, the
@@ -1778,64 +1655,5 @@ impl Overlay {
     /// one is ready. Called from the app tick. Main thread only.
     pub fn poll_resolved_click(&self) {
         self.view.poll_resolved_click();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A small synthetic frame via the same CG bitmap pipeline.
-    fn synthetic_frame(w: usize, h: usize) -> CFRetained<CGImage> {
-        let mut buf = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) * 4;
-                // Left half black, right half white.
-                let v = if x < w / 2 { 0 } else { 255 };
-                buf[i] = v;
-                buf[i + 1] = v;
-                buf[i + 2] = v;
-                buf[i + 3] = 255;
-            }
-        }
-        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
-        // SAFETY: buf outlives the context within this function.
-        let ctx_ptr = unsafe {
-            CGBitmapContextCreate(
-                buf.as_mut_ptr().cast(),
-                w,
-                h,
-                8,
-                w * 4,
-                &space,
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        };
-        let ctx = unsafe {
-            std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p))
-        }
-        .expect("bitmap context");
-        CGBitmapContextCreateImage(Some(&ctx)).expect("image from context")
-    }
-
-    #[test]
-    fn sampler_downsamples_to_logical_pixels() {
-        let image = synthetic_frame(64, 64);
-        let sampler = OverlayView::make_sampler(64, 64, 2.0, &image).expect("sampler");
-        assert_eq!((sampler.width, sampler.height, sampler.factor), (32, 32, 2));
-        // Left half of the frame is black, right half white: a column in the
-        // dark half reads dark, one in the light half reads light.
-        let dark = OverlayView::line_brightness_in(&sampler, true, 4, 0, 31);
-        let light = OverlayView::line_brightness_in(&sampler, true, 28, 0, 31);
-        assert!(dark < LIGHT_CONTENT_THRESHOLD, "dark col: {dark}");
-        assert!(light > LIGHT_CONTENT_THRESHOLD, "light col: {light}");
-    }
-
-    #[test]
-    fn sampler_handles_scale_one() {
-        let image = synthetic_frame(64, 64);
-        let sampler = OverlayView::make_sampler(64, 64, 1.0, &image).expect("sampler");
-        assert_eq!((sampler.width, sampler.height, sampler.factor), (64, 64, 1));
     }
 }
