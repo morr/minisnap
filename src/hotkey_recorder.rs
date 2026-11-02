@@ -3,9 +3,9 @@
 //!
 //! A row click starts a recording; the first keydown (fed to `feed` by the
 //! local event monitor in `app.rs`, after NSEvent unpacking) fixes the new
-//! combination or is swallowed. Bare Esc cancels. Unknown key codes are
-//! swallowed but keep the recording going. A key with no modifiers is a
-//! valid combination — the bare key becomes the global hotkey.
+//! combination or is swallowed. Bare Esc cancels. A key with no modifiers
+//! is not a combination — it is swallowed and the recording keeps going,
+//! same as unknown key codes; a combination needs at least one modifier.
 
 use global_hotkey::hotkey::{HotKey, Modifiers};
 
@@ -72,12 +72,16 @@ impl Recorder {
             self.recording = None;
             return FeedOutcome::Cancelled;
         }
+        if mods.is_empty() {
+            // A bare key is not a combination: swallowing it keeps the
+            // recording going, so the next press can still land.
+            return FeedOutcome::Swallowed;
+        }
         let Some(key) = scancode_to_key(keycode) else {
             return FeedOutcome::Swallowed;
         };
         self.recording = None;
-        let hotkey = HotKey::new(if mods.is_empty() { None } else { Some(mods) }, key);
-        FeedOutcome::Recorded { row, hotkey }
+        FeedOutcome::Recorded { row, hotkey: HotKey::new(Some(mods), key) }
     }
 }
 
@@ -153,17 +157,20 @@ mod tests {
         machine.begin(ROW_CAPTURE);
         assert_eq!(machine.feed(Modifiers::META, UNKNOWN), FeedOutcome::Swallowed);
         assert_eq!(machine.recording_row(), Some(ROW_CAPTURE), "still recording");
-        // The next known keydown still lands.
-        let hotkey = recorded(machine.feed(Modifiers::empty(), KEY_A), ROW_CAPTURE);
-        assert_eq!(hotkey, HotKey::new(None, Code::KeyA));
+        // The next valid combination still lands.
+        let hotkey = recorded(machine.feed(Modifiers::CONTROL, KEY_A), ROW_CAPTURE);
+        assert_eq!(hotkey, HotKey::new(Some(Modifiers::CONTROL), Code::KeyA));
     }
 
     #[test]
-    fn bare_key_without_modifiers_becomes_the_global_hotkey() {
+    fn bare_key_is_not_a_combination_and_the_recording_continues() {
         let mut machine = Recorder::idle();
         machine.begin(ROW_CAPTURE);
-        let hotkey = recorded(machine.feed(Modifiers::empty(), KEY_A), ROW_CAPTURE);
-        assert_eq!(hotkey, HotKey::new(None, Code::KeyA));
+        assert_eq!(machine.feed(Modifiers::empty(), KEY_A), FeedOutcome::Swallowed);
+        assert_eq!(machine.recording_row(), Some(ROW_CAPTURE), "still recording");
+        // A combination with modifiers still lands after a bare-key press.
+        let hotkey = recorded(machine.feed(Modifiers::META, KEY_A), ROW_CAPTURE);
+        assert_eq!(hotkey, HotKey::new(Some(Modifiers::META), Code::KeyA));
         assert_eq!(machine.recording_row(), None);
     }
 
