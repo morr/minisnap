@@ -475,6 +475,11 @@ impl AppController {
         use crate::agent_proto::AgentResponse;
         use crate::agent_server::AgentRequest;
         match request {
+            AgentRequest::Ping => {
+                Ok(AgentResponse::Result(crate::agent_proto::ActionResult::done(
+                    "pong",
+                )))
+            }
             AgentRequest::State => Ok(AgentResponse::State(self.agent_state())),
             AgentRequest::Action(action) => {
                 Ok(AgentResponse::Result(self.agent_action(action)))

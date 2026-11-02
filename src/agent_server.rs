@@ -36,6 +36,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// shape mirrors the endpoints one to one.
 #[derive(Clone, Debug)]
 pub enum AgentRequest {
+    /// Liveness + identity probe (the cheapest request an instance
+    /// answers).
+    Ping,
     State,
     Action(AgentAction),
     Editor(AgentEditorOp),
@@ -207,6 +210,7 @@ fn serve_one(
     let (method, path, query) = split_request_line(&request_line)?;
 
     let request = match (method.as_str(), path.as_str()) {
+        ("GET", "/ping") => AgentRequest::Ping,
         ("GET", "/state") => AgentRequest::State,
         ("GET", "/screenshot") => AgentRequest::Screenshot {
             target: query

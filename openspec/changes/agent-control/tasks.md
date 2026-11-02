@@ -28,7 +28,7 @@
 
 ## 6. MCP-бинарник
 
-- [ ] 6.1 `src/bin/minisnap-mcp.rs`: stdio JSON-RPC (initialize/tools/list/tools/call), HTTP-клиент на TcpStream, выбор инстанса, инструменты `instances`, `state`, `screenshot` (картинка в ответе), `action`, `editor`, `log`; конвенция «не бросать».
+- [x] 6.1 `src/bin/minisnap-mcp.rs`: stdio JSON-RPC (initialize/tools/list/tools/call), HTTP-клиент на TcpStream, выбор инстанса, инструменты `instances`, `state`, `screenshot` (картинка в ответе), `action`, `editor`, `log`; конвенция «не бросать».
 
 ## 7. Живая проверка
 
