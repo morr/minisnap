@@ -98,7 +98,7 @@ impl Config {
     /// migration writes the shifted combinations back.
     pub fn load_or_create() -> Config {
         let Some(path) = Self::standard_path() else {
-            eprintln!("minisnap: cannot resolve config directory, using defaults");
+            crate::log!("minisnap: cannot resolve config directory, using defaults");
             return Config::default();
         };
         match Self::load_from_migrating(&path) {
@@ -107,7 +107,7 @@ impl Config {
                     // Persist the shifted combinations once, so the next
                     // launch does not migrate again.
                     if let Err(e) = config.save_to(&path) {
-                        eprintln!("minisnap: cannot persist migrated config: {e}");
+                        crate::log!("minisnap: cannot persist migrated config: {e}");
                     }
                 }
                 config
@@ -115,12 +115,12 @@ impl Config {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let config = Config::default();
                 if let Err(e) = config.save_to(&path) {
-                    eprintln!("minisnap: cannot write default config: {e}");
+                    crate::log!("minisnap: cannot write default config: {e}");
                 }
                 config
             }
             Err(e) => {
-                eprintln!(
+                crate::log!(
                     "minisnap: cannot read config {}: {e}; using defaults",
                     path.display()
                 );

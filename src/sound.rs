@@ -85,7 +85,7 @@ fn load_player_from(paths: &[&'static str]) -> Option<Retained<NSSound>> {
         true,
     );
     if sound.is_none() {
-        eprintln!("sound: failed to load {path}");
+        crate::log!("sound: failed to load {path}");
     }
     sound
 }
@@ -102,7 +102,7 @@ fn play_shutter_from(paths: &[&'static str]) {
             *slot = Some(sound);
         }
         if !slot.as_ref().unwrap().play() {
-            eprintln!("sound: play failed");
+            crate::log!("sound: play failed");
         }
     });
 }

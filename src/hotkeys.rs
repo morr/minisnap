@@ -43,7 +43,7 @@ impl HotkeyRegistry {
         let manager = match GlobalHotKeyManager::new() {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("hotkeys: cannot create manager: {e:?}");
+                crate::log!("hotkeys: cannot create manager: {e:?}");
                 return;
             }
         };
@@ -58,7 +58,7 @@ impl HotkeyRegistry {
                     self.actions.insert(hotkey.id(), action);
                 }
                 Err(e) => {
-                    eprintln!("hotkeys: cannot register {hotkey}: {e:?}");
+                    crate::log!("hotkeys: cannot register {hotkey}: {e:?}");
                 }
             }
         }

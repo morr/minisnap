@@ -21,7 +21,7 @@ pub const SCREEN_RECORDING_PANE_URL: &str =
 /// Open the Screen Recording privacy pane in System Settings.
 pub fn open_screen_recording_settings() {
     let Some(url) = NSURL::URLWithString(&NSString::from_str(SCREEN_RECORDING_PANE_URL)) else {
-        eprintln!("permission: cannot build the settings URL");
+        crate::log!("permission: cannot build the settings URL");
         return;
     };
     NSWorkspace::sharedWorkspace().openURL(&url);
@@ -85,15 +85,15 @@ mod tests {
     #[ignore = "triggers a system permission prompt; run explicitly"]
     fn request_screen_recording() {
         let preflight = preflight_screen_capture();
-        eprintln!("screen recording preflight: {preflight}");
+        crate::log!("screen recording preflight: {preflight}");
         let granted = request_screen_capture();
-        eprintln!("screen recording request returned: {granted}");
+        crate::log!("screen recording request returned: {granted}");
     }
 
     #[test]
     #[ignore = "triggers the accessibility prompt; needed only for automated hotkey checks"]
     fn request_accessibility() {
         let trusted = is_accessibility_trusted(true);
-        eprintln!("accessibility trusted: {trusted}");
+        crate::log!("accessibility trusted: {trusted}");
     }
 }

@@ -314,7 +314,7 @@ pub fn capture_t0(mouse_sckit: CGPoint) -> Result<T0Capture, String> {
                 if is_target {
                     return Err(e);
                 }
-                eprintln!("capture: skipping a display without a T0 frame: {e}");
+                crate::log!("capture: skipping a display without a T0 frame: {e}");
             }
         }
     }
@@ -379,18 +379,18 @@ pub fn resolve_click_target(
         for (id, frame) in &candidates {
             let Some(window) = live.iter().find(|w| unsafe { w.windowID() } == *id) else {
                 if click_trace() {
-                    eprintln!("click-verify: id={id} not in the SCK list, skipped");
+                    crate::log!("click-verify: id={id} not in the SCK list, skipped");
                 }
                 continue;
             };
             if click_trace() {
-                eprintln!(
+                crate::log!(
                     "click-verify: candidate id={id} frame=({:.0},{:.0},{:.0},{:.0})",
                     frame.origin.x, frame.origin.y, frame.size.width, frame.size.height
                 );
             }
             if renders_as_seen(&window, *frame, point, display_frame, frozen) {
-                eprintln!("click: matched window id={id}");
+                crate::log!("click: matched window id={id}");
                 return crop_of(*frame);
             }
         }
@@ -399,11 +399,11 @@ pub fn resolve_click_target(
         // Fallback: the compositor's topmost window at the point — right
         // when the render check failed on animation or a missing SCWindow.
         Some((id, frame)) => {
-            eprintln!("click: no candidate verified, topmost id={id}");
+            crate::log!("click: no candidate verified, topmost id={id}");
             crop_of(*frame)
         }
         None => {
-            eprintln!("click: no window at the point, whole frame");
+            crate::log!("click: no window at the point, whole frame");
             whole_frame
         }
     }
@@ -436,7 +436,7 @@ fn renders_as_seen(
 ) -> bool {
     let Some(render) = render_window(window) else {
         if click_trace() {
-            eprintln!("click-verify: render failed for the candidate");
+            crate::log!("click-verify: render failed for the candidate");
         }
         return false;
     };
@@ -455,7 +455,7 @@ fn renders_as_seen(
         (Some(mean), m) => (format!("{mean:.1}"), m),
         (None, _) => ("n/a".to_string(), false),
     };
-    eprintln!(
+    crate::log!(
         "click-verify: render {}x{} scale {:.2}/{:.2} patch dev={dev} matched={matched}",
         CGImage::width(Some(&render)),
         CGImage::height(Some(&render)),
@@ -649,10 +649,10 @@ mod tests {
             CGDisplayMode::pixel_width(Some(&mode)),
             CGDisplayMode::pixel_height(Some(&mode)),
         );
-        eprintln!("expected {expected:?} px");
+        crate::log!("expected {expected:?} px");
         let image = capture_display_image(&display).expect("screenshot");
         let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
-        eprintln!("frame {w}x{h} px");
+        crate::log!("frame {w}x{h} px");
         assert_eq!(w, expected.0);
         assert_eq!(h, expected.1);
 
@@ -669,7 +669,7 @@ mod tests {
         .expect("png data");
         let path = std::env::temp_dir().join("minisnap-capture-test.png");
         std::fs::write(&path, data.to_vec()).expect("write file");
-        eprintln!("saved {}", path.display());
+        crate::log!("saved {}", path.display());
     }
 }
 

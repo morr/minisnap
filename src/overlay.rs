@@ -445,7 +445,7 @@ define_class!(
             // Display configuration changed while frozen: the T0 frame no
             // longer matches the screens, so the mode is invalid.
             if self.ivars().active.get() {
-                eprintln!("overlay: display configuration changed, cancelling");
+                crate::log!("overlay: display configuration changed, cancelling");
                 self.finish(FinishRequest::Cancelled);
             }
         }
@@ -707,7 +707,7 @@ impl OverlayView {
         let ivars = self.ivars();
         let mtm = MainThreadMarker::new().expect("overlay on main thread");
         if ivars.active.get() {
-            eprintln!("overlay: capture request ignored, mode already active");
+            crate::log!("overlay: capture request ignored, mode already active");
             return;
         }
         // The starting target must have a live screen behind it: without
@@ -717,7 +717,7 @@ impl OverlayView {
         // configuration change cancels the mode).
         let map = SurfaceMap::for_surfaces(&t0.surfaces, mtm);
         let Some(screen) = map.screen_of(t0.target) else {
-            eprintln!("overlay: no live screen matches the capture target, dropping");
+            crate::log!("overlay: no live screen matches the capture target, dropping");
             return;
         };
         let screen_frame = screen.frame;
@@ -788,7 +788,7 @@ impl OverlayView {
             .map(|w| w.isKeyWindow())
             .unwrap_or(false);
         let (w_px, h_px) = ivars.image_size_px.get();
-        eprintln!(
+        crate::log!(
             "overlay: frozen {}x{} px on screen ({:.0},{:.0} {}x{}), app active: {}, key window: {}, surfaces: {}, windows: {}, veils: {}",
             w_px,
             h_px,
@@ -819,11 +819,11 @@ impl OverlayView {
             return false;
         }
         let Some(screen) = ivars.surface_map.borrow().screen_of(index) else {
-            eprintln!("overlay: no live screen for surface {index}, target kept");
+            crate::log!("overlay: no live screen for surface {index}, target kept");
             return false;
         };
         self.present_target(index, screen);
-        eprintln!(
+        crate::log!(
             "overlay: target switched to surface {index} on screen ({:.0},{:.0} {}x{}) scale={}",
             screen.frame.origin.x,
             screen.frame.origin.y,
@@ -845,7 +845,7 @@ impl OverlayView {
     fn handle_mouse_down(&self, event: &NSEvent) {
         let ivars = self.ivars();
         if crate::capture::click_trace() {
-            eprintln!(
+            crate::log!(
                 "mouse-down: active={}, resolving={}",
                 ivars.active.get(),
                 ivars.resolving.borrow().is_some()
@@ -944,7 +944,7 @@ impl OverlayView {
             let local = crate::capture::geometry::display_point_to_pixel(up, screen_h, 1.0);
             let point_sckit = CGPoint::new(sckit.origin.x + local.x, sckit.origin.y + local.y);
             let t0_windows = ivars.windows.borrow().clone();
-            eprintln!(
+            crate::log!(
                 "click: sckit point ({:.0},{:.0}), {} T0 windows",
                 point_sckit.x,
                 point_sckit.y,
@@ -1035,7 +1035,7 @@ impl OverlayView {
                     scale,
                 },
                 None => {
-                    eprintln!("overlay: selection finished without a frame, dropping");
+                    crate::log!("overlay: selection finished without a frame, dropping");
                     OverlayOutcome::Cancelled
                 }
             },

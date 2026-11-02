@@ -10,6 +10,7 @@ pub mod editor_toolbar;
 pub mod editor_window;
 pub mod hotkey_recorder;
 pub mod hotkeys;
+pub mod logbuf;
 pub mod overlay;
 pub mod overlay_hud;
 pub mod output;

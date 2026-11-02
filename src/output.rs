@@ -186,9 +186,9 @@ pub fn enforce_retention(dir: &Path, limit: u32) {
     let excess = files.len().saturating_sub(limit as usize);
     for (path, name) in files.into_iter().take(excess) {
         if let Err(e) = fs::remove_file(&path) {
-            eprintln!("retention: cannot remove {}: {e}", path.display());
+            crate::log!("retention: cannot remove {}: {e}", path.display());
         } else {
-            eprintln!("retention: removed {}", name.to_string_lossy());
+            crate::log!("retention: removed {}", name.to_string_lossy());
         }
     }
 }

@@ -45,7 +45,7 @@ impl OpenShot {
         };
         if fresh {
             if let Err(e) = store_original(sessions_root, &shot_path, doc.original()) {
-                eprintln!("session: cannot store original: {e}");
+                crate::log!("session: cannot store original: {e}");
             }
         }
         Some(OpenShot {
@@ -166,14 +166,14 @@ pub fn load(root: &Path, shot_path: &Path) -> Option<(Retained<CGImage>, Vec<Com
     let text = match fs::read_to_string(dir.join("commands.json")) {
         Ok(text) => text,
         Err(e) => {
-            eprintln!("session: no commands for {}: {e}", shot_path.display());
+            crate::log!("session: no commands for {}: {e}", shot_path.display());
             return None;
         }
     };
     match serde_json::from_str(&text) {
         Ok(commands) => Some((image, commands)),
         Err(e) => {
-            eprintln!("session: bad commands.json for {}: {e}", shot_path.display());
+            crate::log!("session: bad commands.json for {}: {e}", shot_path.display());
             None
         }
     }
@@ -242,9 +242,9 @@ pub fn enforce_retention(root: &Path, limit: usize) {
     let excess = dirs.len().saturating_sub(limit);
     for (path, _) in dirs.into_iter().take(excess) {
         if let Err(e) = fs::remove_dir_all(&path) {
-            eprintln!("session retention: cannot remove {}: {e}", path.display());
+            crate::log!("session retention: cannot remove {}: {e}", path.display());
         } else {
-            eprintln!("session retention: removed {}", path.display());
+            crate::log!("session retention: removed {}", path.display());
         }
     }
 }

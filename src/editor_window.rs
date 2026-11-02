@@ -801,7 +801,7 @@ impl EditorView {
                 .as_mut()
                 .map(|shot| shot.apply(cmd));
             if let Some(Err(err)) = result {
-                eprintln!("editor: failed to apply the drag command: {err}");
+                crate::log!("editor: failed to apply the drag command: {err}");
             }
         }
         match outcome.signal {
@@ -824,7 +824,7 @@ impl EditorView {
             .as_mut()
             .map(|shot| shot.apply(Command::DeleteElement(id)));
         if let Some(Err(err)) = result {
-            eprintln!("editor: failed to delete the element: {err}");
+            crate::log!("editor: failed to delete the element: {err}");
         }
         ivars.selection.set(None);
         self.redraw();
@@ -839,12 +839,12 @@ impl EditorView {
             return;
         };
         let Some(image) = render::render_composite(shot.doc.base(), shot.doc.elements()) else {
-            eprintln!("editor: failed to render the composite for copying");
+            crate::log!("editor: failed to render the composite for copying");
             return;
         };
         drop(shot_guard);
         if let Err(err) = crate::output::copy_to_pasteboard(&image) {
-            eprintln!("editor: failed to copy to the pasteboard: {err}");
+            crate::log!("editor: failed to copy to the pasteboard: {err}");
         }
     }
 
@@ -865,7 +865,7 @@ impl EditorView {
         let changed = match result {
             Some(Ok(changed)) => changed,
             Some(Err(err)) => {
-                eprintln!("editor: undo/redo failed: {err}");
+                crate::log!("editor: undo/redo failed: {err}");
                 return;
             }
             None => return,
@@ -1189,7 +1189,7 @@ impl EditorView {
                     .as_mut()
                     .map(|shot| shot.apply_text_size(id, size));
                 if let Some(Err(err)) = result {
-                    eprintln!("editor: failed to restyle the text size: {err}");
+                    crate::log!("editor: failed to restyle the text size: {err}");
                 }
                 self.set_field_font(&field, size);
                 let shot = ivars.shot.borrow();
@@ -1275,7 +1275,7 @@ impl EditorView {
             // until the user clicks it.
             if let Some(cmd) = command {
                 if let Err(err) = shot.apply(cmd) {
-                    eprintln!("editor: failed to add the text element: {err}");
+                    crate::log!("editor: failed to add the text element: {err}");
                 }
             }
             drop(shot_slot);
@@ -1299,13 +1299,13 @@ impl EditorView {
         });
         if text.trim().is_empty() {
             if let Err(err) = shot.apply(Command::DeleteElement(id)) {
-                eprintln!("editor: failed to delete the emptied text: {err}");
+                crate::log!("editor: failed to delete the emptied text: {err}");
             } else {
                 ivars.selection.set(None);
             }
         } else if old_text.as_deref() != Some(text.as_str()) {
             if let Err(err) = shot.apply(Command::EditText(id, text)) {
-                eprintln!("editor: failed to update the text: {err}");
+                crate::log!("editor: failed to update the text: {err}");
             }
         }
         drop(shot_slot);
@@ -1526,7 +1526,7 @@ impl EditorView {
             .as_mut()
             .map(|shot| shot.apply(cmd));
         if let Some(Err(err)) = result {
-            eprintln!("editor: failed to apply the frame: {err}");
+            crate::log!("editor: failed to apply the frame: {err}");
         }
         ivars.tool.set(None);
         self.redraw();
@@ -1652,7 +1652,7 @@ impl EditorView {
         let sessions_root = crate::editor::session::default_root();
         match OpenShot::open(shots[target as usize].clone(), &sessions_root) {
             Some(shot) => self.display_shot(shot),
-            None => eprintln!("editor: cannot open the paged shot"),
+            None => crate::log!("editor: cannot open the paged shot"),
         }
     }
 
@@ -1717,7 +1717,7 @@ impl EditorView {
                                 .as_mut()
                                 .map(|shot| shot.apply_width(id, value));
                             if let Some(Err(err)) = result {
-                                eprintln!("editor: failed to restyle the element width: {err}");
+                                crate::log!("editor: failed to restyle the element width: {err}");
                             }
                         }
                     }
@@ -1745,7 +1745,7 @@ impl EditorView {
                             .as_mut()
                             .map(|shot| shot.apply(Command::Recolor(id, color)));
                         if let Some(Err(err)) = result {
-                            eprintln!("editor: failed to recolor the element: {err}");
+                            crate::log!("editor: failed to recolor the element: {err}");
                         }
                     }
                 }

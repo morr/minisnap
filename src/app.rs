@@ -137,7 +137,7 @@ define_class!(
             app.activateIgnoringOtherApps(true);
             if let Some(prefs) = self.ivars().prefs.borrow().as_ref() {
                 prefs.window.makeKeyAndOrderFront(None);
-                eprintln!(
+                crate::log!(
                     "prefs window: active={} key={}",
                     app.isActive(),
                     prefs.window.isKeyWindow()
@@ -156,7 +156,7 @@ define_class!(
             app.activateIgnoringOtherApps(true);
             if let Some(editor) = self.ivars().editor.borrow().as_ref() {
                 editor.window.makeKeyAndOrderFront(None);
-                eprintln!(
+                crate::log!(
                     "editor window: active={} key={}",
                     app.isActive(),
                     editor.window.isKeyWindow()
@@ -187,7 +187,7 @@ define_class!(
             // Display configuration changed (monitor plugged/unplugged):
             // the frozen frame no longer matches reality — cancel the mode.
             if self.ivars().overlay.borrow().is_active() {
-                eprintln!("screens changed: cancelling capture mode");
+                crate::log!("screens changed: cancelling capture mode");
                 self.ivars().overlay.borrow().cancel();
             }
         }
@@ -220,11 +220,11 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppController {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: Option<&objc2_foundation::NSNotification>) {
-            eprintln!("minisnap launched");
+            crate::log!("minisnap launched");
             // Startup preflight (7.1): explain the Screen Recording
             // permission before the user wonders why capture does nothing.
             if !crate::permission::preflight_screen_capture() {
-                eprintln!("screen recording: not granted, requesting");
+                crate::log!("screen recording: not granted, requesting");
                 // Register this exact build with TCC and let the system
                 // prompt do the asking; a second dialog of our own would
                 // just stack on top of it. The request is what makes the
@@ -232,7 +232,7 @@ define_class!(
                 // without it, toggling rows of older builds does nothing.
                 crate::permission::request_screen_capture();
             } else {
-                eprintln!("screen recording: granted");
+                crate::log!("screen recording: granted");
             }
         }
 
@@ -241,7 +241,7 @@ define_class!(
             // Recheck when the user returns from System Settings (7.1).
             let granted = crate::permission::preflight_screen_capture();
             if granted != self.ivars().permission_granted.get() {
-                eprintln!("screen recording: now {}", if granted { "granted" } else { "revoked" });
+                crate::log!("screen recording: now {}", if granted { "granted" } else { "revoked" });
                 self.ivars().permission_granted.set(granted);
             }
         }
@@ -422,7 +422,7 @@ impl AppController {
             Some(monitor) => {
                 this.ivars().monitor.borrow_mut().replace(monitor);
             }
-            None => eprintln!("prefs: cannot install the key event monitor"),
+            None => crate::log!("prefs: cannot install the key event monitor"),
         }
 
         // MINISNAP_DEBUG_OPEN_EDITOR=<path>: open the editor on the shot
@@ -541,9 +541,9 @@ impl AppController {
         alert.setAlertStyle(NSAlertStyle::Informational);
         alert.addButtonWithTitle(&NSString::from_str("Open System Settings"));
         alert.addButtonWithTitle(&NSString::from_str("Not Now"));
-        eprintln!("permission: running modal…");
+        crate::log!("permission: running modal…");
         let response = alert.runModal();
-        eprintln!("permission: modal returned {response}");
+        crate::log!("permission: modal returned {response}");
         self.ivars().permission_dialog_visible.set(false);
         if response == NSAlertFirstButtonReturn {
             crate::permission::open_screen_recording_settings();
@@ -570,11 +570,11 @@ impl AppController {
             FeedOutcome::Passthrough => pointer,
             FeedOutcome::Swallowed => {
                 // A bare key or an unknown key code: not a combination.
-                eprintln!("prefs: key code {keycode:#04x} swallowed, still recording");
+                crate::log!("prefs: key code {keycode:#04x} swallowed, still recording");
                 std::ptr::null_mut()
             }
             FeedOutcome::Cancelled => {
-                eprintln!("prefs: recording cancelled");
+                crate::log!("prefs: recording cancelled");
                 self.finish_recording(None);
                 std::ptr::null_mut()
             }
@@ -600,7 +600,7 @@ impl AppController {
             }
             if let Some(path) = Config::standard_path() {
                 if let Err(e) = config.save_to(&path) {
-                    eprintln!("prefs: cannot save config: {e}");
+                    crate::log!("prefs: cannot save config: {e}");
                 }
             }
             self.ivars()
@@ -610,7 +610,7 @@ impl AppController {
             Self::apply_menu_hotkey(&self.ivars().capture_item, &config.capture_hotkey);
             Self::apply_menu_hotkey(&self.ivars().capture_edit_item, &config.capture_edit_hotkey);
             Self::apply_menu_hotkey(&self.ivars().open_latest_item, &config.open_hotkey);
-            eprintln!(
+            crate::log!(
                 "prefs: hotkeys applied: capture={} open={}",
                 config.capture_hotkey, config.open_hotkey
             );
@@ -659,7 +659,7 @@ impl AppController {
         let dir = self.ivars().config.borrow().save_dir.clone();
         match crate::output::latest_shot(&dir) {
             Some(path) => self.open_editor(path),
-            None => eprintln!("open latest: no shots yet"),
+            None => crate::log!("open latest: no shots yet"),
         }
     }
 
@@ -669,7 +669,7 @@ impl AppController {
         let mtm = MainThreadMarker::from(self);
         let sessions_root = session::default_root();
         let Some(shot) = OpenShot::open(path, &sessions_root) else {
-            eprintln!("editor: cannot open shot");
+            crate::log!("editor: cannot open shot");
             return;
         };
         {
@@ -704,12 +704,12 @@ impl AppController {
         // here also re-checks after the user granted the permission in
         // System Settings without a relaunch.
         if !crate::permission::preflight_screen_capture() {
-            eprintln!("capture blocked: screen recording not granted");
+            crate::log!("capture blocked: screen recording not granted");
             self.show_permission_dialog();
             return;
         }
         if self.ivars().overlay.borrow().is_active() {
-            eprintln!("capture hotkey ignored: overlay already active");
+            crate::log!("capture hotkey ignored: overlay already active");
             return;
         }
         let mtm = MainThreadMarker::from(self);
@@ -719,7 +719,7 @@ impl AppController {
             CGPoint::new(mouse.x, mouse.y),
             primary_height,
         );
-        eprintln!(
+        crate::log!(
             "capture: mouse_sckit=({:.0},{:.0})",
             mouse_sckit.x, mouse_sckit.y
         );
@@ -737,13 +737,13 @@ impl AppController {
     fn capture_ready(&self, result: Result<crate::capture::T0Capture, String>, edit: bool) {
         let Ok(t0) = result else {
             if let Err(e) = &result {
-                eprintln!("capture: {e}");
+                crate::log!("capture: {e}");
             }
             return;
         };
         let overlay = self.ivars().overlay.borrow();
         if overlay.is_active() {
-            eprintln!("capture: t0 ready but mode already active, dropping");
+            crate::log!("capture: t0 ready but mode already active, dropping");
             return;
         }
         let (save_dir, retention) = {
@@ -758,21 +758,21 @@ impl AppController {
                 scale,
             } => {
                 let Some(image) = crate::output::crop(&image, pixel_rect) else {
-                    eprintln!("output: empty selection rect {pixel_rect:?}");
+                    crate::log!("output: empty selection rect {pixel_rect:?}");
                     return;
                 };
                 crate::sound::play_shutter();
                 if let Err(e) = crate::output::copy_to_pasteboard(&image) {
-                    eprintln!("output: pasteboard: {e}");
+                    crate::log!("output: pasteboard: {e}");
                 }
                 match crate::output::save_to_file(&image, &save_dir, retention, scale) {
                     Ok(path) => {
-                        eprintln!("output: saved {}", path.display());
+                        crate::log!("output: saved {}", path.display());
                         if edit {
                             let _ = jobs_tx.send(MainJob::OpenEditor { path });
                         }
                     }
-                    Err(e) => eprintln!("output: save: {e}"),
+                    Err(e) => crate::log!("output: save: {e}"),
                 }
             }
             OverlayOutcome::Cancelled => {}
@@ -814,14 +814,14 @@ pub fn run() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let (checkout_label, exe_path) = instance_identity();
-    eprintln!(
+    crate::log!(
         "minisnap instance '{}' from {}",
         checkout_label,
         exe_path.display()
     );
 
     let config = Config::load_or_create();
-    eprintln!(
+    crate::log!(
         "config: capture={} open={} save_dir={} retention={}",
         config.capture_hotkey,
         config.open_hotkey,

@@ -261,7 +261,7 @@ define_class!(
             // constant.
             let ok = pasteboard.setString_forType(&text, unsafe { NSPasteboardTypeString });
             if !ok {
-                eprintln!("editor: the pasteboard rejected the tuner prompt");
+                crate::log!("editor: the pasteboard rejected the tuner prompt");
             }
         }
     }
