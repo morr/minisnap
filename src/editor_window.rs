@@ -989,13 +989,23 @@ impl EditorView {
 
     /// View-space rect for the field editor over a text block whose
     /// top-left sits at `origin` (image pixels), holding `text` (may be
-    /// empty) at `size` image pixels.
+    /// `empty`) at `size` image pixels.
+    ///
+    /// Measured alignment (typed ink vs committed element ink, macOS 26):
+    /// the field editor lays the first line's baseline a full line height
+    /// below the field's top (the ink top lands ~0.43·font_pt down), while
+    /// the canvas draws the block's baseline one ascent below the block
+    /// top (~0.24·font_pt to the ink). The frame lifts the field by the
+    /// difference (0.19·font_pt) and puts the glyphs' layout origin right
+    /// on the block origin (the editor's own horizontal inset is 2 pt), so
+    /// Enter keeps the text where it was typed.
     fn text_editor_frame(&self, origin: Point, text: &str, size: f64, callout: bool) -> CGRect {
         let frame = self.frame_rect();
         let (sx, sy) = self.view_scale();
         let (width, height) = self.text_editor_size(text, size, callout);
-        let x = frame.origin.x + origin.x * sx - 3.0;
-        let y_top = frame.origin.y + frame.size.height - origin.y * sy;
+        let x = frame.origin.x + origin.x * sx - 2.0;
+        let font_pt = (size * sy).max(9.0);
+        let y_top = frame.origin.y + frame.size.height - origin.y * sy + 0.19 * font_pt;
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
     }
 
