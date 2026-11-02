@@ -2,7 +2,7 @@
 
 ## 1. Модуль `src/editor/arrow.rs` — семья стрелки
 
-- [ ] 1.1 Создать `src/editor/arrow.rs` (`pub(crate) mod arrow;` в
+- [x] 1.1 Создать `src/editor/arrow.rs` (`pub(crate) mod arrow;` в
   `editor/mod.rs`): построчный переезд из `render.rs` — `ArrowParams`
   (+`DEFAULT`), глобал `ARROW_PARAMS` с `arrow_params`/`set_arrow_params`,
   `ArrowFrame`, `arrow_outline(_with)`, `quad`, `round_corners`, `pt_dist`,
@@ -13,6 +13,16 @@
   `arrow_params_reshape_the_outline`) переезжают в `arrow.rs`. Проверка:
   `cargo build`, `cargo clippy`, `cargo test`; live — стрелка рисуется в
   редакторе (если TCC позволит; иначе «ждёт ручной проверки»).
+  *(build/clippy/test зелёные: 128 тестов, три теста силуэта едут из
+  `editor::arrow::tests`; clypy-профиль arrow.rs/render.rs чист, прочие
+  предупреждения — прежние dead_code/deprecated. Re-export дополнительно
+  держит `arrow_outline` — единственный его потребитель `hit_test`
+  переходит на `arrow` в таске 2. Live: дебаг-сборка PID 24300,
+  `MINISNAP_DEBUG_OPEN_EDITOR` + сессия с командой AddElement(Arrow)
+  фиолетового цвета — на скриншоте окна редактора ровно 0 совпадающих
+  пикселей до запуска и ~2015 (downscale) после, bounding box 796×656 —
+  диагональный след стрелки, не свотч тулбара; приложение погашено по
+  PID, временная сессия удалена)*
 
 ## 2. Зависимость `hit_test → arrow`, чистый render
 

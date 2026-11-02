@@ -11,6 +11,7 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreateImage, CGImage, CGContext};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod arrow;
 pub(crate) mod drag;
 pub mod hit_test;
 pub mod render;
