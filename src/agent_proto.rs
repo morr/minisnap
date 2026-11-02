@@ -150,16 +150,20 @@ pub enum AgentEditorOp {
 }
 
 /// Where `BeginText` opens the field editor. All points are image pixels
-/// with the top-left origin — the document element space.
+/// with the top-left origin — the document element space. Snake_case keys
+/// (`new`, `new_callout`, `existing`) — the shape the agent contract
+/// spells out.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTextTarget {
     /// A brand-new plain text at the point (the text tool's click).
     New { x: f64, y: f64 },
     /// A brand-new callout: the arrow drags from `from` to `to` through
     /// the drag machine, then the phase-two input opens at its base.
     NewCallout { from: [f64; 2], to: [f64; 2] },
-    /// Re-edit an existing text/callout element.
-    Existing { id: u64 },
+    /// Re-edit an existing text/callout element; the bare id
+    /// (`{"existing":2}`).
+    Existing(u64),
 }
 
 /// What an action or editor operation did. `status` is one of "done",

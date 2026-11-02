@@ -1140,7 +1140,7 @@ impl EditorView {
         // The click-equivalent runs through the same machine path as
         // `handle_mouse_down`: the same context, the same point space.
         match target {
-            AgentTextTarget::Existing { id } => {
+            AgentTextTarget::Existing(id) => {
                 let is_text = ivars
                     .shot
                     .borrow()
