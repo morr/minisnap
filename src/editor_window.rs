@@ -911,6 +911,13 @@ impl EditorView {
     /// slider — and, as ever, the width for new elements — to its own.
     fn toolbar_state(&self) -> ToolbarState {
         let ivars = self.ivars();
+        // While the field editor is open the slider is the size slider: it
+        // rides the active input's size on the text range, and the width
+        // for new elements does not follow the knob.
+        let text_input = match ivars.text_editor.borrow().is_some() {
+            true => Some(ivars.text_size.get()),
+            false => None,
+        };
         let shot = ivars.shot.borrow();
         let state = crate::editor_toolbar::toolbar_state(
             shot.as_ref().map(|shot| &shot.doc),
@@ -921,9 +928,9 @@ impl EditorView {
             ivars.stroke_width.get(),
             ivars.color.get(),
             ivars.selection.get(),
-            None,
+            text_input,
         );
-        if state.slider_value != ivars.stroke_width.get() {
+        if text_input.is_none() && state.slider_value != ivars.stroke_width.get() {
             // The slider pinned to a stroked selection: its width becomes
             // the width for new elements, like every redraw has done.
             ivars.stroke_width.set(state.slider_value);
