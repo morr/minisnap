@@ -731,6 +731,30 @@ impl DragMachine {
         ))
     }
 
+    /// Resize the pending callout's draft text (the size slider's text-mode
+    /// drag in the second phase) and re-anchor the block beside the arrow
+    /// base for the new size — the same placement `pending_callout_anchor`
+    /// computes. `block` is the field's block at the new size, already in
+    /// image pixels (the window measures its own field). Returns the new
+    /// block position; None without a pending callout. The arrow's tip and
+    /// stroke width stay as drawn.
+    pub(crate) fn set_pending_callout_size(
+        &mut self,
+        size: f64,
+        block: Size,
+        image: Size,
+    ) -> Option<Point> {
+        let pending = self.callout.as_mut()?;
+        pending.size = size;
+        Some(callout_anchor(
+            pending.base,
+            pending.tip,
+            block.width,
+            block.height,
+            Rect::new(0.0, 0.0, image.width, image.height),
+        ))
+    }
+
     /// Commit the callout's text — the end of the second phase: a
     /// non-empty text lands as the element's final form, anchored beside
     /// the arrow base; an empty input drops the pending arrow and adds
@@ -1308,6 +1332,53 @@ mod tests {
             Rect::new(0.0, 0.0, 400.0, 300.0),
         );
         assert_eq!(anchor, Point::new(70.0, 116.0));
+    }
+
+    #[test]
+    fn set_pending_callout_size_reanchors_and_keeps_the_arrow() {
+        let image = Size::new(400.0, 300.0);
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        // A left-pointing arrow: the block sits right of the base.
+        machine.down(tool_ctx(ctx(&elements), Tool::Callout), pt(150.0, 50.0));
+        machine.drag_to(pt(100.0, 50.0));
+        machine.up(pt(100.0, 50.0), 9).expect("drag was active");
+
+        let small = machine
+            .set_pending_callout_size(32.0, Size::new(40.0, 20.0), image)
+            .expect("a pending callout");
+        let grown = machine
+            .set_pending_callout_size(64.0, Size::new(80.0, 40.0), image)
+            .expect("a pending callout");
+        // The block grows away from the tip: the near edge holds its gap
+        // from the base, the taller block re-centers on it.
+        assert_eq!(grown.x, small.x, "the near edge holds the gap");
+        assert!(grown.y < small.y, "the taller block re-centers on the base");
+        assert!(grown.x > 150.0, "the block sits on the side away from the tip");
+        // The position is exactly callout_anchor's for the new block.
+        assert_eq!(
+            grown,
+            callout_anchor(
+                pt(150.0, 50.0),
+                pt(100.0, 50.0),
+                80.0,
+                40.0,
+                Rect::new(0.0, 0.0, 400.0, 300.0)
+            )
+        );
+        // The arrow is untouched: tip and stroke width stay as drawn, the
+        // draft size took the new value.
+        let pending = machine.callout.as_ref().expect("pending");
+        assert_eq!(pending.tip, pt(100.0, 50.0));
+        assert_eq!(pending.width, 4.0);
+        assert_eq!(pending.size, 64.0);
+
+        // No pending callout: nothing to resize.
+        let mut fresh = DragMachine::new();
+        assert_eq!(
+            fresh.set_pending_callout_size(32.0, Size::new(40.0, 20.0), image),
+            None
+        );
     }
 
     #[test]

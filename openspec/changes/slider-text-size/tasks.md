@@ -8,7 +8,7 @@
 
 ## 2. Машина драга
 
-- [ ] 2.1 `DragMachine::set_pending_callout_size(size, image) -> Option<Point>` в `editor/drag.rs`: обновляет `PendingCallout.size`, возвращает переанкеренную позицию блока; юнит-тест: рост размера переанкерит блок у основания, `width`/`tip` не трогаются, без pending — `None`. Verify: `cargo test` — тест машины зелёный.
+- [x] 2.1 `DragMachine::set_pending_callout_size(size, image) -> Option<Point>` в `editor/drag.rs`: обновляет `PendingCallout.size`, возвращает переанкеренную позицию блока; юнит-тест: рост размера переанкерит блок у основания, `width`/`tip` не трогаются, без pending — `None`. Verify: `cargo test` — тест машины зелёный.
 
 ## 3. Тулбар: двуличный слайдер
 
