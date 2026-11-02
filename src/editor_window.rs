@@ -1646,11 +1646,16 @@ impl EditorView {
                 self.ivars().tool.set(next);
                 // The crop/resize tools bring up their adjustable frame;
                 // anything else (including deselecting the frame tool)
-                // tears it down.
+                // tears it down. The teardown path redraws only when a
+                // frame was up — the tool switch itself repaints the
+                // highlight here.
                 match next {
                     Some(Tool::Crop) => self.enter_frame_edit(false),
                     Some(Tool::Resize) => self.enter_frame_edit(true),
-                    _ => self.exit_frame_edit(),
+                    _ => {
+                        self.exit_frame_edit();
+                        self.redraw();
+                    }
                 }
             }
             ToolbarEvent::PagePrevious => self.page(-1),
