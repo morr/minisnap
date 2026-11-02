@@ -16,10 +16,10 @@ use objc2::{
     MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSControl,
-    NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType,
-    NSFontWeightRegular, NSGraphicsContext, NSImage, NSImageSymbolConfiguration,
-    NSLayoutConstraintOrientation, NSLineBreakMode,
+    NSAccessibility, NSApplication, NSAutoresizingMaskOptions, NSButton, NSButtonCell, NSColor,
+    NSCellStyleMask, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType,
+    NSFocusRingType, NSFontWeightRegular, NSGraphicsContext, NSImage,
+    NSImageSymbolConfiguration, NSLayoutConstraintOrientation, NSLineBreakMode,
     NSPopover, NSPopoverDelegate, NSStackView, NSTextAlignment, NSTextField,
     NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation,
     NSView, NSViewController, NSWindowButton,
@@ -1118,13 +1118,28 @@ impl ToolbarView {
             PAGE_DISABLED_TINT[3],
         );
         for (tag, button) in self.ivars().tool_buttons.borrow().iter() {
-            let tint = match *tag {
-                PAGE_PREV_TAG if !can_prev => &disabled,
-                PAGE_NEXT_TAG if !can_next => &disabled,
-                PAGE_PREV_TAG | PAGE_NEXT_TAG => &icon,
+            let (tint, is_disabled) = match *tag {
+                PAGE_PREV_TAG if !can_prev => (&disabled, true),
+                PAGE_NEXT_TAG if !can_next => (&disabled, true),
+                PAGE_PREV_TAG | PAGE_NEXT_TAG => (&icon, false),
                 _ => continue,
             };
             button.setContentTintColor(Some(tint));
+            // The pressed look is the cell's to draw: with the default
+            // highlight mask a press repaints the symbol the system way,
+            // and a disabled chevron under the mouse comes alive. A
+            // disabled button gets an empty mask — press draws nothing;
+            // an enabled one keeps the momentary-push default, so its
+            // press feedback is unchanged.
+            let highlights = if is_disabled {
+                NSCellStyleMask::NoCellMask
+            } else {
+                NSCellStyleMask::ContentsCellMask | NSCellStyleMask::PushInCellMask
+            };
+            let cell = button.cell().and_then(|cell| cell.downcast::<NSButtonCell>().ok());
+            if let Some(cell) = cell.as_ref() {
+                cell.setHighlightsBy(highlights);
+            }
         }
     }
 
