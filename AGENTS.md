@@ -25,7 +25,14 @@ reads instead of the code, so a description left standing after the code
 stopped obeying it is worse than none. Skills are maps with addresses into
 the code, not a copy of it — verify against the actual source before editing.
 What belongs in a skill is what orients a future session: mechanisms, module
-boundaries, code-level invariants, gotchas. Normative product behavior —
+boundaries, code-level invariants, gotchas. A skill carries what the code
+itself won't tell you — mechanisms, invariants, gotchas, canon, and decision
+rules; the repository's code is the working example. Nothing that a grep of
+the repository reproduces gets into a skill: values of constants and
+defaults, enumerations of helpers and signatures, flag and parameter tables,
+code examples duplicating the files they reference. The test applies to every
+line whenever a skill is written or updated: a line derivable from reading
+the code is a candidate for deletion. Normative product behavior —
 hotkey values and defaults, menu composition, user-facing scenarios — lives
 in `openspec/specs/`; a skill links the capability as its reference instead
 of restating it. The questions split three ways: the spec answers what the
