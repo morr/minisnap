@@ -710,6 +710,25 @@ impl AppController {
                 editor.agent_page(delta);
                 ActionResult::done("paged to the neighbor shot (the edges stop)")
             }
+            AgentEditorOp::BeginText { target, text } => {
+                match editor.agent_begin_text(target, text.as_deref()) {
+                    Ok(()) => ActionResult::done(match text.as_deref() {
+                        Some(_) => "text input opened, the string is inserted",
+                        None => "text input opened",
+                    }),
+                    Err(e) => ActionResult::rejected(e),
+                }
+            }
+            AgentEditorOp::FinishText { commit } => {
+                match editor.agent_finish_text(commit) {
+                    Ok(()) => ActionResult::done(if commit {
+                        "text input committed"
+                    } else {
+                        "text input cancelled"
+                    }),
+                    Err(e) => ActionResult::rejected(e),
+                }
+            }
         }
     }
 

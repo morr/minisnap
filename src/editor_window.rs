@@ -990,6 +990,10 @@ impl EditorView {
             can_page_next: state.can_page_next,
             image_width: image_width as u32,
             image_height: image_height as u32,
+            text_editor_frame: self.text_editor_frame_px(),
+            text_editor_text: ivars.text_editor.borrow().as_ref().map(|field| {
+                field.stringValue().to_string().replace('\u{2028}', "\n")
+            }),
             elements: shot
                 .as_ref()
                 .map(|shot| shot.doc.elements().to_vec())
@@ -1081,6 +1085,195 @@ impl EditorView {
         ivars.selection.set(id);
         self.redraw();
         Ok(())
+    }
+
+    /// The machine's mouse-down context for the agent's click-equivalents:
+    /// the same construction `handle_mouse_down` does (tolerance converted
+    /// through the view scale, the live frame, the current color/width) —
+    /// but the tool comes from the requested target, not from the active
+    /// toolbar state: `BeginText{new}` is a text-tool click even while no
+    /// tool is picked.
+    fn agent_down_ctx<'a>(
+        &self,
+        tool: Option<Tool>,
+        elements: &'a [crate::editor::Element],
+    ) -> DownCtx<'a> {
+        let ivars = self.ivars();
+        let (sx, sy) = self.view_scale();
+        DownCtx {
+            tool,
+            color: ivars.color.get(),
+            stroke_width: ivars.stroke_width.get(),
+            elements,
+            frame: ivars.machine.borrow().current_frame(),
+            handle_tolerance: crate::editor::Point::new(
+                (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001),
+                (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001),
+            ),
+        }
+    }
+
+    /// Agent: open the text input the way the mouse and keyboard do. The
+    /// guards reject everything the click path could only do silently: an
+    /// already-open input, points outside the frame, an occupied point, a
+    /// degenerate callout drag, a non-text element. The optional text
+    /// lands in the field editor right after it opens — the typed-text
+    /// equivalent, with the callout field refitted by its own growth
+    /// rule.
+    fn agent_begin_text(
+        &self,
+        target: crate::agent_proto::AgentTextTarget,
+        text: Option<&str>,
+    ) -> Result<(), String> {
+        use crate::agent_proto::AgentTextTarget;
+        let ivars = self.ivars();
+        if ivars.shot.borrow().is_none() {
+            return Err("editor: no document open".into());
+        }
+        if ivars.text_editor.borrow().is_some() {
+            return Err("editor: text input is already open; finish it first".into());
+        }
+        let (iw, ih) = self.image_size();
+        let in_frame = |x: f64, y: f64| {
+            (0.0..=iw as f64).contains(&x) && (0.0..=ih as f64).contains(&y)
+        };
+        // The click-equivalent runs through the same machine path as
+        // `handle_mouse_down`: the same context, the same point space.
+        match target {
+            AgentTextTarget::Existing { id } => {
+                let is_text = ivars
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|shot| {
+                        shot.doc
+                            .element(id)
+                            .is_some_and(|el| matches!(el.kind, ElementKind::Text { .. } | ElementKind::Callout { .. }))
+                    });
+                if !is_text {
+                    return Err(format!("editor: element {id} does not exist or is not a text/callout"));
+                }
+                self.begin_text_edit(TextTarget::Existing { id });
+            }
+            AgentTextTarget::New { x, y } => {
+                if !in_frame(x, y) {
+                    return Err(format!("editor: point ({x},{y}) is outside the {iw}x{ih} frame"));
+                }
+                let point = crate::editor::Point::new(x, y);
+                let occupied = ivars
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|shot| crate::editor::hit_test::top_hit(shot.doc.elements(), point).is_some());
+                if occupied {
+                    return Err(format!("editor: point ({x},{y}) is occupied by an element; pick an empty spot or edit that element"));
+                }
+                let shot_guard = ivars.shot.borrow();
+                let ctx = self.agent_down_ctx(
+                    Some(Tool::Text),
+                    shot_guard.as_ref().map(|shot| shot.doc.elements()).unwrap_or(&[]),
+                );
+                let outcome = ivars.machine.borrow_mut().down(ctx, point);
+                drop(shot_guard);
+                match outcome.signal {
+                    Some(Signal::BeginText(target)) => self.begin_text_edit(target),
+                    _ => return Err("editor: the text click did not open an input".into()),
+                }
+            }
+            AgentTextTarget::NewCallout { from, to } => {
+                let [fx, fy] = from;
+                let [tx, ty] = to;
+                for (name, x, y) in [("from", fx, fy), ("to", tx, ty)] {
+                    if !in_frame(x, y) {
+                        return Err(format!(
+                            "editor: callout {name} point ({x},{y}) is outside the {iw}x{ih} frame"
+                        ));
+                    }
+                }
+                if fx == tx && fy == ty {
+                    return Err("editor: degenerate callout drag (from == to)".into());
+                }
+                let from = crate::editor::Point::new(fx, fy);
+                let to = crate::editor::Point::new(tx, ty);
+                let occupied = ivars
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|shot| crate::editor::hit_test::top_hit(shot.doc.elements(), from).is_some());
+                if occupied {
+                    return Err(format!(
+                        "editor: callout base ({fx},{fy}) is occupied by an element"
+                    ));
+                }
+                let next_id = ivars
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .map(|shot| shot.doc.next_element_id())
+                    .unwrap_or(0);
+                let shot_guard = ivars.shot.borrow();
+                let ctx = self.agent_down_ctx(
+                    Some(Tool::Callout),
+                    shot_guard.as_ref().map(|shot| shot.doc.elements()).unwrap_or(&[]),
+                );
+                let outcome = {
+                    let mut machine = ivars.machine.borrow_mut();
+                    machine.down(ctx, from);
+                    machine.drag_to(to);
+                    machine.up(to, next_id)
+                };
+                drop(shot_guard);
+                match outcome.and_then(|outcome| outcome.signal) {
+                    Some(Signal::BeginText(target)) => self.begin_text_edit(target),
+                    _ => {
+                        self.redraw();
+                        return Err("editor: the callout drag did not open an input".into());
+                    }
+                }
+            }
+        }
+        // The typed-text equivalent: put the string into the open field and
+        // let the same refit rule that follows typing resize it.
+        if let Some(text) = text {
+            if let Some(field) = ivars.text_editor.borrow().clone() {
+                field.setStringValue(&NSString::from_str(text));
+                self.refit_callout_editor();
+            }
+        }
+        Ok(())
+    }
+
+    /// Agent: finish the open text input — commit like Enter, cancel like
+    /// Esc.
+    fn agent_finish_text(&self, commit: bool) -> Result<(), String> {
+        if self.ivars().text_editor.borrow().is_none() {
+            return Err("editor: no text input is open".into());
+        }
+        if commit {
+            self.commit_text_editor();
+        } else {
+            self.discard_text_editor();
+        }
+        Ok(())
+    }
+
+    /// The open field editor's frame in frame pixels (origin top-left —
+    /// the document space): the inverse of `text_editor_frame`'s view
+    /// placement.
+    fn text_editor_frame_px(&self) -> Option<[f64; 4]> {
+        let field = self.ivars().text_editor.borrow().clone()?;
+        let card = self.frame_rect();
+        let (sx, sy) = self.view_scale();
+        if sx <= 0.0 || sy <= 0.0 {
+            return None;
+        }
+        let f = field.frame();
+        if f.size.width <= 0.0 || f.size.height <= 0.0 {
+            return None;
+        }
+        let x = (f.origin.x - card.origin.x) / sx;
+        let y = (card.origin.y + card.size.height - f.origin.y - f.size.height) / sy;
+        Some([x, y, f.size.width / sx, f.size.height / sy])
     }
 
     /// Agent: write the document composite to `path` and report its pixel
@@ -2138,6 +2331,21 @@ impl EditorWindow {
     /// Agent: select an element or drop the selection.
     pub fn agent_select(&self, id: Option<u64>) -> Result<(), String> {
         self.view.agent_select(id)
+    }
+
+    /// Agent: open the text input (new text, new callout drag, or an
+    /// existing element's re-edit) with an optional pre-filled string.
+    pub fn agent_begin_text(
+        &self,
+        target: crate::agent_proto::AgentTextTarget,
+        text: Option<&str>,
+    ) -> Result<(), String> {
+        self.view.agent_begin_text(target, text)
+    }
+
+    /// Agent: finish the open text input — commit or cancel.
+    pub fn agent_finish_text(&self, commit: bool) -> Result<(), String> {
+        self.view.agent_finish_text(commit)
     }
 
     /// Agent: the palette-preset path — color for new elements, a

@@ -68,6 +68,10 @@ pub struct EditorState {
     /// Base frame size in image pixels.
     pub image_width: u32,
     pub image_height: u32,
+    /// While a text input is open: the field editor's frame in frame
+    /// pixels (origin top-left — the document space), and its content.
+    pub text_editor_frame: Option<[f64; 4]>,
+    pub text_editor_text: Option<String>,
     /// The document: elements in journal shape (id, kind, geometry, color).
     pub elements: Vec<Element>,
 }
@@ -135,6 +139,27 @@ pub enum AgentEditorOp {
     Select { id: Option<u64> },
     /// Leaf to the previous ("prev") or next ("next") shot of the folder.
     Page { direction: String },
+    /// Open the text input the way the mouse and keyboard do: a click
+    /// with the text tool, a callout drag through the drag machine, or a
+    /// re-edit of an existing element. The optional `text` lands in the
+    /// field editor right after it opens, like typed text.
+    BeginText { target: AgentTextTarget, text: Option<String> },
+    /// Finish the open text input: `commit: true` commits exactly like
+    /// Enter, `commit: false` cancels like Esc.
+    FinishText { commit: bool },
+}
+
+/// Where `BeginText` opens the field editor. All points are image pixels
+/// with the top-left origin — the document element space.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AgentTextTarget {
+    /// A brand-new plain text at the point (the text tool's click).
+    New { x: f64, y: f64 },
+    /// A brand-new callout: the arrow drags from `from` to `to` through
+    /// the drag machine, then the phase-two input opens at its base.
+    NewCallout { from: [f64; 2], to: [f64; 2] },
+    /// Re-edit an existing text/callout element.
+    Existing { id: u64 },
 }
 
 /// What an action or editor operation did. `status` is one of "done",

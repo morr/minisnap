@@ -176,7 +176,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "editor",
-            "description": "Operate on the open editor document (same paths as the toolbar and mouse handlers). The `op` value is a serde enum: {\"SetTool\":{\"tool\":\"arrow\"|\"rect\"|\"line\"|\"pen\"|\"text\"|\"callout\"|\"blur\"|\"crop\"|\"resize\"|null}}, {\"SetColor\":{\"rgba\":[1,0,0,1]}}, {\"SetWidth\":{\"width\":4.0}}, {\"Command\":{\"AddElement\":{\"id\":1,\"kind\":{\"Arrow\":{\"a\":[10,10],\"b\":[200,80],\"color\":[1,0,0,1],\"width\":4}}}}} (journal shape), \"Undo\", \"Redo\", {\"Select\":{\"id\":1}}, {\"Page\":{\"direction\":\"prev\"|\"next\"}}.",
+            "description": "Operate on the open editor document (same paths as the toolbar and mouse handlers). The `op` value is a serde enum: {\"SetTool\":{\"tool\":\"arrow\"|\"rect\"|\"line\"|\"pen\"|\"text\"|\"callout\"|\"blur\"|\"crop\"|\"resize\"|null}}, {\"SetColor\":{\"rgba\":[1,0,0,1]}}, {\"SetWidth\":{\"width\":4.0}}, {\"Command\":{\"AddElement\":{\"id\":1,\"kind\":{\"Arrow\":{\"a\":[10,10],\"b\":[200,80],\"color\":[1,0,0,1],\"width\":4}}}}} (journal shape), \"Undo\", \"Redo\", {\"Select\":{\"id\":1}}, {\"Page\":{\"direction\":\"prev\"|\"next\"}}, {\"BeginText\":{\"target\":{\"new\":{\"x\":100,\"y\":80}},\"text\":\"WWWW\"}} (new text; target may also be {\"new_callout\":{\"from\":[x,y],\"to\":[x,y]}} — an arrow drag that opens the phase-two input at its base — or {\"existing\":1}; `text` is optional and lands in the field editor like typed text), {\"FinishText\":{\"commit\":true}} (commit like Enter; false cancels like Esc). Points are frame pixels, origin top-left.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
