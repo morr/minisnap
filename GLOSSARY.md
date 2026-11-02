@@ -27,7 +27,7 @@
 - **arrow-модуль** — параметризованная геометрия Monosnap-стрелки:
   `ArrowParams` с глобальными крутилками (`arrow_params`/`set_arrow_params`),
   силуэт `arrow_outline(_with)` и отрисовка `draw_arrow` в
-  `src/editor/arrow.rs` (план: change arrow-render-module). render — чистый
+  `src/editor/arrow.rs`. render — чистый
   композит; hit_test берёт геометрию стрелки отсюда.
 - **Тюнер стрелки (arrow tuner)** — debug-инструмент под `MINISNAP_ARROW_DEBUG`
   с собственным view-owner'ом: панель крутилок, таблица `ARROW_PARAM_SPECS`,
