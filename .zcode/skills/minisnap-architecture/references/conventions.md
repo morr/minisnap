@@ -14,7 +14,7 @@
 - **ScreenCaptureKit, глобальные пункты** — начало в левом верхнем, Y вниз (`SCDisplay.frame`, `SCWindow.frame`); перевод: `y_sckit = primary_height_pt − y_appkit`;
 - **Пиксели изображения** — начало в левом верхнем углу захваченного дисплея, Y вниз; пункты умножаются на `backingScaleFactor`.
 
-Все переводы — только через `capture::geometry` (`point_to_sckit`, `selection_to_pixel_rect`, `window_frame_to_pixel_rect`, `display_point_to_pixel` — плюс её логик-пиксельный вариант `display_point_to_logical_pixel` для лупы и containment `frame_contains_point`): пиксельная точность кропа зависит от единственного конвертера; инвариант нормативно закреплён в спеке `frozen-capture` («Единственный конвертер координат»). Редактор живёт в пиксельном пространстве кадра (верхний левый угол, Y вниз) — том же, что и снятые изображения; `editor::Point`/`Rect` — serde-заменители `CGPoint`/`CGRect`. В `CGContext` ось Y перевёрнута: `render::draw_elements` флипает CTM (translate + scale), а вложенные изображения разворачивает обратно `draw_image_upright`.
+Все переводы — только через `capture::geometry` (док-комментарий модуля — источник истины по набору функций): пиксельная точность кропа зависит от единственного конвертера; инвариант нормативно закреплён в спеке `frozen-capture` («Единственный конвертер координат»). Редактор живёт в пиксельном пространстве кадра (верхний левый угол, Y вниз) — том же, что и снятые изображения; `editor::Point`/`Rect` — serde-заменители `CGPoint`/`CGRect`. В `CGContext` ось Y перевёрнута: `render::draw_elements` флипает CTM (translate + scale), а вложенные изображения разворачивает обратно `draw_image_upright`.
 
 ## CGImage
 

@@ -9,36 +9,36 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 
 ## Карта модулей
 
-| Модуль | Ответственность | Ключевое |
-|---|---|---|
-| `src/main.rs` | входная точка | `app::run()` |
-| `src/app.rs` | жизненный цикл, трей-меню, идентичность экземпляра, маршрутизация действий, тик-насос событий | `AppController`, `MainJob`, `start_capture`, `capture_ready`, `open_editor`, `instance_identity` |
-| `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос событий, клавишные соответствия | `HotkeyAction`, `HotkeyRegistry`, `pending_actions`, `render_combo`, `scancode_to_key` |
-| `src/hotkey_recorder.rs` | чистая машина рекордера настроек: правила записи комбинации (повторный вход, Esc-отмена, голая клавиша/неизвестный keycode), без AppKit, юнит-тесты | `Recorder`, `FeedOutcome` |
-| `src/permission.rs` | разрешения Screen Recording / Accessibility | `preflight_screen_capture`, `request_screen_capture`, `is_accessibility_trusted` |
-| `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций | `PrefsWindow`, `build`, `ROW_CAPTURE`/`ROW_CAPTURE_EDIT`/`ROW_OPEN_LATEST` |
-| `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция), миграция легаси-дефолтов | `Config`, `load_or_create`, `save_to`, `migrate_legacy_defaults` |
-| `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат | `capture_t0`, `T0Capture`, `T0Surface`, `T0Window`, `shareable_content`, `capture_display_image`, `mod geometry` |
-| `src/overlay.rs` | полноэкранный оверлей заморозки: сессия выделения, вуали соседних дисплеев, цель следует за курсором | `Overlay`, `OverlayOutcome`, `OverlayIvars`, `VeilIvars`, `SurfaceMap`, `present_target` |
-| `src/overlay_hud.rs` | HUD оверлея — весь хром над кадром: dim-полосы, лупа, оси, подпись, красная рамка с пульсом; даунсэмпл кадра и чистая раскладка лупы | `Hud`, `FrameSampler`, `loupe_layout` |
-| `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки | `crop`, `copy_to_pasteboard`, `save_to_file`, `encode_png_atomic`, `latest_shot`, `sorted_shots`, `enforce_retention` |
-| `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` | `play_shutter`, `shutter_sound_paths`, `sound_disabled_by_system`, `PLAYER` |
-| `src/editor_window.rs` | окно редактора и канвас: ввод текста, chrome рамки; мышиные обработчики тонкие — `pixel_point` + пересылка в машину драга | `EditorWindow`, `EditorIvars`, `pixel_point` |
-| `src/editor_toolbar.rs` | тулбар и хром окна редактора: полоса-панель `ToolbarView`, слайдер, поповер палитры, метка файла; interface — `set_state(ToolbarState)` / `ToolbarEvent` | `ToolbarView`, `ToolbarState`, `ToolbarEvent`, `WidthSliderView`, `toolbar_state` |
-| `src/editor_arrow_tuner.rs` | debug-тюнер стрелки (`MINISNAP_ARROW_DEBUG`): панель `ArrowTunerPanel` (наследник `NSBox`) со своими rows и селекторами, спеки `ARROW_PARAM_SPECS`, промпт в буфер; события — `ToolbarEvent::ArrowParam*` через on-event-колбэк | `ArrowTunerPanel`, `arrow_tuner_panel`, `ARROW_PARAM_SPECS`, `arrow_params_prompt` |
-| `src/plates.rs` | общая механика подсвеченных подложек (плит) и hover для тулбара и палитры | `plate`, `disc`, `center_toolbar_layers`, `animate_plate_changes` |
-| `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса по чистому оригиналу | `Element`, `ElementKind`, `Command`, `EditorDoc`, `Point`/`Rect`/`Rgba`, `Tool`, `clamp_crop_rect` |
-| `src/editor/drag.rs` | машина драга: события мыши в пикселях → превью, `Command` для журнала, сигналы (`BeginText`, `DragWindow`); двухфазный коллаут и рамка кропа/ресайза — её состояния; юнит-тесты через interface без окна | `DragMachine`, `Drag`, `FrameSpot`, `PendingCallout`, `TextTarget`, `Signal`, `MIN_DRAG_PX`, `draft_is_real`, `frame_rect`, `callout_anchor` |
-| `src/editor/arrow.rs` | геометрия стрелки-клина: параметризация (`ARROW_PARAMS`), силуэт, отрисовка | `ArrowParams`, `arrow_outline(_with)`, `draw_arrow` |
-| `src/editor/render.rs` | рендер элементов и композита, пикселизация блюра | `render_composite`, `draw_elements`, `pixelate_region` |
-| `src/editor/hit_test.rs` | попадания клика по элементам, границы текстовых блоков | `Hit`, `top_hit`, `text_bounds` |
-| `src/editor/session.rs` | сессии правок в tmp: оригинал + журнал, автосейв после каждой команды | `OpenShot`, `MAX_SESSIONS`, `default_root` |
-| `src/editor/text.rs` | замеры и отрисовка текста (Core Text) | `measure`, `measure_block`, `line_height`, `draw_text` |
+| Модуль | Ответственность |
+|---|---|
+| `src/main.rs` | входная точка — `app::run()` |
+| `src/app.rs` | жизненный цикл, трей-меню, идентичность экземпляра, маршрутизация действий; тик-насос — перекачка `MainJob` из `mpsc` и опрос хоткеев в главный поток |
+| `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос событий, клавишные соответствия сканкодов |
+| `src/hotkey_recorder.rs` | чистая машина рекордера комбинаций для настроек: правила записи (повторный вход, Esc-отмена, голая клавиша/неизвестный keycode), без AppKit, юнит-тесты |
+| `src/permission.rs` | разрешения Screen Recording / Accessibility |
+| `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций |
+| `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция), миграция легаси-дефолтов |
+| `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат (`mod geometry`) |
+| `src/overlay.rs` | полноэкранный оверлей заморозки: сессия выделения, вуали соседних дисплеев, цель следует за курсором |
+| `src/overlay_hud.rs` | HUD оверлея — весь хром над кадром: dim-полосы, лупа (с даунсэмплом кадра), оси, подпись, красная рамка с пульсом |
+| `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки |
+| `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` |
+| `src/editor_window.rs` | окно редактора и канвас: ввод текста, chrome рамки; мышиные обработчики тонкие — `pixel_point` + пересылка в машину драга |
+| `src/editor_toolbar.rs` | тулбар и хром окна редактора: панель-полоса, слайдер, поповер палитры; стык с ядром — `set_state(ToolbarState)` / `ToolbarEvent` |
+| `src/editor_arrow_tuner.rs` | debug-тюнер стрелки за `MINISNAP_ARROW_DEBUG`: панель параметров, спеки, промпт в буфер; события едут через `ToolbarEvent` |
+| `src/plates.rs` | общая механика подсвеченных подложек (плит) и hover для тулбара и палитры |
+| `src/editor/mod.rs` | документ редактора: элементы и журнал команд; undo/redo — реплей префикса журнала по чистому оригиналу |
+| `src/editor/drag.rs` | машина драга: события мыши в пикселях → превью и `Command` в журнал, сигналы наружу (начать текст, тащить окно); двухфазный коллаут и рамка кропа/ресайза; юнит-тесты через interface без окна |
+| `src/editor/arrow.rs` | геометрия стрелки-клина: параметризация, силуэт, отрисовка |
+| `src/editor/render.rs` | рендер элементов и композита, пикселизация блюра |
+| `src/editor/hit_test.rs` | попадания клика по элементам, границы текстовых блоков |
+| `src/editor/session.rs` | сессии правок в tmp: оригинал + журнал, автосейв после каждой команды |
+| `src/editor/text.rs` | замеры и отрисовка текста (Core Text) |
 
 ## Сквозной поток «хоткей → снимок → редактор»
 
 1. Хоткей или пункт меню → `AppController::start_capture(edit)` (`src/app.rs`): preflight разрешения, конвертация позиции мыши `geometry::point_to_sckit`, фоновый `std::thread` → `capture::capture_t0(mouse_sckit)` — снимки всех дисплеев подряд в том же единственном фоновом потоке.
-2. Результат приезжает по `mpsc` как `MainJob::CaptureReady`; метод `tick:` (повторяющийся `NSTimer`, 50 мс) перекачивает jobs в главный поток и там же забирает `HotkeyRegistry::pending_actions()` — глобальные хоткеи опрашиваются, их обработчиков в чужих потоках нет.
+2. Результат приезжает по `mpsc` как `MainJob::CaptureReady`; метод `tick:` (повторяющийся `NSTimer`) перекачивает jobs в главный поток и там же забирает `HotkeyRegistry::pending_actions()` — глобальные хоткеи опрашиваются, их обработчиков в чужих потоках нет.
 3. `capture_ready` → `Overlay::show(t0, callback)`: замороженный кадр дисплея с курсором (цель из `T0Capture.target`); пока режим активен, перевод курсора на другой дисплей переключает цель на его кадр.
 4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `sound::play_shutter` → `output::copy_to_pasteboard` → `output::save_to_file`; при `edit` → `MainJob::OpenEditor { path }` через тот же тик.
 5. `open_editor` → `session::OpenShot::open(path, default_root())` → единственное переиспользуемое `EditorWindow::show_shot(shot)`.
@@ -46,7 +46,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 
 ## Сквозные конвенции
 
-Кратко: весь AppKit в главном потоке, единственный фоновый поток — захват T0 (все дисплеи снимаются им же один за другим, результат по `mpsc` в тик); три системы координат (AppKit-пункты, SCKit-пункты, пиксели изображения) переводятся только через `capture::geometry` (инвариант закреплён в спеке `frozen-capture`); `CGImage` неизменяем, редактор всегда перерисовывает композит с нуля; свои objc2-классы — `MainThreadOnly` с SAFETY-комментариями у каждого `unsafe`; заморозка T0 — один набор снимков всех дисплеев, всё дальнейшее (оверлей, переключение цели, вырезание результата) читает только его. Подробности — [references/conventions.md](references/conventions.md).
+Кратко: весь AppKit в главном потоке, единственный фоновый поток — захват T0; три системы координат переводятся только через `capture::geometry` (инвариант нормативно закреплён в спеке `frozen-capture`); `CGImage` неизменяем, редактор перерисовывает композит с нуля; свои objc2-классы — `MainThreadOnly`; заморозка T0 — один набор снимков всех дисплеев, всё дальнейшее читает только его. Подробности — [references/conventions.md](references/conventions.md).
 
 ## Домены и скилы
 

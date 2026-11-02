@@ -4,10 +4,8 @@
 
 ## Рекордер (запись комбинации в настройках)
 
-Правила записи — чистая машина в `src/hotkey_recorder.rs` (`Recorder`:
-`begin(row) -> bool`, `feed(mods, keycode) -> FeedOutcome`, `recording_row()`;
-`FeedOutcome = Recorded{row, hotkey} | Cancelled | Swallowed | Passthrough`),
-состояние живёт в `AppIvars.recorder: RefCell<Recorder>`. Клей в `app.rs`:
+Правила записи — чистая машина в `src/hotkey_recorder.rs` (`Recorder`,
+`FeedOutcome`), состояние живёт в `AppIvars.recorder: RefCell<Recorder>`. Клей в `app.rs`:
 клик кнопки → `prefsRowClicked:` (tag = `ROW_*`) → `begin` (false — уже
 пишем другую строку или неизвестная строка, молча) → `update_prefs_row_titles`;
 мониторный колбэк `recorded_key_event` распаковывает NSEvent (тип ≠ KeyDown —
