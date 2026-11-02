@@ -26,7 +26,7 @@
 
 ## 2. Зависимость `hit_test → arrow`, чистый render
 
-- [ ] 2.1 В `hit_test.rs` оба места (`Arrow` и хвост коллаута) берут
+- [x] 2.1 В `hit_test.rs` оба места (`Arrow` и хвост коллаута) берут
   `arrow_outline` из `super::arrow`; `callout_tail` остаётся за
   `render::`. В `render.rs` не остаётся ничего про форму стрелки:
   только композит (`callout_tail`, `pixelate_region`, `bitmap_context`,
@@ -34,6 +34,19 @@
   `cargo build`, `cargo clippy`, `cargo test`; live — хит-тест стрелки
   (тяга концов, перенос), тюнер под `MINISNAP_ARROW_DEBUG` меняет форму
   живой стрелки (иначе «ждёт ручной проверки»).
+  *(build/clippy/test зелёные: 128 тестов, hit_test-тесты стрелки едут
+  без правок; `arrow_outline` снят с re-export в render — внешний
+  потребитель один и он мигрировал; в render.rs из семьи стрелки не
+  осталось ни строки, re-export — только то, что ещё живёт через
+  `render::` пути. Live: без `MINISNAP_ARROW_DEBUG` — стрелка целиком
+  (2015 px, bbox 199×164); с `MINISNAP_ARROW_DEBUG` — панель тюнера
+  перекрыла левую часть стрелки (1891 px, bbox 174×153, левый край
+  сдвинут на 25 px downscaled): панель строится и читает
+  `render::arrow_params` через re-export, стрелка рендерится как раньше,
+  логи обоих запусков чистые. Интерактив — тяга концов (Accessibility,
+  синтетика ловила SIGTRAP в раунде 1) и «крутилка меняет живую стрелку»
+  (нужны клики по слайдерам): ждёт ручной проверки; геометрия покрыта
+  юнит-тестами `editor::arrow` и `editor::hit_test`)*
 
 ## 3. Domain-skills pass
 

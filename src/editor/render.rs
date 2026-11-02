@@ -13,9 +13,7 @@ use super::{Element, ElementKind, Rect};
 // The arrow family (params, silhouette, drawing) lives in `arrow`; these
 // re-exports keep the callers' `render::` paths working until they move
 // (the tuner module is next).
-pub(crate) use super::arrow::{
-    arrow_outline, arrow_params, draw_arrow, set_arrow_params, ArrowParams,
-};
+pub(crate) use super::arrow::{arrow_params, draw_arrow, set_arrow_params, ArrowParams};
 
 // The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
 // only wraps the block-based adaptive variant).

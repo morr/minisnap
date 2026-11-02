@@ -38,7 +38,7 @@ pub fn hit_element(element: &Element, point: Point) -> Option<Hit> {
             }
             // The exact drawn silhouette (wedge body + barbed head), with a
             // tolerance band so the needle-thin tail stays clickable.
-            let outline = super::render::arrow_outline(*a, *b, *width);
+            let outline = super::arrow::arrow_outline(*a, *b, *width);
             near_ring(point, &outline, TOLERANCE).then_some(Hit::Body(element.id))
         }
         ElementKind::Line { a, b, width, .. } => {
@@ -76,7 +76,7 @@ pub fn hit_element(element: &Element, point: Point) -> Option<Hit> {
             // The pointer hit-tests exactly like a plain arrow: the real
             // silhouette from the text block's edge to the tip.
             let tail = super::render::callout_tail(*tip, *anchor, text, *size);
-            let outline = super::render::arrow_outline(tail, *tip, *width);
+            let outline = super::arrow::arrow_outline(tail, *tip, *width);
             near_ring(point, &outline, TOLERANCE).then_some(Hit::Body(element.id))
         }
         ElementKind::Blur { rect } => {
