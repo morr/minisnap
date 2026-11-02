@@ -1291,7 +1291,9 @@ impl EditorView {
         let text = field.stringValue().to_string().replace('\u{2028}', "\n");
         let (anchor, size) = match ivars.text_target.get() {
             Some(TextTarget::New { callout: true, .. }) => {
-                let size = DEFAULT_TEXT_SIZE_PX;
+                // The active input's size — the slider's text mode may have
+                // moved it off the default mid-edit.
+                let size = ivars.text_size.get();
                 let (w_pt, h_pt) = self.text_editor_size(&text, size, true);
                 let (sx, sy) = self.view_scale();
                 let Some(anchor) = self.pending_callout_anchor(Size::new(w_pt / sx, h_pt / sy))
@@ -1306,7 +1308,24 @@ impl EditorView {
                     return;
                 };
                 match &el.kind {
-                    ElementKind::Callout { anchor, size, .. } => (*anchor, *size),
+                    ElementKind::Callout { anchor, size, .. } => {
+                        // The authored anchor holds while the grown block
+                        // fits the frame; past an edge the block shifts
+                        // inward.
+                        let (w, h) = text::measure_block(&text, *size)
+                            .map(|m| (m.width, m.height))
+                            .unwrap_or((*size * 4.0, *size * 1.25));
+                        let (iw, ih) = self.image_size();
+                        (
+                            clamp_block(
+                                *anchor,
+                                w,
+                                h,
+                                Rect::new(0.0, 0.0, iw as f64, ih as f64),
+                            ),
+                            *size,
+                        )
+                    }
                     _ => return,
                 }
             }
