@@ -42,6 +42,16 @@ on demand.
 
 ## Working with a running app
 
+Rebuilding for a live run: the runnable app is the `.app` bundle, and a
+plain `cargo build --release` does not produce it — it only refreshes the
+bare binary `target/release/minisnap`, while `target/release/minisnap.app`
+keeps whichever build was bundled last. Launching the bundle after a plain
+cargo build silently runs a stale app (a live run on 2026-11-02 spent the
+whole session testing hours-old code because of exactly this). Rebuild the
+bundle with `scripts/build_app.sh release` (debug: `scripts/build_app.sh
+debug`) — it runs cargo, repacks the bundle and re-signs it with the stable
+identity, so the Screen Recording grant survives the rebuild.
+
 When a session drives a running minisnap — relaunching it after a rebuild,
 checking the editor window or overlay, any live interaction — hide the
 utility's windows immediately after each such action, before starting the
