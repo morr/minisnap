@@ -33,6 +33,7 @@ use crate::editor::{
     name_density, render, Command, Element, ElementKind, OpenShot, Point, Rect, Rgba, Size,
 };
 use crate::editor_arrow_tuner::{arrow_tuner_panel, ARROW_PARAM_SPECS};
+use crate::agent_proto::EditorState;
 use crate::editor_toolbar::{
     stroke_width_of, COLOR_PRESETS, DEFAULT_STROKE_WIDTH, ToolbarEvent, ToolbarState,
     ToolbarView, Tool, TOOLBAR_HEIGHT,
@@ -269,8 +270,9 @@ define_class!(
                     self.copy_composite()
                 }
                 // ⌘Z undoes, ⌘⇧Z redoes, through the journal.
-                6 if event.modifierFlags().contains(NSEventModifierFlags::Command) => self
-                    .undo_redo(event.modifierFlags().contains(NSEventModifierFlags::Shift)),
+                6 if event.modifierFlags().contains(NSEventModifierFlags::Command) => {
+                    self.undo_redo(event.modifierFlags().contains(NSEventModifierFlags::Shift));
+                }
                 // ←/→ leaf through the saved shots.
                 123 => self.page(-1),
                 124 => self.page(1),
@@ -849,8 +851,9 @@ impl EditorView {
     }
 
     /// Undo (⌘Z) or redo (⌘⇧Z) one journal command; a base-size change
-    /// (crop/resize) refits the window.
-    fn undo_redo(&self, redo: bool) {
+    /// (crop/resize) refits the window. Reports whether anything changed
+    /// (the agent result rides on it).
+    fn undo_redo(&self, redo: bool) -> bool {
         let ivars = self.ivars();
         // An in-flight text edit commits first, then participates in undo.
         self.commit_text_editor();
@@ -866,12 +869,12 @@ impl EditorView {
             Some(Ok(changed)) => changed,
             Some(Err(err)) => {
                 crate::log!("editor: undo/redo failed: {err}");
-                return;
+                return false;
             }
-            None => return,
+            None => return false,
         };
         if !changed {
-            return;
+            return false;
         }
         // A selection may now point at an element that is gone (or come
         // back after a redo of a delete — the id survives the replay).
@@ -891,6 +894,7 @@ impl EditorView {
         } else {
             self.redraw();
         }
+        true
     }
 
     /// Schedule a full redraw of the canvas.
@@ -950,6 +954,132 @@ impl EditorView {
             ivars.stroke_width.set(state.slider_value);
         }
         state
+    }
+
+    /// Snapshot for the agent server: the document and interaction state
+    /// in journal terms. The reduction is the same `toolbar_state` the
+    /// toolbar lives off (its stroke-width pinning is the idempotent
+    /// redraw behavior, not a mutation a read invents). No shot — the
+    /// shell state with an empty document.
+    fn agent_state(&self) -> EditorState {
+        let ivars = self.ivars();
+        let (image_width, image_height) = self.image_size();
+        let text_input_active = ivars.text_editor.borrow().is_some();
+        let shot = ivars.shot.borrow();
+        let state = self.toolbar_state();
+        EditorState {
+            shot_path: shot
+                .as_ref()
+                .map(|shot| shot.shot_path.display().to_string())
+                .unwrap_or_default(),
+            file_label: state.file_label,
+            tool: ivars
+                .tool
+                .get()
+                .map(crate::agent_proto::tool_name)
+                .map(str::to_string),
+            color: ivars.color.get(),
+            stroke_width: ivars.stroke_width.get(),
+            selection: ivars.selection.get(),
+            text_input_active,
+            text_size: text_input_active.then_some(ivars.text_size.get()),
+            can_undo: state.can_undo,
+            can_redo: state.can_redo,
+            can_page_prev: state.can_page_prev,
+            can_page_next: state.can_page_next,
+            image_width: image_width as u32,
+            image_height: image_height as u32,
+            elements: shot
+                .as_ref()
+                .map(|shot| shot.doc.elements().to_vec())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Agent: set the tool exactly (no toolbar toggle): `None` returns to
+    /// viewing mode; crop/resize bring up their frame, anything else tears
+    /// it down — the same follow-up a toolbar click runs.
+    fn agent_set_tool(&self, tool: Option<Tool>) {
+        self.ivars().tool.set(tool);
+        match tool {
+            Some(Tool::Crop) => self.enter_frame_edit(false),
+            Some(Tool::Resize) => self.enter_frame_edit(true),
+            _ => {
+                self.exit_frame_edit();
+                self.redraw();
+            }
+        }
+    }
+
+    /// Agent: apply one journal command and sync the window the way the
+    /// mouse paths do — commit a pending text edit first, refit after a
+    /// base-size change, drop a selection that no longer exists.
+    fn agent_command(&self, command: Command) -> Result<(), String> {
+        let ivars = self.ivars();
+        self.commit_text_editor();
+        let size_before = self.image_size();
+        let result = ivars
+            .shot
+            .borrow_mut()
+            .as_mut()
+            .map(|shot| shot.apply(command));
+        match result {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(err),
+            None => return Err("editor: no document open".into()),
+        }
+        let selection = ivars.selection.get();
+        let selection_alive = selection.is_some_and(|id| {
+            ivars
+                .shot
+                .borrow()
+                .as_ref()
+                .is_some_and(|shot| shot.doc.element(id).is_some())
+        });
+        if !selection_alive {
+            ivars.selection.set(None);
+        }
+        if self.image_size() != size_before {
+            self.refit_window();
+        } else {
+            self.redraw();
+        }
+        Ok(())
+    }
+
+    /// Agent: undo/redo; `false` when there was nothing to undo/redo.
+    fn agent_undo(&self) -> Result<bool, String> {
+        if self.ivars().shot.borrow().is_none() {
+            return Err("editor: no document open".into());
+        }
+        Ok(self.undo_redo(false))
+    }
+
+    fn agent_redo(&self) -> Result<bool, String> {
+        if self.ivars().shot.borrow().is_none() {
+            return Err("editor: no document open".into());
+        }
+        Ok(self.undo_redo(true))
+    }
+
+    /// Agent: select an element (or drop the selection) and redraw — the
+    /// canvas-click equivalent. Selecting a nonexistent id is an error,
+    /// not a silent no-op.
+    fn agent_select(&self, id: Option<u64>) -> Result<(), String> {
+        let ivars = self.ivars();
+        if let Some(id) = id {
+            let exists = ivars
+                .shot
+                .borrow()
+                .as_ref()
+                .is_some_and(|shot| shot.doc.element(id).is_some());
+            if !exists {
+                return Err(format!("editor: no element with id {id}"));
+            }
+        }
+        ivars.selection.set(id);
+        self.redraw();
+        Ok(())
     }
 
     /// Scale factors from image pixels to view points.
@@ -1929,6 +2059,58 @@ impl EditorWindow {
     pub fn show_shot(&self, shot: OpenShot) {
         self.view.display_shot(shot);
         self.window.makeKeyAndOrderFront(None);
+    }
+
+    /// Snapshot for the agent server: the document and interaction state
+    /// in journal terms (see `EditorView::agent_state`).
+    pub fn agent_state(&self) -> EditorState {
+        self.view.agent_state()
+    }
+
+    /// Agent: set the tool exactly (no toolbar toggle rule); `None` is
+    /// viewing mode. See `EditorView::agent_set_tool`.
+    pub fn agent_set_tool(&self, tool: Option<Tool>) {
+        self.view.agent_set_tool(tool);
+    }
+
+    /// Agent: apply one journal command through the mouse paths' sync.
+    pub fn agent_command(&self, command: Command) -> Result<(), String> {
+        self.view.agent_command(command)
+    }
+
+    /// Agent: undo (`false` when nothing to undo).
+    pub fn agent_undo(&self) -> Result<bool, String> {
+        self.view.agent_undo()
+    }
+
+    /// Agent: redo (`false` when nothing to redo).
+    pub fn agent_redo(&self) -> Result<bool, String> {
+        self.view.agent_redo()
+    }
+
+    /// Agent: select an element or drop the selection.
+    pub fn agent_select(&self, id: Option<u64>) -> Result<(), String> {
+        self.view.agent_select(id)
+    }
+
+    /// Agent: the palette-preset path — color for new elements, a
+    /// recolor of the selected element.
+    pub fn agent_set_color(&self, color: Rgba) {
+        self.view
+            .handle_toolbar_event(ToolbarEvent::PresetSelected(color));
+    }
+
+    /// Agent: the slider path — width for new elements, a live restyle of
+    /// the selected stroke-bearing element; while a text input is open the
+    /// value rides the text size, exactly like the slider.
+    pub fn agent_set_width(&self, width: f64) {
+        self.view
+            .handle_toolbar_event(ToolbarEvent::SliderChanged(width));
+    }
+
+    /// Agent: leaf to the previous (-1) or next (1) shot of the folder.
+    pub fn agent_page(&self, delta: isize) {
+        self.view.page(delta);
     }
 }
 

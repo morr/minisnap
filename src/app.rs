@@ -472,13 +472,220 @@ impl AppController {
         &self,
         request: crate::agent_server::AgentRequest,
     ) -> Result<crate::agent_proto::AgentResponse, String> {
+        use crate::agent_proto::AgentResponse;
         use crate::agent_server::AgentRequest;
         match request {
-            AgentRequest::State => Err("state: not wired yet".into()),
-            AgentRequest::Action(_) => Err("action: not wired yet".into()),
-            AgentRequest::Editor(_) => Err("editor: not wired yet".into()),
+            AgentRequest::State => Ok(AgentResponse::State(self.agent_state())),
+            AgentRequest::Action(action) => {
+                Ok(AgentResponse::Result(self.agent_action(action)))
+            }
+            AgentRequest::Editor(op) => Ok(AgentResponse::Result(self.agent_editor(op))),
             AgentRequest::Screenshot { .. } => Err("screenshot: not wired yet".into()),
             AgentRequest::Log { .. } => Err("log: not wired yet".into()),
+        }
+    }
+
+    /// Execute an app-level agent action; the result says what happened
+    /// ("initiated" for the async capture, "rejected" for a blocked one),
+    /// never just "accepted".
+    fn agent_action(
+        &self,
+        action: crate::agent_proto::AgentAction,
+    ) -> crate::agent_proto::ActionResult {
+        use crate::agent_proto::{AgentAction, ActionResult};
+        match action {
+            AgentAction::Capture { edit } => self.agent_capture(edit),
+            AgentAction::OpenLatest => {
+                let dir = self.ivars().config.borrow().save_dir.clone();
+                match crate::output::latest_shot(&dir) {
+                    Some(path) => {
+                        self.open_editor(path);
+                        ActionResult::done("opened the latest shot in the editor")
+                    }
+                    None => ActionResult::noop("no shots in the save folder yet"),
+                }
+            }
+            AgentAction::OpenEditor { path } => {
+                let path = std::path::PathBuf::from(path);
+                if !path.is_file() {
+                    ActionResult::rejected(format!("no such file: {}", path.display()))
+                } else {
+                    self.open_editor(path);
+                    ActionResult::done("editor opened (or focused) on the shot")
+                }
+            }
+            AgentAction::CloseEditor => {
+                let editor = self.ivars().editor.borrow();
+                match editor.as_ref() {
+                    Some(editor) => {
+                        editor.window.performClose(None);
+                        ActionResult::done("editor window closed (the window object stays for the next shot)")
+                    }
+                    None => ActionResult::noop("no editor window open"),
+                }
+            }
+            AgentAction::OverlaySelect { x, y, w, h } => {
+                match self.ivars().overlay.borrow().agent_select(x, y, w, h) {
+                    Ok(()) => ActionResult::done(
+                        "overlay finished with the selection; the output stage (crop, shutter, clipboard, file) already ran",
+                    ),
+                    Err(e) => ActionResult::rejected(e),
+                }
+            }
+            AgentAction::OverlayCancel => {
+                if self.ivars().overlay.borrow().agent_cancel() {
+                    ActionResult::done("overlay cancelled")
+                } else {
+                    ActionResult::noop("no overlay active")
+                }
+            }
+            AgentAction::PrefsOpen => {
+                self.open_prefs_window();
+                ActionResult::done("preferences opened (or focused)")
+            }
+            AgentAction::PrefsClose => {
+                let prefs = self.ivars().prefs.borrow();
+                match prefs.as_ref() {
+                    Some(prefs) => {
+                        prefs.window.orderOut(None);
+                        ActionResult::done("preferences window hidden")
+                    }
+                    None => ActionResult::noop("no preferences window open"),
+                }
+            }
+            AgentAction::Quit => {
+                crate::agent_server::deregister(std::process::id());
+                let mtm = MainThreadMarker::from(self);
+                NSApplication::sharedApplication(mtm).terminate(None);
+                ActionResult::done("terminating")
+            }
+        }
+    }
+
+    /// Agent capture: same path as the tray item, except a missing Screen
+    /// Recording permission is reported in the result instead of popping
+    /// the explanatory modal on the user's screen.
+    fn agent_capture(&self, edit: bool) -> crate::agent_proto::ActionResult {
+        use crate::agent_proto::ActionResult;
+        if !crate::permission::preflight_screen_capture() {
+            return ActionResult::rejected(
+                "screen recording permission is not granted; grant it in System Settings first",
+            );
+        }
+        if self.ivars().overlay.borrow().is_active() {
+            return ActionResult::rejected("the capture overlay is already active");
+        }
+        self.start_capture(edit);
+        ActionResult::initiated(
+            "capture started; the overlay opens when the frozen frame is ready (poll /state)",
+        )
+    }
+
+    /// Execute an editor agent operation on the open document; an absent
+    /// editor is an error, never a silent no-op.
+    fn agent_editor(
+        &self,
+        op: crate::agent_proto::AgentEditorOp,
+    ) -> crate::agent_proto::ActionResult {
+        use crate::agent_proto::{ActionResult, AgentEditorOp};
+        let editor = self.ivars().editor.borrow();
+        let Some(editor) = editor.as_ref() else {
+            return ActionResult::rejected("the editor window is not open");
+        };
+        match op {
+            AgentEditorOp::SetTool { tool } => {
+                let tool = match tool.as_deref().map(crate::agent_proto::parse_tool) {
+                    Some(None) => return ActionResult::rejected("unknown tool name"),
+                    other => other.flatten(),
+                };
+                editor.agent_set_tool(tool);
+                ActionResult::done(match tool {
+                    Some(_) => "tool set",
+                    None => "tool deselected (viewing mode)",
+                })
+            }
+            AgentEditorOp::SetColor { rgba } => {
+                editor.agent_set_color(rgba);
+                ActionResult::done("color set (a selected element was recolored)")
+            }
+            AgentEditorOp::SetWidth { width } => {
+                editor.agent_set_width(width);
+                ActionResult::done("width set (a selected stroke-bearing element was restyled)")
+            }
+            AgentEditorOp::Command { command } => match editor.agent_command(command) {
+                Ok(()) => ActionResult::done("command applied; the shot file and session journal saved"),
+                Err(e) => ActionResult::rejected(e),
+            },
+            AgentEditorOp::Undo => match editor.agent_undo() {
+                Ok(true) => ActionResult::done("undone"),
+                Ok(false) => ActionResult::noop("nothing to undo"),
+                Err(e) => ActionResult::rejected(e),
+            },
+            AgentEditorOp::Redo => match editor.agent_redo() {
+                Ok(true) => ActionResult::done("redone"),
+                Ok(false) => ActionResult::noop("nothing to redo"),
+                Err(e) => ActionResult::rejected(e),
+            },
+            AgentEditorOp::Select { id } => match editor.agent_select(id) {
+                Ok(()) => ActionResult::done(match id {
+                    Some(_) => "element selected",
+                    None => "selection dropped",
+                }),
+                Err(e) => ActionResult::rejected(e),
+            },
+            AgentEditorOp::Page { direction } => {
+                let delta = match direction.as_str() {
+                    "prev" => -1,
+                    "next" => 1,
+                    _ => {
+                        return ActionResult::rejected(format!(
+                            "unknown direction '{direction}' (prev|next)"
+                        ))
+                    }
+                };
+                editor.agent_page(delta);
+                ActionResult::done("paged to the neighbor shot (the edges stop)")
+            }
+        }
+    }
+
+    /// Assemble the full application state: what is open, what the
+    /// document holds, what the config says. Pure read over the ivars.
+    fn agent_state(&self) -> crate::agent_proto::AppState {
+        use crate::agent_proto::{AppState, ConfigSummary};
+
+        let editor = self
+            .ivars()
+            .editor
+            .borrow()
+            .as_ref()
+            .map(|editor| editor.agent_state());
+        let overlay_active = self.ivars().overlay.borrow().is_active();
+        let prefs_open = self.ivars().prefs.borrow().is_some();
+        let mut windows = Vec::new();
+        if let Some(editor) = self.ivars().editor.borrow().as_ref() {
+            windows.push(agent_window_info("editor", &editor.window));
+        }
+        if let Some(prefs) = self.ivars().prefs.borrow().as_ref() {
+            windows.push(agent_window_info("preferences", &prefs.window));
+        }
+        let config = self.ivars().config.borrow();
+        let config = ConfigSummary {
+            capture_hotkey: hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
+            capture_edit_hotkey: hotkeys::render_combo(
+                config.capture_edit_hotkey.mods,
+                config.capture_edit_hotkey.key,
+            ),
+            open_hotkey: hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
+            save_dir: config.save_dir.display().to_string(),
+            retention: config.retention,
+        };
+        AppState {
+            editor,
+            overlay_active,
+            prefs_open,
+            windows,
+            config,
         }
     }
 
@@ -820,6 +1027,28 @@ impl AppController {
             }
             OverlayOutcome::Cancelled => {}
         }));
+    }
+}
+
+/// One window for the agent state: the Cocoa frame (origin bottom-left)
+/// converted to the top-left origin the agent protocol speaks — the same
+/// space screenshots and canvas coordinates live in.
+fn agent_window_info(
+    title: &str,
+    window: &objc2_app_kit::NSWindow,
+) -> crate::agent_proto::WindowInfo {
+    let frame = window.frame();
+    let screen_height = window
+        .screen()
+        .map(|screen| screen.frame().size.height)
+        .unwrap_or(frame.origin.y + frame.size.height);
+    crate::agent_proto::WindowInfo {
+        title: title.to_string(),
+        x: frame.origin.x,
+        y: screen_height - frame.origin.y - frame.size.height,
+        width: frame.size.width,
+        height: frame.size.height,
+        visible: window.isVisible(),
     }
 }
 

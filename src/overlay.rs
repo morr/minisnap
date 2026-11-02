@@ -13,7 +13,7 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSScreen, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSNotification, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
@@ -1003,9 +1003,33 @@ impl OverlayView {
         self.finish(FinishRequest::Selected { pixel_rect });
     }
 
-    /// Complete the mode: hide everything and hand the outcome to the owner.
-    fn finish(&self, request: FinishRequest) {
+    /// Agent: finish as a selection of the rect in captured-frame pixels
+    /// (top-left origin). Clamps into the frame; an empty result is an
+    /// error rather than a silent no-op.
+    fn agent_select(&self, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
         let ivars = self.ivars();
+        if !ivars.active.get() || ivars.finishing.get() {
+            return Err("overlay: the capture mode is not active".into());
+        }
+        let (image_w, image_h) = ivars.image_size_px.get();
+        let rect = crate::capture::geometry::intersect(
+            CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)),
+            CGRect::new(
+                CGPoint::ZERO,
+                CGSize::new(image_w as f64, image_h as f64),
+            ),
+        );
+        if rect == CGRect::ZERO {
+            return Err(format!(
+                "overlay: empty selection rect ({x},{y},{w},{h}) in a {image_w}x{image_h} frame"
+            ));
+        }
+        self.finish(FinishRequest::Selected { pixel_rect: rect });
+        Ok(())
+    }
+
+    /// Complete the mode: hide everything and hand the outcome to the owner.
+    fn finish(&self, request: FinishRequest) {        let ivars = self.ivars();
         if !ivars.active.get() || ivars.finishing.get() {
             return;
         }
@@ -1108,6 +1132,23 @@ impl Overlay {
     /// Cancel the active mode without a result (e.g. display config change).
     pub fn cancel(&self) {
         self.view.finish(FinishRequest::Cancelled);
+    }
+
+    /// Agent: finish the active mode as a selection of the given rect in
+    /// the captured frame's pixel space (top-left origin) — the same
+    /// outcome path as a user drag. An error names the reason: the mode
+    /// is not active, or the rect is empty after clamping into the frame.
+    pub fn agent_select(&self, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+        self.view.agent_select(x, y, w, h)
+    }
+
+    /// Agent: cancel the active mode; `false` when nothing was active.
+    pub fn agent_cancel(&self) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        self.view.finish(FinishRequest::Cancelled);
+        true
     }
 
     /// Delivers a resolved click result from the background resolver, if
