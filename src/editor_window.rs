@@ -26,7 +26,7 @@ use objc2_foundation::{NSDate, NSString, NSNotification};
 
 use crate::editor::arrow;
 use crate::editor::drag::{
-    DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX,
+    clamp_block, DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX,
 };
 use crate::editor::text;
 use crate::editor::{
@@ -156,6 +156,10 @@ struct EditorIvars {
     text_editor: RefCell<Option<Retained<NSTextField>>>,
     /// What the open field editor will commit.
     text_target: Cell<Option<TextTarget>>,
+    /// Font size, in image pixels, of the text the open field editor is
+    /// entering: the slider's text mode rides on it, the commit stores it
+    /// in the new element.
+    text_size: Cell<f64>,
     /// The frame mode's size label and OK button subviews.
     frame_label: RefCell<Option<Retained<NSTextField>>>,
     frame_ok: RefCell<Option<Retained<NSButton>>>,
@@ -202,6 +206,7 @@ define_class!(
                 machine: RefCell::new(DragMachine::new()),
                 text_editor: RefCell::new(None),
                 text_target: Cell::new(None),
+                text_size: Cell::new(DEFAULT_TEXT_SIZE_PX),
                 frame_label: RefCell::new(None),
                 frame_ok: RefCell::new(None),
                 save_dir: RefCell::new(std::path::PathBuf::new()),
@@ -1043,6 +1048,9 @@ impl EditorView {
                 }
             }
         };
+        // The active input's size rides the ivar: the slider's text mode
+        // changes it mid-edit, the commit of a new element stores it.
+        ivars.text_size.set(size_px);
         let font_pt = (size_px * self.view_scale().1).max(9.0);
         let font = NSFont::fontWithName_size(&NSString::from_str(text::FONT_NAME), font_pt);
         let [r, g, b, a] = color;
@@ -1118,13 +1126,21 @@ impl EditorView {
                     id,
                 )
             } else {
+                // The slider may have grown the input past a frame edge
+                // mid-edit; the element lands where the clamped block sits.
+                let size = ivars.text_size.get();
+                let (w, h) = text::measure_block(&text, size)
+                    .map(|m| (m.width, m.height))
+                    .unwrap_or((size * 4.0, size * 1.25));
+                let origin =
+                    clamp_block(origin, w, h, Rect::new(0.0, 0.0, iw as f64, ih as f64));
                 Some(Command::AddElement(Element {
                     id,
                     kind: ElementKind::Text {
                         origin,
                         text,
                         color,
-                        size: DEFAULT_TEXT_SIZE_PX,
+                        size,
                     },
                 }))
             };
