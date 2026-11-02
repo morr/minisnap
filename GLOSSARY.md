@@ -53,8 +53,8 @@
   оверлея, а не на каждое движение курсора.
 - **HUD оверлея** — весь хром над слоем кадра: dim-полосы, лупа, оси, подпись,
   красная рамка с пульсом и FrameSampler за одним interface'ом
-  (`struct Hud`: attach/present/update/dim/hide/stop_border_pulse, план:
-  change overlay-hud-module). Размещение лупы и подписи — чистая функция с
+  (`struct Hud`: attach/present/update/dim/hide/stop_border_pulse,
+  `src/overlay_hud.rs`). Размещение лупы и подписи — чистая функция с
   юнит-тестами; новые HUD-слои не требуют правок present_target.
 
 ## Оболочка
