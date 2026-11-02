@@ -217,9 +217,11 @@ pub enum ToolbarEvent {
     PagePrevious,
     /// The ► leafing button: the next shot of the folder.
     PageNext,
-    /// The stroke-width slider moved to `value` (every drag step; the
-    /// window collapses a drag into one undo step).
-    WidthChanged(f64),
+    /// The slider moved to `value` on its active range (every drag step;
+    /// the window collapses a drag into one undo step). While a text input
+    /// is open the active range is the text sizes and the value is the
+    /// input's font size.
+    SliderChanged(f64),
     /// A palette preset swatch was clicked; the popover closed itself.
     PresetSelected(Rgba),
     /// An arrow-tuner slider moved: `index` into the tuner's
@@ -234,6 +236,9 @@ pub enum ToolbarEvent {
 /// Ivars of the custom stroke-width slider.
 pub(crate) struct WidthSliderIvars {
     value: Cell<f64>,
+    /// The value range the track maps onto: stroke widths by default, the
+    /// text sizes while a text input is open (`set_range`).
+    range: Cell<(f64, f64)>,
     target: RefCell<Option<Retained<AnyObject>>>,
     action: Cell<Option<Sel>>,
 }
@@ -265,6 +270,7 @@ define_class!(
         ) -> Retained<Self> {
             let this = this.set_ivars(WidthSliderIvars {
                 value: Cell::new(DEFAULT_STROKE_WIDTH),
+                range: Cell::new((STROKE_MIN, STROKE_MAX)),
                 target: RefCell::new(None),
                 action: Cell::new(None),
             });
@@ -292,7 +298,8 @@ define_class!(
 
         #[unsafe(method(setDoubleValue:))]
         fn __set_double_value(&self, value: f64) {
-            self.set_value(value.clamp(STROKE_MIN, STROKE_MAX));
+            let (min, max) = self.ivars().range.get();
+            self.set_value(value.clamp(min, max));
         }
 
         #[unsafe(method(setTarget:))]
@@ -388,8 +395,8 @@ impl WidthSliderView {
 
     /// Center X of the knob for the current value, in view points.
     fn knob_x(&self, width: f64) -> f64 {
-        let frac = ((self.ivars().value.get() - STROKE_MIN) / (STROKE_MAX - STROKE_MIN))
-            .clamp(0.0, 1.0);
+        let (min, max) = self.ivars().range.get();
+        let frac = ((self.ivars().value.get() - min) / (max - min)).clamp(0.0, 1.0);
         SLIDER_KNOB_RADIUS + (width - 2.0 * SLIDER_KNOB_RADIUS) * frac
     }
 
@@ -415,7 +422,17 @@ impl WidthSliderView {
         let frac = ((local.x - SLIDER_KNOB_RADIUS)
             / (bounds.size.width - 2.0 * SLIDER_KNOB_RADIUS))
         .clamp(0.0, 1.0);
-        self.set_value(STROKE_MIN + (STROKE_MAX - STROKE_MIN) * frac);
+        let (min, max) = self.ivars().range.get();
+        self.set_value(min + (max - min) * frac);
+    }
+
+    /// Swap the value range the track maps onto (stroke widths ↔ text
+    /// sizes). Redraws even when the value stays: the same value sits at a
+    /// different fraction of a different range.
+    fn set_range(&self, range: (f64, f64)) {
+        if self.ivars().range.replace(range) != range {
+            self.setNeedsDisplayInRect(self.bounds());
+        }
     }
 
     /// Fire the target/action pair like a control would.
@@ -711,13 +728,13 @@ define_class!(
             self.emit(ToolbarEvent::PresetSelected(color));
         }
 
-        #[unsafe(method(widthSliderChanged:))]
-        fn __width_slider_changed(&self, sender: Option<&AnyObject>) {
+        #[unsafe(method(sliderChanged:))]
+        fn __slider_changed(&self, sender: Option<&AnyObject>) {
             let Some(sender) = sender else { return };
             // SAFETY: the sender is the WidthSliderView; `doubleValue` is
             // its NSControl accessor.
             let value: f64 = unsafe { msg_send![sender, doubleValue] };
-            self.emit(ToolbarEvent::WidthChanged(value));
+            self.emit(ToolbarEvent::SliderChanged(value));
         }
     }
 
@@ -897,7 +914,7 @@ impl ToolbarView {
         // action reads `doubleValue` off the sender.
         unsafe {
             slider.set_target(Some(&view));
-            slider.set_action(Some(sel!(widthSliderChanged:)));
+            slider.set_action(Some(sel!(sliderChanged:)));
         }
         *view.ivars().width_slider.borrow_mut() = Some(slider.clone());
         toolbar.addArrangedSubview(&color_button);
@@ -983,8 +1000,10 @@ impl ToolbarView {
         self.update_tool_highlight(state.tool);
         self.show_color(state.color);
         // The slider skips an equal value, so a push never re-enters the
-        // width handler as a phantom drag.
+        // slider handler as a phantom drag; the range rides along, so a
+        // mode switch (width ↔ text size) lands in the same push.
         if let Some(slider) = self.ivars().width_slider.borrow().as_ref() {
+            slider.set_range(state.slider_range);
             slider.set_double_value(state.slider_value);
         }
         self.align_traffic_lights();

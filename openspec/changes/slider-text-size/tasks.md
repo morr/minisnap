@@ -13,7 +13,7 @@
 ## 3. Тулбар: двуличный слайдер
 
 - [x] 3.1 В `editor_toolbar.rs`: константы `TEXT_SIZE_MIN`/`TEXT_SIZE_MAX`; `ToolbarState.slider_value` + `ToolbarState.slider_range` вместо `stroke_width`; параметр `text_input: Option<f64>` в редукции `toolbar_state`; обновить юнит-тесты редукции: текстовый режим даёт размер и текстовый диапазон, толщинный режим прежний, зажим выделения вне текстового режима. Verify: `cargo test editor_toolbar` — тесты редукции зелёные.
-- [ ] 3.2 `WidthSliderView`: диапазон в ivars, `drag_to`/`knob_x`/`setDoubleValue:` считают через активный диапазон; `ToolbarView::set_state` протаскивает диапазон; `ToolbarEvent::WidthChanged` → `SliderChanged` вместе с местом emit. Verify: `cargo build` и `cargo test` зелёные.
+- [x] 3.2 `WidthSliderView`: диапазон в ivars, `drag_to`/`knob_x`/`setDoubleValue:` считают через активный диапазон; `ToolbarView::set_state` протаскивает диапазон; `ToolbarEvent::WidthChanged` → `SliderChanged` вместе с местом emit. Verify: `cargo build` и `cargo test` зелёные.
 
 ## 4. Окно: текстовая ветка слайдера
 

@@ -1524,7 +1524,7 @@ impl EditorView {
             }
             ToolbarEvent::PagePrevious => self.page(-1),
             ToolbarEvent::PageNext => self.page(1),
-            ToolbarEvent::WidthChanged(value) => {
+            ToolbarEvent::SliderChanged(value) => {
                 self.ivars().stroke_width.set(value);
                 // With a stroke-bearing element selected, the slider
                 // restyles that element live (one undo step per drag, not
