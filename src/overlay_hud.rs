@@ -344,7 +344,8 @@ impl Hud {
 
     /// Hang the HUD into the overlay's layer tree (once, on the first
     /// show). Children keep the chrome's z-order: dimming strips, axis
-    /// guides, loupe, readout, border on top.
+    /// guides, loupe (with its grid, crosshair and frame rings), readout,
+    /// border on top.
     pub(crate) fn attach(&self, root: &CALayer, scale: f64) {
         for strip in self.dim_strips.borrow().iter() {
             self.container.addSublayer(strip);
@@ -352,9 +353,13 @@ impl Hud {
         for axis in [&self.axis_v_light, &self.axis_h_light, &self.axis_v_dark, &self.axis_h_dark] {
             self.container.addSublayer(axis);
         }
-        // The loupe rides above the axis lines, its grid and crosshair on
-        // top of it (as its own sublayers).
+        // The loupe rides above the axis lines; its chrome hangs into it as
+        // sublayers, bottom-up: the grid, the crosshair over it, then the
+        // frame rings with the white outline under the black core.
         self.container.addSublayer(&self.loupe);
+        for chrome in [&self.loupe_grid, &self.loupe_cross, &self.loupe_frame_light, &self.loupe_frame_dark] {
+            self.loupe.addSublayer(chrome);
+        }
         self.container.addSublayer(&self.size_label);
         self.container.addSublayer(&self.border);
         root.addSublayer(&self.container);
