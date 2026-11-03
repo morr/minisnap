@@ -8,8 +8,8 @@
 
 ## 2. Окно: невидимый прокси ввода
 
-- [ ] 2.1 `src/editor_window.rs`: поле становится прокси — прозрачный цвет текста, видимая каретка (окраска field editor'а `insertionPointColor`; если не красится независимо — каретка канвы по замеру префикса до insertion point), рамка поля = прямоугольник черновика. `controlTextDidChange` → `machine.update_text` + redraw; коммит и слайдер кегля идут через машину (`update_text_size`). Проверка: `cargo test -p minisnap` + ручная сборка `scripts/build_app.sh debug`.
-- [ ] 2.2 Разобрать геометрические контракты видимого поля: удалить `TEXT_EDITOR_WIDTH_PT` и порог `.max(9.0)`, `text_editor_size`/`text_editor_frame` сводятся к рамке черновика (набивка и `0.19·font_pt` — только хром каретки), `commit_text_editor` и `refit_callout_editor` теряют сборку геометрии (остаётся жизненный цикл поля). Проверка: `cargo test -p minisnap` без новых предупреждений.
+- [x] 2.1 `src/editor_window.rs`: поле становится прокси — прозрачный цвет текста, видимая каретка (окраска field editor'а `insertionPointColor`; если не красится независимо — каретка канвы по замеру префикса до insertion point), рамка поля = прямоугольник черновика. `controlTextDidChange` → `machine.update_text` + redraw; коммит и слайдер кегля идут через машину (`update_text_size`). Проверка: `cargo test -p minisnap` + ручная сборка `scripts/build_app.sh debug`.
+- [x] 2.2 Разобрать геометрические контракты видимого поля: удалить `TEXT_EDITOR_WIDTH_PT` и порог `.max(9.0)`, `text_editor_size`/`text_editor_frame` сводятся к рамке черновика (набивка и `0.19·font_pt` — только хром каретки), `commit_text_editor` и `refit_callout_editor` теряют сборку геометрии (остаётся жизненный цикл поля). Проверка: `cargo test -p minisnap` без новых предупреждений.
 
 ## 3. Правка существующего: якорь по зажиму
 

@@ -27,7 +27,8 @@ use objc2_foundation::{NSDate, NSDictionary, NSString, NSNotification};
 
 use crate::editor::arrow;
 use crate::editor::drag::{
-    clamp_block, DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget, DEFAULT_TEXT_SIZE_PX,
+    block_size, DragMachine, DownCtx, FrameSpot, Select, Signal, TextTarget,
+    DEFAULT_TEXT_SIZE_PX,
 };
 use crate::editor::text;
 use crate::editor::{
@@ -70,13 +71,6 @@ const CARD_RADIUS: f64 = 8.0;
 
 /// Initial canvas size before the first shot arrives.
 const INITIAL_SIZE: CGSize = CGSize::new(480.0, 320.0);
-
-/// Minimum width of the callout field editor, in view points: only wide
-/// enough for the caret, so an empty field never reaches over the arrow.
-const CALLOUT_EDITOR_MIN_WIDTH_PT: f64 = 30.0;
-
-/// Width of the field editor for new (empty) text, in view points.
-const TEXT_EDITOR_WIDTH_PT: f64 = 200.0;
 
 /// Radius of the crop/resize frame handles, in view points.
 const HANDLE_RADIUS_PT: f64 = 5.0;
@@ -310,19 +304,16 @@ define_class!(
         #[unsafe(method(controlTextDidChange:))]
         fn __control_text_did_change(&self, _notification: &NSNotification) {
             // The live string feeds the machine's draft; the canvas
-            // re-renders it through the committed path. The callout editor
-            // also follows its growing text so it never runs over the
-            // arrow.
-            let text = self
-                .ivars()
-                .text_editor
-                .borrow()
-                .as_ref()
-                .map(|field| field.stringValue().to_string().replace('\u{2028}', "\n"));
-            if let Some(text) = text {
-                self.ivars().machine.borrow_mut().update_text(&text);
+            // re-renders it through the committed path and the field proxy
+            // follows the block (the caret sits on the ink as the text
+            // grows, re-anchors or re-clamps).
+            let ivars = self.ivars();
+            let field = ivars.text_editor.borrow().clone();
+            if let Some(field) = field.as_ref() {
+                let text = field.stringValue().to_string().replace('\u{2028}', "\n");
+                ivars.machine.borrow_mut().update_text(&text);
+                self.refit_editor_frame(field);
             }
-            self.refit_callout_editor();
             self.redraw();
         }
 
@@ -525,8 +516,8 @@ impl EditorView {
         // frame rect. The machine reports what the in-flight interaction
         // draws over the document: a move or endpoint drag hides its
         // element and shows a transformed preview, a draw drag previews
-        // its draft, a pending callout previews its arrow; an element
-        // under in-place text editing is hidden entirely.
+        // its draft, the open text entry previews its draft as the
+        // committed element (the re-edited one hides behind it).
         CGContext::save_g_state(Some(&cg));
         CGContext::translate_ctm(Some(&cg), frame.origin.x, frame.origin.y);
         CGContext::scale_ctm(Some(&cg), sx, sy);
@@ -544,16 +535,12 @@ impl EditorView {
             shot.doc.elements(),
             Size::new(iw as f64, ih as f64),
         );
-        let editing = match ivars.text_target.get() {
-            Some(TextTarget::Existing { id }) => Some(id),
-            _ => None,
-        };
-        if preview.hide.is_some() || editing.is_some() {
+        if preview.hide.is_some() {
             let visible: Vec<Element> = shot
                 .doc
                 .elements()
                 .iter()
-                .filter(|el| Some(el.id) != preview.hide && Some(el.id) != editing)
+                .filter(|el| Some(el.id) != preview.hide)
                 .cloned()
                 .collect();
             render::draw_elements(&cg, base, ih as f64, &visible);
@@ -1247,12 +1234,16 @@ impl EditorView {
                 }
             }
         }
-        // The typed-text equivalent: put the string into the open field and
-        // let the same refit rule that follows typing resize it.
+        // The typed-text equivalent: put the string into the open field
+        // and feed the draft by hand — a programmatic setStringValue does
+        // not fire the change notification typing does.
         if let Some(text) = text {
             if let Some(field) = ivars.text_editor.borrow().clone() {
-                field.setStringValue(&NSString::from_str(text));
-                self.refit_callout_editor();
+                let text = text.replace('\u{2028}', "\n");
+                field.setStringValue(&NSString::from_str(&text));
+                ivars.machine.borrow_mut().update_text(&text);
+                self.refit_editor_frame(&field);
+                self.redraw();
             }
         }
         Ok(())
@@ -1347,67 +1338,67 @@ impl EditorView {
         (frame.size.width / iw as f64, frame.size.height / ih as f64)
     }
 
-    /// View-space size of the field editor for a text block holding `text`
-    /// (may be empty) at `size` image pixels. A callout editor never pads to
-    /// the text tool's 200 pt minimum: it stays as wide as its text, so the
-    /// side-of-the-arrow placement holds for the field too.
-    fn text_editor_size(&self, text: &str, size: f64, callout: bool) -> (f64, f64) {
-        let (_, sy) = self.view_scale();
-        let font_pt = (size * sy).max(9.0);
-        let min_pt = if callout {
-            CALLOUT_EDITOR_MIN_WIDTH_PT
-        } else {
-            TEXT_EDITOR_WIDTH_PT
-        };
-        if text.is_empty() {
-            (min_pt, font_pt * 1.6 + 6.0)
-        } else {
-            match text::measure_block(text, size) {
-                Some(m) => (
-                    (m.width * self.view_scale().0).max(min_pt) + 12.0,
-                    m.height * sy + 6.0,
-                ),
-                None => (min_pt, font_pt * 1.6 + 6.0),
-            }
-        }
-    }
-
-    /// View-space rect for the field editor over a text block whose
+    /// View-space rect for the field proxy over a text block whose
     /// top-left sits at `origin` (image pixels), holding `text` (may be
-    /// `empty`) at `size` image pixels.
+    /// empty) at `size` image pixels.
     ///
-    /// Measured alignment (typed ink vs committed element ink, macOS 26):
-    /// the field editor lays the first line's baseline a full line height
-    /// below the field's top (the ink top lands ~0.43·font_pt down), while
-    /// the canvas draws the block's baseline one ascent below the block
-    /// top (~0.24·font_pt to the ink). The frame lifts the field by the
-    /// difference (0.19·font_pt) and puts the glyphs' layout origin right
-    /// on the block origin (the editor's own horizontal inset is 2 pt), so
-    /// Enter keeps the text where it was typed.
-    fn text_editor_frame(&self, origin: Point, text: &str, size: f64, callout: bool) -> CGRect {
+    /// The glyphs are the canvas draft's — the field's own text is
+    /// transparent — so this frame is caret chrome, not a geometry
+    /// contract: the block's measured size plus a little caret room, and
+    /// the 0.19·font_pt lift that keeps the field's line layout (the
+    /// caret) on the canvas ink (measured alignment, macOS 26: the field
+    /// lays its first baseline a full line height down, the canvas one
+    /// ascent down).
+    fn text_editor_frame(&self, origin: Point, text: &str, size: f64) -> CGRect {
         let frame = self.frame_rect();
         let (sx, sy) = self.view_scale();
-        let (width, height) = self.text_editor_size(text, size, callout);
+        let (w, h) = block_size(text, size);
+        let width = w * sx + 12.0;
+        let height = h * sy + 6.0;
         let x = frame.origin.x + origin.x * sx - 2.0;
-        let font_pt = (size * sy).max(9.0);
+        let font_pt = size * sy;
         let y_top = frame.origin.y + frame.size.height - origin.y * sy + 0.19 * font_pt;
         CGRect::new(CGPoint::new(x, y_top - height), CGSize::new(width, height))
     }
 
-    /// Where the pending callout's text block — or its field editor — sits
-    /// (in image pixels): the machine anchors it against the pending arrow,
-    /// with `block` already in image pixels.
-    fn pending_callout_anchor(&self, block: Size) -> Option<Point> {
+    /// The open draft's block, as the machine holds it: the text, the
+    /// block's top-left (image pixels), the element color and the font
+    /// size — the frame source for the field proxy. None without an open
+    /// text entry.
+    fn draft_block(&self) -> Option<(String, Point, Rgba, f64)> {
+        let ivars = self.ivars();
         let (iw, ih) = self.image_size();
-        self.ivars()
+        let shot_guard = ivars.shot.borrow();
+        let elements: &[Element] = shot_guard
+            .as_ref()
+            .map(|shot| shot.doc.elements())
+            .unwrap_or(&[]);
+        let kind = ivars
             .machine
             .borrow()
-            .pending_callout_anchor(block, Size::new(iw as f64, ih as f64))
+            .text_draft_kind(elements, Size::new(iw as f64, ih as f64))?;
+        match kind {
+            ElementKind::Text {
+                origin,
+                text,
+                color,
+                size,
+            }
+            | ElementKind::Callout {
+                anchor: origin,
+                text,
+                color,
+                size,
+                ..
+            } => Some((text, origin, color, size)),
+            _ => None,
+        }
     }
 
-    /// Open the field editor for `target`: a transparent text field over
-    /// the text block. Enter commits (via `doCommandBy`), a click elsewhere
-    /// commits through `controlTextDidEndEditing`, Esc cancels.
+    /// Open the field editor for `target`: a transparent input proxy over
+    /// the text block — the canvas draws the draft, the field carries the
+    /// caret. Enter commits (via `doCommandBy`), a click elsewhere commits
+    /// through `controlTextDidEndEditing`, Esc cancels.
     fn begin_text_edit(&self, target: TextTarget) {
         let ivars = self.ivars();
         // Never two field editors: an open one commits first.
@@ -1415,63 +1406,26 @@ impl EditorView {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let (initial, frame, color, size_px) = match target {
-            TextTarget::New {
-                origin,
-                callout,
-                color,
-            } => {
-                let size = DEFAULT_TEXT_SIZE_PX;
-                // A new callout opens its field exactly where the text will
-                // land: beside the pending arrow's base, away from the tip.
-                let anchor = if callout {
-                    let (w_pt, h_pt) = self.text_editor_size("", size, true);
-                    let (sx, sy) = self.view_scale();
-                    self.pending_callout_anchor(Size::new(w_pt / sx, h_pt / sy))
-                        .unwrap_or(origin)
-                } else {
-                    origin
-                };
-                (
-                    String::new(),
-                    // A callout opens its field caret-wide (the anchor math
-                    // owns the placement); a plain text field keeps the
-                    // text tool's 200 pt minimum — a caret-wide box scrolls
-                    // the typed text down to its last three characters.
-                    self.text_editor_frame(anchor, "", size, callout),
-                    color,
-                    size,
-                )
-            }
-            TextTarget::Existing { id } => {
-                let shot_guard = ivars.shot.borrow();
-                let Some(shot) = shot_guard.as_ref() else {
-                    return;
-                };
-                let Some(el) = shot.doc.element(id) else {
-                    return;
-                };
-                match &el.kind {
-                    ElementKind::Text { origin, text, color, size } => (
-                        text.clone(),
-                        self.text_editor_frame(*origin, text, *size, false),
-                        *color,
-                        *size,
-                    ),
-                    ElementKind::Callout { anchor: origin, text, color, size, .. } => (
-                        text.clone(),
-                        self.text_editor_frame(*origin, text, *size, true),
-                        *color,
-                        *size,
-                    ),
-                    _ => return,
-                }
-            }
+        // The machine owns the draft; opening it here covers the paths
+        // that arrive without a machine `down` (the agent channel's
+        // Existing target) and re-creates an identical one on the mouse
+        // paths, where `down` already opened it.
+        {
+            let shot_guard = ivars.shot.borrow();
+            let elements: &[Element] = shot_guard
+                .as_ref()
+                .map(|shot| shot.doc.elements())
+                .unwrap_or(&[]);
+            ivars.machine.borrow_mut().begin_text(target, elements);
+        }
+        let Some((initial, origin, color, size_px)) = self.draft_block() else {
+            return;
         };
+        let frame = self.text_editor_frame(origin, &initial, size_px);
         // The active input's size rides the ivar: the slider's text mode
         // changes it mid-edit, the commit of a new element stores it.
         ivars.text_size.set(size_px);
-        let font_pt = (size_px * self.view_scale().1).max(9.0);
+        let font_pt = size_px * self.view_scale().1;
         let font = NSFont::fontWithName_size(&NSString::from_str(text::FONT_NAME), font_pt);
         let [r, g, b, a] = color;
         let ns_color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
@@ -1501,8 +1455,7 @@ impl EditorView {
                 // SAFETY: plain selection message with no sender.
                 unsafe { editor.selectAll(None) };
                 if let Some(text_view) = editor.downcast_ref::<NSTextView>() {
-                    // SAFETY: plain setter on the live field editor.
-                    unsafe { text_view.setInsertionPointColor(Some(&ns_color)) };
+                    text_view.setInsertionPointColor(Some(&ns_color));
                 }
             }
         }
@@ -1513,7 +1466,7 @@ impl EditorView {
     /// own font (used from the next edit on) and the live field editor's —
     /// the one on screen, since editing carries its own font once begun.
     fn set_field_font(&self, field: &NSTextField, size_px: f64) {
-        let font_pt = (size_px * self.view_scale().1).max(9.0);
+        let font_pt = size_px * self.view_scale().1;
         let font = NSFont::fontWithName_size(&NSString::from_str(text::FONT_NAME), font_pt);
         let Some(font) = font.as_ref() else {
             return;
@@ -1537,68 +1490,26 @@ impl EditorView {
             return;
         };
         ivars.text_size.set(size);
-        // Shift+Enter leaves a line separator (U+2028) until the commit
-        // normalizes it; measure it as the newline it will become.
-        let text = field.stringValue().to_string().replace('\u{2028}', "\n");
-        match ivars.text_target.get() {
-            // A pending callout: the machine re-anchors its block beside
-            // the base for the new size; the arrow's width and tip stay as
-            // drawn.
-            Some(TextTarget::New { callout: true, .. }) => {
-                let (w_pt, h_pt) = self.text_editor_size(&text, size, true);
-                let (sx, sy) = self.view_scale();
-                let (iw, ih) = self.image_size();
-                let anchor = ivars.machine.borrow_mut().set_pending_callout_size(
-                    size,
-                    Size::new(w_pt / sx, h_pt / sy),
-                    Size::new(iw as f64, ih as f64),
-                );
-                if let Some(anchor) = anchor {
-                    self.set_field_font(&field, size);
-                    field.setFrame(self.text_editor_frame(anchor, &text, size, true));
-                }
+        // An existing element journals the change (the drag coalesces
+        // into one undo step); the draft then reads the new size off the
+        // updated element. New inputs carry their size in the draft.
+        if let Some(TextTarget::Existing { id }) = ivars.text_target.get() {
+            let result = ivars
+                .shot
+                .borrow_mut()
+                .as_mut()
+                .map(|shot| shot.apply_text_size(id, size));
+            if let Some(Err(err)) = result {
+                crate::log!("editor: failed to restyle the text size: {err}");
             }
-            // A brand-new plain text: the field font and frame follow, the
-            // block shifted into the frame; the commit re-clamps from the
-            // original origin with the final text.
-            Some(TextTarget::New { origin, .. }) => {
-                let (w_pt, h_pt) = self.text_editor_size(&text, size, false);
-                let (sx, sy) = self.view_scale();
-                let (iw, ih) = self.image_size();
-                let clamped = clamp_block(
-                    origin,
-                    w_pt / sx,
-                    h_pt / sy,
-                    Rect::new(0.0, 0.0, iw as f64, ih as f64),
-                );
-                self.set_field_font(&field, size);
-                field.setFrame(self.text_editor_frame(clamped, &text, size, false));
-            }
-            // An existing element: the size change is a journal command
-            // (the drag coalesces into one undo step), then the font and
-            // the frame follow the updated element.
-            Some(TextTarget::Existing { id }) => {
-                let result = ivars
-                    .shot
-                    .borrow_mut()
-                    .as_mut()
-                    .map(|shot| shot.apply_text_size(id, size));
-                if let Some(Err(err)) = result {
-                    crate::log!("editor: failed to restyle the text size: {err}");
-                }
-                self.set_field_font(&field, size);
-                let shot = ivars.shot.borrow();
-                if let Some(el) = shot.as_ref().and_then(|shot| shot.doc.element(id)) {
-                    let (origin, callout) = match &el.kind {
-                        ElementKind::Text { origin, .. } => (*origin, false),
-                        ElementKind::Callout { anchor, .. } => (*anchor, true),
-                        _ => return,
-                    };
-                    field.setFrame(self.text_editor_frame(origin, &text, size, callout));
-                }
-            }
-            None => {}
         }
+        // The machine resizes the draft — a callout block re-anchors
+        // beside its base, a plain text block re-clamps into the frame —
+        // and the canvas re-renders it; the field follows as caret chrome.
+        ivars.machine.borrow_mut().update_text_size(size);
+        self.set_field_font(&field, size);
+        self.refit_editor_frame(&field);
+        self.redraw();
     }
 
     /// Finish the open field editor: commit its text as a command — add a
@@ -1656,61 +1567,14 @@ impl EditorView {
         self.redraw();
     }
 
-    /// Keep a callout field editor in step with its growing text: a new
-    /// callout re-anchors its block beside the base, away from the tip, so
-    /// the text never runs over the arrow; a re-edit keeps its authored
-    /// anchor and only grows the field. Other editors keep their frame.
-    fn refit_callout_editor(&self) {
-        let ivars = self.ivars();
-        let Some(field) = ivars.text_editor.borrow().clone() else {
-            return;
-        };
-        // Shift+Enter leaves a line separator (U+2028) until the commit
-        // normalizes it; measure it as the newline it will become.
-        let text = field.stringValue().to_string().replace('\u{2028}', "\n");
-        let (anchor, size) = match ivars.text_target.get() {
-            Some(TextTarget::New { callout: true, .. }) => {
-                // The active input's size — the slider's text mode may have
-                // moved it off the default mid-edit.
-                let size = ivars.text_size.get();
-                let (w_pt, h_pt) = self.text_editor_size(&text, size, true);
-                let (sx, sy) = self.view_scale();
-                let Some(anchor) = self.pending_callout_anchor(Size::new(w_pt / sx, h_pt / sy))
-                else {
-                    return;
-                };
-                (anchor, size)
-            }
-            Some(TextTarget::Existing { id }) => {
-                let shot = ivars.shot.borrow();
-                let Some(el) = shot.as_ref().and_then(|shot| shot.doc.element(id)) else {
-                    return;
-                };
-                match &el.kind {
-                    ElementKind::Callout { anchor, size, .. } => {
-                        // The authored anchor holds while the grown block
-                        // fits the frame; past an edge the block shifts
-                        // inward.
-                        let (w, h) = text::measure_block(&text, *size)
-                            .map(|m| (m.width, m.height))
-                            .unwrap_or((*size * 4.0, *size * 1.25));
-                        let (iw, ih) = self.image_size();
-                        (
-                            clamp_block(
-                                *anchor,
-                                w,
-                                h,
-                                Rect::new(0.0, 0.0, iw as f64, ih as f64),
-                            ),
-                            *size,
-                        )
-                    }
-                    _ => return,
-                }
-            }
-            _ => return,
-        };
-        field.setFrame(self.text_editor_frame(anchor, &text, size, true));
+    /// Keep the field proxy in step with its draft: the frame tracks the
+    /// block the machine holds, so the caret sits on the canvas-drawn ink
+    /// as the text grows, re-anchors (a new callout) or re-clamps into the
+    /// frame (near an edge). A no-op without an open draft.
+    fn refit_editor_frame(&self, field: &NSTextField) {
+        if let Some((text, origin, _, size)) = self.draft_block() {
+            field.setFrame(self.text_editor_frame(origin, &text, size));
+        }
     }
 
     /// Drop the open field editor without committing (a new shot arrived)
