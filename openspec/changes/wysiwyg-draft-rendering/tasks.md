@@ -26,7 +26,7 @@
 
 ## 6. Документация домена
 
-- [ ] 6.1 Обновить доменный скилл `minisnap-editor` (`.zcode/skills/minisnap-editor/SKILL.md` и его `references/window-mechanics.md`): механика ввода текста (прокси-поле + черновик в машине), `preview()` как полный список отрисовки, зажим `EditText`. Проверка: сверка утверждений скилла с фактическим кодом после задач 1–4.
+- [x] 6.1 Обновить доменный скилл `minisnap-editor` (`.zcode/skills/minisnap-editor/SKILL.md` и его `references/window-mechanics.md`): механика ввода текста (прокси-поле + черновик в машине), `preview()` как полный список отрисовки, зажим `EditText`. Проверка: сверка утверждений скилла с фактическим кодом после задач 1–4.
 
 ## Workflow follow-up
 
