@@ -99,7 +99,7 @@ struct AppIvars {
     permission_dialog_visible: Cell<bool>,
     permission_granted: Cell<bool>,
     // Checkout label of this instance (branch name for a worktree build,
-    // "main" otherwise); shown in the tray menu header, tooltip and the
+    // "main" otherwise); shown in the tray menu header and the
     // preferences window title.
     checkout_label: String,
 }
@@ -301,11 +301,6 @@ impl AppController {
             .expect("configured SF Symbol");
         icon.setTemplate(true);
         button.setImage(Some(&icon));
-        // The tooltip is the second surface of the instance identity:
-        // hovering the tray icon names the checkout without opening the menu.
-        button.setToolTip(Some(&NSString::from_str(&format!(
-            "minisnap — {checkout_label}"
-        ))));
 
         let menu = NSMenu::new(mtm);
         // Inert header naming the checkout this instance was built from;
