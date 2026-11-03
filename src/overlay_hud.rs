@@ -855,4 +855,34 @@ mod tests {
         let l = loupe_layout(CGPoint::new(100.0, 200.0), screen, 1.0, &sampler);
         assert_eq!((l.cursor_logical.x, l.cursor_logical.y), (100.0, 400.0));
     }
+
+    /// The loupe's chrome hangs into the layer tree as the loupe's own
+    /// sublayers, bottom-up: grid, crosshair, white frame outline, black
+    /// frame core. Regression against "built but never attached": the
+    /// chrome was once styled in `new` while missing from the tree.
+    #[test]
+    fn loupe_chrome_hangs_into_the_loupe_in_z_order() {
+        let hud = Hud::new();
+        let root = CALayer::new();
+        hud.attach(&root, 2.0);
+
+        // SAFETY: plain layer-tree reads, no external invariants.
+        let children = unsafe { hud.loupe.sublayers() }.expect("loupe carries its chrome");
+        let count = children.count();
+        assert_eq!(count, 4, "loupe carries exactly its four chrome layers");
+        // Identity, not just class or color: exactly the HUD's four chrome
+        // layers, in the exact z-order.
+        let attached: Vec<*const CALayer> = (0..count)
+            .map(|i| Retained::as_ptr(&children.objectAtIndexedSubscript(i)))
+            .collect();
+        let expected = [
+            Retained::as_ptr(&hud.loupe_grid).cast::<CALayer>(),
+            Retained::as_ptr(&hud.loupe_cross).cast::<CALayer>(),
+            Retained::as_ptr(&hud.loupe_frame_light).cast::<CALayer>(),
+            Retained::as_ptr(&hud.loupe_frame_dark).cast::<CALayer>(),
+        ];
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(attached[i], *want, "loupe sublayer {i} is not the expected chrome layer");
+        }
+    }
 }
