@@ -1419,6 +1419,10 @@ impl EditorView {
         let ns_color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
         // SAFETY: class convenience constructor, plain setters afterwards.
         let field = NSTextField::textFieldWithString(&NSString::from_str(&initial), mtm);
+        // A plain, fully transparent input surface: the capsule bezel the
+        // factory constructor puts on (bordered ≠ bezeled) would cover the
+        // canvas-drawn draft sitting underneath.
+        field.setBezeled(false);
         field.setBordered(false);
         field.setDrawsBackground(false);
         field.setFocusRingType(NSFocusRingType::None);
