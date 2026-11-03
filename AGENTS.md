@@ -182,17 +182,21 @@ alongside the main checkout's app.
 
 ### Telling instances apart
 
-Minisnap has no single-instance guard, and every instance looks the same
-on screen — the same tray icon and menu, hidden editor titles, the same
-`Preferences` window, the same shared config. The `instances` tool is the
-first-line enumeration (checkout label, pid, port, exe); map a pid to its
-checkout by executable path the same way `ps -axo pid,comm | grep minisnap`
-does: under the repo root is the main checkout, under
-`.worktrees/<branch>` is that worktree. Quit instances only by a matched
-PID, never by name. Do not attribute hotkey presses by eye: global hotkeys
-belong to whichever instance registered the combination first, so with two
-instances running the hotkey drives the older one — the user's main
-instance, not the build you just launched. While driving a worktree
+Minisnap has no single-instance guard, and while the tray icon is shared,
+each instance names its own checkout: the first, inert tray-menu item
+reads `minisnap — <label>`, the `Preferences` window title is
+`Preferences — <label>`, and at startup the process prints
+`minisnap instance '<label>' from <exe path>` to stderr — the label is
+the branch name for a worktree build, `main` otherwise. Treat these as
+the cross-check; `ps -axo pid,comm | grep minisnap` stays the source of
+last resort (under the repo root is the main checkout, under
+`.worktrees/<branch>` is that worktree), and the `instances` MCP tool is
+the first-line enumeration (checkout label, pid, port, exe). Quit
+instances only by a matched PID, never by name. Do not attribute hotkey
+presses by eye: global hotkeys belong to whichever instance registered
+the combination first, so with two instances running the hotkey drives
+the older one — the user's main instance, not the build you just
+launched. While driving a worktree
 instance keep it the only running one (quit the main-checkout instance
 first, bring it back afterwards with `open
 /Users/morr/develop/minisnap/target/release/minisnap.app`) — that rule is
