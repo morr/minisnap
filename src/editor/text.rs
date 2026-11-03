@@ -3,9 +3,7 @@
 
 use objc2_core_foundation::{CFAttributedString, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_graphics::{CGColor, CGColorSpace, CGContext, CGTextDrawingMode};
-use objc2_core_text::{
-    kCTFontAttributeName, kCTForegroundColorAttributeName, CTFont, CTLine,
-};
+use objc2_core_text::{kCTFontAttributeName, kCTForegroundColorAttributeName, CTFont, CTLine};
 
 use super::{Point, Rgba};
 
@@ -88,9 +86,7 @@ fn make_line(text: &str, size: f64, color: Rgba) -> Option<CFRetained<CTLine>> {
     let values: [&CFType; 2] = [&*font, &*cg_color];
     // SAFETY: the keys are static CFStrings, the values live CF objects;
     // the dictionary borrows them for its lifetime.
-    let attributes = unsafe {
-        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
-    };
+    let attributes = unsafe { CFDictionary::<CFString, CFType>::from_slices(&keys, &values) };
     // SAFETY: the attributes are valid keys and values for an attributed
     // string.
     let attributed = unsafe {
@@ -264,5 +260,58 @@ mod tests {
             })
             .count();
         assert!(non_gray > 0, "no glyph pixels found");
+    }
+
+    /// The window draws the document into a Retina-backed (2x) context, the
+    /// composite into a 1x bitmap. The committed ink must sit at the same
+    /// image rows in both, or Enter visibly shifts the text the user typed
+    /// (a live run caught exactly that: the fill drifted one ascent down
+    /// under the 2x backing).
+    #[test]
+    fn text_lands_at_the_same_rows_in_1x_and_2x_contexts() {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        use objc2_core_graphics::CGBitmapContextCreateImage;
+
+        let base = solid_frame(200, 150);
+        let element = Element {
+            id: 1,
+            kind: ElementKind::Text {
+                origin: Point::new(20.0, 40.0),
+                text: "WWWW".into(),
+                color: MAGENTA,
+                size: 32.0,
+            },
+        };
+        let ink_top = |bytes: &[u8], w: usize, h: usize| -> f64 {
+            let magenta_row = |y: usize| {
+                (0..w).any(|x| {
+                    let px = &bytes[(y * w + x) * 4..];
+                    px[0] > 180 && px[2] > 180 && px[1] < 120
+                })
+            };
+            (0..h).find(|&y| magenta_row(y)).expect("magenta ink") as f64
+        };
+
+        let one_x = super::super::render::render_composite(&base, std::slice::from_ref(&element))
+            .expect("composite");
+        let top1 = ink_top(&pixel_bytes(&one_x), 200, 150);
+
+        // The window path: the backing scale doubles the CTM before the
+        // frame's translate and the unit scale land on top.
+        let ctx = super::super::render::bitmap_context(400, 300).expect("2x context");
+        CGContext::scale_ctm(Some(&ctx), 2.0, 2.0);
+        CGContext::draw_image(
+            Some(&ctx),
+            CGRect::new(CGPoint::ZERO, CGSize::new(200.0, 150.0)),
+            Some(&base),
+        );
+        super::super::render::draw_elements(&ctx, &base, 150.0, std::slice::from_ref(&element));
+        let two_x = CGBitmapContextCreateImage(Some(&ctx)).expect("2x image");
+        let top2 = ink_top(&pixel_bytes(&two_x), 400, 300) / 2.0;
+
+        assert!(
+            (top2 - top1).abs() < 1.0,
+            "ink top drifts with the backing scale: 1x {top1}, 2x {top2}"
+        );
     }
 }
