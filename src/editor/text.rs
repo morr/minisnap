@@ -135,12 +135,22 @@ pub fn draw_text(ctx: &CGContext, origin: Point, text: &str, color: Rgba, size: 
 /// The glyphs' color rides the attributed string (see `make_line`); the
 /// text position resets before each pass — macOS 26's CoreText advances it
 /// across a draw, which used to shove the fill pass one line-width aside.
+/// The text matrix is pinned to identity for the same reason: `CTLineDraw`
+/// composes it with the CTM, and a shared cached context (the agent
+/// window screenshot draws the whole view tree into one) can carry a
+/// flipped matrix left there by a sibling's AppKit text pass — the
+/// toolbar's file label — which turned the glyphs upside down.
 fn draw_line(ctx: &CGContext, origin: Point, line: &CTLine, metrics: &TextMetrics, size: f64) {
+    use objc2_core_foundation::CGAffineTransform;
     CGContext::save_g_state(Some(ctx));
     // Core Text draws upright in a Y-up space; undo the caller's flip
     // locally and put the baseline one ascent below the block's top.
     CGContext::translate_ctm(Some(ctx), origin.x, origin.y + metrics.ascent);
     CGContext::scale_ctm(Some(ctx), 1.0, -1.0);
+    CGContext::set_text_matrix(
+        Some(ctx),
+        CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 },
+    );
     // Pass 1: the white halo.
     CGContext::set_text_position(Some(ctx), 0.0, 0.0);
     CGContext::set_text_drawing_mode(Some(ctx), CGTextDrawingMode::Stroke);
