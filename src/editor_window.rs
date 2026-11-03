@@ -245,9 +245,13 @@ define_class!(
         fn __key_down(&self, event: &NSEvent) {
             match event.keyCode() {
                 53 => {
-                    // Esc: cancel the crop/resize frame, else close.
+                    // Esc steps back: cancel the crop/resize frame, then
+                    // drop the selection; only with neither does it close.
                     if self.ivars().machine.borrow().frame_active() {
                         self.cancel_frame_edit();
+                    } else if self.ivars().selection.get().is_some() {
+                        self.ivars().selection.set(None);
+                        self.redraw();
                     } else if let Some(window) = self.window() {
                         window.close();
                     }
