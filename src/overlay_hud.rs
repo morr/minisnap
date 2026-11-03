@@ -94,9 +94,11 @@ pub(crate) const DIM_ALPHA: f64 = 0.4;
 
 /// Loupe magnification: on-screen points per logical (UI) pixel.
 const LOUPE_ZOOM_PT: f64 = 7.0;
-/// Loupe sample side, in logical pixels (the loupe is square). 20 × 7pt
-/// keeps the loupe's on-screen size at 140pt while showing more pixels.
-const LOUPE_SAMPLE_PX: f64 = 20.0;
+/// Loupe sample side, in logical pixels (the loupe is square). Odd on
+/// purpose: the cursor pixel is then the exact middle cell, with the same
+/// whole number of cells on every side of the crosshair. 21 × 7pt keeps
+/// the on-screen cell at a whole 7pt (crisp grid at any backing scale).
+const LOUPE_SAMPLE_PX: f64 = 21.0;
 /// Guide line widths, in points: white outline underneath, black core on
 /// top.
 const AXIS_OUTLINE_W_PT: f64 = 1.5;
@@ -207,10 +209,12 @@ impl Hud {
         grid.setPath(Some(grid_ref));
 
         // Crosshair through the center cell = the logical pixel under the
-        // cursor (the contents image is drawn top-down; layer coords grow up).
+        // cursor (the contents image is drawn top-down; layer coords grow
+        // up). With the odd sample side the cell center sits at exactly
+        // half the loupe, so the crosshair is equidistant from all edges.
         let cross = CAShapeLayer::new();
         cross.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(LOUPE_SIZE_PT, LOUPE_SIZE_PT)));
-        let cell_center = (LOUPE_SAMPLE_PX / 2.0 + 0.5) * LOUPE_ZOOM_PT;
+        let cell_center = ((LOUPE_SAMPLE_PX / 2.0).floor() + 0.5) * LOUPE_ZOOM_PT;
         let cross_y = LOUPE_SIZE_PT - cell_center;
         let cross_path = CGMutablePath::new();
         // SAFETY: plain C path builders with a null transform.
@@ -656,14 +660,19 @@ fn loupe_layout(cursor: CGPoint, screen: CGSize, scale: f64, sampler: &FrameSamp
     let factor = sampler.factor as f64;
     let lw = sampler.width as f64;
     let lh = sampler.height as f64;
-    let half = LOUPE_SAMPLE_PX / 2.0;
+    // Whole cells between the cursor cell and the window edge on each side
+    // (the sample side is odd, so this is symmetric).
+    let side = (LOUPE_SAMPLE_PX / 2.0).floor();
 
     let cursor_logical =
         crate::capture::geometry::display_point_to_logical_pixel(cursor, screen.height, scale, factor);
-    let px = cursor_logical.x.round().clamp(half, lw - half);
-    let py = cursor_logical.y.round().clamp(half, lh - half);
+    let px = cursor_logical.x.round();
+    let py = cursor_logical.y.round();
     let sample_rect = CGRect::new(
-        CGPoint::new(px - half, py - half),
+        CGPoint::new(
+            (px - side).clamp(0.0, lw - LOUPE_SAMPLE_PX),
+            (py - side).clamp(0.0, lh - LOUPE_SAMPLE_PX),
+        ),
         CGSize::new(LOUPE_SAMPLE_PX, LOUPE_SAMPLE_PX),
     );
 
@@ -808,7 +817,31 @@ mod tests {
         let screen = CGSize::new(800.0, 600.0);
         let l = loupe_layout(CGPoint::new(100.4, 200.6), screen, 1.0, &sampler);
         assert_eq!(l.loupe_frame.origin.x, 118.0);
-        assert_eq!(l.loupe_frame.origin.y, 43.0);
+        assert_eq!(l.loupe_frame.origin.y, 36.0);
+    }
+
+    /// The sample side is odd: unclamped, the cursor pixel is the exact
+    /// middle cell of the window — the same whole number of pixel cells on
+    /// every side of the crosshair.
+    #[test]
+    fn sample_rect_centers_the_cursor_cell() {
+        let sampler = layout_sampler();
+        let screen = CGSize::new(800.0, 600.0);
+        // Cursor inside the 64×64 sampler bitmap (AppKit y grows up).
+        let l = loupe_layout(CGPoint::new(32.0, 568.0), screen, 1.0, &sampler);
+        assert_eq!(l.cursor_logical, CGPoint::new(32.0, 32.0));
+        assert_eq!(l.sample_rect.size.width, LOUPE_SAMPLE_PX);
+        assert_eq!(l.sample_rect.size.height, LOUPE_SAMPLE_PX);
+        assert_eq!(
+            l.sample_rect.mid().x,
+            l.cursor_logical.x + 0.5,
+            "cursor cell centered horizontally"
+        );
+        assert_eq!(
+            l.sample_rect.mid().y,
+            l.cursor_logical.y + 0.5,
+            "cursor cell centered vertically"
+        );
     }
 
     #[test]
