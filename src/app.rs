@@ -213,7 +213,22 @@ define_class!(
                     Some(MainJob::CaptureReady { result, edit }) => {
                         self.capture_ready(result, edit)
                     }
-                    Some(MainJob::OpenEditor { path, .. }) => self.open_editor(path),
+                    Some(MainJob::OpenEditor {
+                        path,
+                        only_if_visible,
+                    }) => {
+                        let visible = self
+                            .ivars()
+                            .editor
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|editor| editor.window.isVisible());
+                        if only_if_visible && !visible {
+                            crate::log!("editor: window not visible, skip open");
+                        } else {
+                            self.open_editor(path);
+                        }
+                    }
                     Some(MainJob::Agent(job)) => {
                         let result = self.handle_agent(job.request);
                         let _ = job.reply.send(result);
