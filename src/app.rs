@@ -53,7 +53,12 @@ pub(crate) enum MainJob {
         edit: bool,
     },
     /// A finished capture produced a shot file to open in the editor.
-    OpenEditor { path: std::path::PathBuf },
+    /// With `only_if_visible`, the job is dropped unless the editor window
+    /// is on screen, so a plain capture neither opens nor raises it.
+    OpenEditor {
+        path: std::path::PathBuf,
+        only_if_visible: bool,
+    },
     /// An agent-server request arrived over HTTP; the pump hands it to the
     /// controller on the main thread and the reply goes back over the
     /// channel.
@@ -208,7 +213,7 @@ define_class!(
                     Some(MainJob::CaptureReady { result, edit }) => {
                         self.capture_ready(result, edit)
                     }
-                    Some(MainJob::OpenEditor { path }) => self.open_editor(path),
+                    Some(MainJob::OpenEditor { path, .. }) => self.open_editor(path),
                     Some(MainJob::Agent(job)) => {
                         let result = self.handle_agent(job.request);
                         let _ = job.reply.send(result);
@@ -444,6 +449,7 @@ impl AppController {
         if let Some(path) = std::env::var_os("MINISNAP_DEBUG_OPEN_EDITOR") {
             let _ = this.ivars().jobs_tx.send(MainJob::OpenEditor {
                 path: std::path::PathBuf::from(path),
+                only_if_visible: false,
             });
         }
 
@@ -1101,9 +1107,10 @@ impl AppController {
                 match crate::output::save_to_file(&image, &save_dir, retention, scale) {
                     Ok(path) => {
                         crate::log!("output: saved {}", path.display());
-                        if edit {
-                            let _ = jobs_tx.send(MainJob::OpenEditor { path });
-                        }
+                        let _ = jobs_tx.send(MainJob::OpenEditor {
+                            path,
+                            only_if_visible: !edit,
+                        });
                     }
                     Err(e) => crate::log!("output: save: {e}"),
                 }

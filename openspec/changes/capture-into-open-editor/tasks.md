@@ -2,7 +2,7 @@
 
 ## 1. Маршрутизация в `src/app.rs`
 
-- [ ] 1.1 `MainJob::OpenEditor` получает поле `only_if_visible: bool`; оба конструктора обновлены: колбэк `OverlayOutcome::Selected` шлёт `only_if_visible = !edit`, debug-хук `MINISNAP_DEBUG_OPEN_EDITOR` — `false`. Проверка: `cargo check` чист.
+- [x] 1.1 `MainJob::OpenEditor` получает поле `only_if_visible: bool`; оба конструктора обновлены: колбэк `OverlayOutcome::Selected` шлёт `only_if_visible = !edit`, debug-хук `MINISNAP_DEBUG_OPEN_EDITOR` — `false`. Проверка: `cargo check` чист.
 - [ ] 1.2 Обработчик в `tick:` при `only_if_visible == true` и невидимом окне редактора (`editor` отсутствует либо `window.isVisible() == false`) пропускает задачу со строкой журнала; при видимом или без условия — прежний `open_editor(path)`. Проверка: `cargo check` чист.
 
 ## 2. Живая проверка и скиллы
