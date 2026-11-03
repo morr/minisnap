@@ -531,25 +531,11 @@ impl EditorView {
             Some(base),
         );
         let machine = ivars.machine.borrow();
-        let preview = machine.preview(
+        let list = machine.render_list(
             shot.doc.elements(),
             Size::new(iw as f64, ih as f64),
         );
-        if preview.hide.is_some() {
-            let visible: Vec<Element> = shot
-                .doc
-                .elements()
-                .iter()
-                .filter(|el| Some(el.id) != preview.hide)
-                .cloned()
-                .collect();
-            render::draw_elements(&cg, base, ih as f64, &visible);
-        } else {
-            render::draw_elements(&cg, base, ih as f64, shot.doc.elements());
-        }
-        if !preview.extras.is_empty() {
-            render::draw_elements(&cg, base, ih as f64, &preview.extras);
-        }
+        render::draw_elements(&cg, base, ih as f64, &list);
         drop(machine);
         CGContext::restore_g_state(Some(&cg));
 
@@ -561,9 +547,11 @@ impl EditorView {
         CGContext::restore_g_state(Some(&cg));
 
         // Selection markers on top, in screen points so they stay constant
-        // sized; they never reach a saved composite.
+        // sized; they never reach a saved composite. They read the
+        // machine's list, so during a drag they follow the ghost, not the
+        // committed position.
         if let Some(id) = ivars.selection.get() {
-            self.draw_markers(&cg, shot, id);
+            self.draw_markers(&cg, &list, id);
         }
     }
 
@@ -650,8 +638,8 @@ impl EditorView {
 
     /// Handles of the selected element: endpoint dots and bounding-box
     /// corners, white fill with the system accent ring.
-    fn draw_markers(&self, cg: &CGContext, shot: &OpenShot, id: u64) {
-        let Some(element) = shot.doc.element(id) else {
+    fn draw_markers(&self, cg: &CGContext, list: &[Element], id: u64) {
+        let Some(element) = list.iter().find(|el| el.id == id) else {
             return;
         };
         let to_point = |p: Point| -> CGPoint { self.pixel_to_view(p) };

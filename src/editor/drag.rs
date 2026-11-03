@@ -338,15 +338,6 @@ pub(crate) struct DownCtx<'a> {
     pub(crate) handle_tolerance: Point,
 }
 
-/// What to draw over the composite for the in-flight interaction.
-pub(crate) struct Preview {
-    /// The element to hide from the document layer (its dragged position
-    /// is drawn from `extras` instead).
-    pub(crate) hide: Option<u64>,
-    /// View-only elements on top — the moved or endpoint-shifted element,
-    /// the drawn draft, the pending callout's arrow — in draw order.
-    pub(crate) extras: Vec<Element>,
-}
 
 /// The editor's interaction state machine: mouse events in image-pixel
 /// space on one side, previews, journal commands and text-editing signals
@@ -661,29 +652,31 @@ impl DragMachine {
         Some(outcome)
     }
 
-    /// What to draw over the composite for the in-flight interaction.
-    pub(crate) fn preview(&self, elements: &[Element], image: Size) -> Preview {
-        let mut preview = Preview {
-            hide: None,
-            extras: Vec::new(),
-        };
+    /// The element list the canvas draws: the document's elements with
+    /// the in-flight interaction spliced in — a move or endpoint drag
+    /// replaces its element at its own depth (the z-order holds through
+    /// the drag), the drawn draft and a new text entry append their
+    /// drafts, and a re-edit's draft replaces its element in place.
+    /// Selection markers read the same list, so they follow the ghost.
+    pub(crate) fn render_list(&self, elements: &[Element], image: Size) -> Vec<Element> {
+        let mut list: Vec<Element> = elements.to_vec();
         match self.drag.as_ref() {
             Some(Drag::Move { id, start, last, .. }) => {
-                if let Some(mut el) = elements.iter().find(|el| el.id == *id).cloned() {
-                    shift_element(&mut el.kind, last.x - start.x, last.y - start.y);
-                    preview.hide = Some(*id);
-                    preview.extras.push(el);
+                for el in &mut list {
+                    if el.id == *id {
+                        shift_element(&mut el.kind, last.x - start.x, last.y - start.y);
+                    }
                 }
             }
             Some(Drag::End { id, endpoint, last, .. }) => {
-                if let Some(mut el) = elements.iter().find(|el| el.id == *id).cloned() {
-                    set_endpoint(&mut el.kind, *endpoint, *last);
-                    preview.hide = Some(*id);
-                    preview.extras.push(el);
+                for el in &mut list {
+                    if el.id == *id {
+                        set_endpoint(&mut el.kind, *endpoint, *last);
+                    }
                 }
             }
             Some(Drag::Draw(kind)) => {
-                preview.extras.push(Element {
+                list.push(Element {
                     id: 0,
                     kind: kind.clone(),
                 });
@@ -692,17 +685,22 @@ impl DragMachine {
             Some(Drag::Frame { .. }) | None => {}
         }
         // The open text entry draws its draft as the committed element:
-        // live text in the measured, clamped geometry — halo and all. The
-        // element being re-edited hides behind its draft.
+        // live text in the measured, clamped geometry — halo and all.
         if let Some(kind) = self.text_draft_kind(elements, image) {
-            if let Some(TextTarget::Existing { id }) = self.text.as_ref().map(|d| d.target) {
-                preview.hide = Some(id);
+            match self.text.as_ref().map(|draft| draft.target) {
+                // A re-edit replaces its element in place — same id, same
+                // depth; the markers follow the live text.
+                Some(TextTarget::Existing { id }) => {
+                    if let Some(el) = list.iter_mut().find(|el| el.id == id) {
+                        el.kind = kind;
+                    }
+                }
+                _ => list.push(Element { id: 0, kind }),
             }
-            preview.extras.push(Element { id: 0, kind });
         } else if let Some(pending) = self.callout.as_ref() {
             // A pending callout without a text entry (a transient state —
             // the entry opens with the signal): the bare arrow at its base.
-            preview.extras.push(Element {
+            list.push(Element {
                 id: 0,
                 kind: ElementKind::Callout {
                     tip: pending.tip,
@@ -714,7 +712,7 @@ impl DragMachine {
                 },
             });
         }
-        preview
+        list
     }
 
     /// Bring up the crop (`resize = false`) or resize frame with its
@@ -1076,8 +1074,9 @@ mod tests {
             let outcome = machine.up(pt(12.0, 11.0), 1).expect("drag was active");
             assert_eq!(outcome.command, None, "a 2 px drag is a plain click");
             assert_eq!(outcome.signal, None, "no text phase for a short callout");
-            assert!(
-                machine.preview(&elements, Size::new(400.0, 300.0)).extras.is_empty(),
+            assert_eq!(
+                machine.render_list(&elements, Size::new(400.0, 300.0)).len(),
+                elements.len(),
                 "nothing previews after a click"
             );
         }
@@ -1419,31 +1418,21 @@ mod tests {
         );
 
         // The arrow previews (with empty text) while the input is open.
-        let preview = machine.preview(&elements, Size::new(400.0, 300.0));
-        assert_eq!(preview.extras.len(), 1);
+        let list = machine.render_list(&elements, Size::new(400.0, 300.0));
+        assert_eq!(list.len(), 1);
         assert!(
-            matches!(&preview.extras[0].kind, ElementKind::Callout { text, tip, .. }
+            matches!(&list[0].kind, ElementKind::Callout { text, tip, .. }
                 if text.is_empty() && *tip == pt(100.0, 50.0))
         );
 
-        // The anchor query places the block beside the base, away from the
-        // tip: the draft's anchor for any typed text.
+        // Typing feeds the draft: the block anchors beside the base, away
+        // from the tip, and the commit freezes the very element the canvas
+        // showed (the no-jump invariant).
         machine.update_text("hi");
-        match &machine.preview(&elements, Size::new(400.0, 300.0)).extras[0].kind {
-            ElementKind::Callout { anchor, .. } => {
-                assert!(anchor.x < 50.0, "the block sits left of the base");
-            }
-            other => panic!("expected a callout draft, got {other:?}"),
-        }
-
-        // Typing feeds the draft; the commit freezes the very element the
-        // preview showed (the no-jump invariant).
-        machine.update_text("hi");
-        let shown = machine
-            .preview(&elements, Size::new(400.0, 300.0))
-            .extras[0]
-            .kind
-            .clone();
+        let list = machine.render_list(&elements, Size::new(400.0, 300.0));
+        assert!(matches!(&list[0].kind, ElementKind::Callout { anchor, .. }
+            if anchor.x < 50.0), "the block sits left of the base");
+        let shown = list[0].kind.clone();
         let command = machine
             .commit_text(&elements, Size::new(400.0, 300.0), 9)
             .expect("a real text");
@@ -1461,7 +1450,9 @@ mod tests {
             other => panic!("expected callout, got {other:?}"),
         }
         assert!(
-            machine.preview(&elements, Size::new(400.0, 300.0)).extras.is_empty(),
+            machine
+                .render_list(&elements, Size::new(400.0, 300.0))
+                .is_empty(),
             "the phase is over"
         );
         assert_eq!(
@@ -1486,8 +1477,7 @@ mod tests {
         );
         assert!(
             machine
-                .preview(&elements, Size::new(400.0, 300.0))
-                .extras
+                .render_list(&elements, Size::new(400.0, 300.0))
                 .is_empty(),
             "the arrow is gone"
         );
@@ -1519,8 +1509,9 @@ mod tests {
                         machine.update_text_size(size);
                         machine.update_text(&typed);
                         let shown = machine
-                            .preview(&elements, image)
-                            .extras[0]
+                            .render_list(&elements, image)
+                            .last()
+                            .expect("the draft appends")
                             .kind
                             .clone();
                         let el = assert_add(
@@ -1546,12 +1537,12 @@ mod tests {
         let elements: Vec<Element> = Vec::new();
         machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(390.0, 150.0));
         machine.update_text("a");
-        let short = match &machine.preview(&elements, image).extras[0].kind {
+        let short = match &machine.render_list(&elements, image).last().expect("a draft").kind {
             ElementKind::Text { origin, .. } => *origin,
             other => panic!("expected a text draft, got {other:?}"),
         };
         machine.update_text("a much longer line of text");
-        let long = match &machine.preview(&elements, image).extras[0].kind {
+        let long = match &machine.render_list(&elements, image).last().expect("a draft").kind {
             ElementKind::Text { origin, .. } => *origin,
             other => panic!("expected a text draft, got {other:?}"),
         };
@@ -1569,7 +1560,12 @@ mod tests {
             machine.drag_to(pt(100.0, 50.0));
             machine.up(pt(100.0, 50.0), 9).expect("drag was active");
             machine.update_text(text);
-            let shown = machine.preview(&elements, image).extras[0].kind.clone();
+            let shown = machine
+                .render_list(&elements, image)
+                .last()
+                .expect("the draft appends")
+                .kind
+                .clone();
             let el = assert_add(machine.commit_text(&elements, image, 9), 9);
             assert_eq!(el.kind, shown, "commit moved the callout: {text:?}");
         }
@@ -1586,13 +1582,14 @@ mod tests {
             outcome.signal,
             Some(Signal::BeginText(TextTarget::Existing { id: 4 }))
         );
-        // The draft replaces the element's text and re-clamps with it;
-        // the commit is the plain EditText of what was on screen.
+        // The draft replaces the element's text in place — same id, same
+        // depth; the commit is the plain EditText of what was on screen.
         machine.update_text("WWWW");
-        let preview = machine.preview(&elements, image);
-        assert_eq!(preview.hide, Some(4), "the element hides behind its draft");
+        let list = machine.render_list(&elements, image);
+        assert_eq!(list.len(), 1, "the draft replaces, not appends");
+        assert_eq!(list[0].id, 4, "the re-edit keeps the element's slot");
         assert!(matches!(
-            &preview.extras[0].kind,
+            &list[0].kind,
             ElementKind::Text { text, .. } if text == "WWWW"
         ));
         assert_eq!(
@@ -1611,6 +1608,32 @@ mod tests {
             machine.commit_text(&elements, image, 5),
             Some(Command::DeleteElement(4))
         );
+    }
+
+    #[test]
+    fn move_and_end_drags_hold_the_element_depth() {
+        // The ghost replaces its element at its own index: while dragging,
+        // the element neither floats above the stack nor sinks below it —
+        // the depth it shows during the drag is the depth the commit
+        // leaves it at.
+        let image = Size::new(400.0, 300.0);
+        let elements = vec![rect_element(1), line_element(2), rect_element(3)];
+        let mut machine = DragMachine::new();
+        machine.down(ctx(&elements), pt(30.0, 30.0));
+        machine.drag_to(pt(60.0, 60.0));
+        let list = machine.render_list(&elements, image);
+        let ids: Vec<u64> = list.iter().map(|el| el.id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "the moved element keeps its slot");
+        assert!(matches!(&list[1].kind, ElementKind::Line { a, b, .. }
+            if *a == pt(40.0, 40.0) && *b == pt(80.0, 80.0)));
+
+        // An endpoint drag splices the same way.
+        let mut machine = DragMachine::new();
+        machine.down(ctx(&elements), pt(50.0, 50.0));
+        machine.drag_to(pt(70.0, 45.0));
+        let list = machine.render_list(&elements, image);
+        let ids: Vec<u64> = list.iter().map(|el| el.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]
@@ -1664,7 +1687,7 @@ mod tests {
 
         let draft_anchor = |machine: &mut DragMachine, size: f64| {
             machine.update_text_size(size);
-            match &machine.preview(&elements, image).extras[0].kind {
+            match &machine.render_list(&elements, image).last().expect("the draft appends").kind {
                 ElementKind::Callout { anchor, size, .. } => (*anchor, *size),
                 other => panic!("expected a callout draft, got {other:?}"),
             }
