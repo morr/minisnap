@@ -62,6 +62,8 @@ needs to drive it:
 - screenshots of the editor document or window for visual checks;
 - driving the editor programmatically (add a callout, change a width, undo)
   instead of moving the user's cursor;
+- chaining several sequential actions into one call — `batch`, preferred
+  over repeated `action`/`editor` calls;
 - reading the app's log without holding its launch stderr.
 
 Do not build ad-hoc Swift/CGEvent/screencapture/osascript tooling for what
@@ -98,6 +100,15 @@ own behaviors, not arbitrary macOS UI.
   `{"Command":{"AddElement":…}}` (any journal `Command` in journal shape),
   `"Undo"`, `"Redo"`, `{"Select":{"id":…}}`,
   `{"Page":{"direction":"prev"|"next"}}`.
+- `batch {steps}` — several sequential `action`/`editor` steps in one
+  call; the preferred way to run a chain. `steps` is an ordered list, each
+  step an object with exactly one key — `{"action": …}` (an `AgentAction`
+  shape) or `{"editor": …}` (an `AgentEditorOp` shape). Steps run in
+  order; the answer reports each with its number and status. Step
+  statuses (`rejected`, step errors) do not stop the chain — a transport
+  error does, reporting what executed. Reads are not steps, and polling
+  does not batch: `Capture` is `initiated`, so poll `state` between it
+  and `OverlaySelect`.
 - `log {offset?}` — the app's log ring buffer; the response carries the
   next offset to continue from.
 
