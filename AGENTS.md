@@ -238,3 +238,12 @@ worktree with `git worktree remove .worktrees/<branch>`; the branch ref
 itself stays. A minisnap built and run from a worktree follows the
 instance rules in «Working with a running app» — identify it by executable
 path, never by icon or window look.
+
+Two sessions on one checkout is a lost-work race: commits interleave, and
+a tree-wide revert (`git restore .` / `git checkout .`) in a shared tree
+silently wipes the other session's uncommitted changes — on 2026-11-03 a
+verified text-matrix fix was erased this way between its build and its
+commit and had to be re-landed (213f6ac). When another session may be
+working in this checkout, take a worktree instead, and in a shared tree
+never run tree-wide reverts or `git add -A` blind — check `git status`
+first and stage only your own files.
