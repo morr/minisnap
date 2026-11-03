@@ -1557,6 +1557,9 @@ impl EditorView {
             Size::new(iw as f64, ih as f64),
             shot.doc.next_element_id(),
         );
+        // Fixing a new element (new text, callout) uses up the one-shot tool;
+        // an existing-element edit or an empty draft keeps it.
+        let created = matches!(command, Some(Command::AddElement(_)));
         if let Some(cmd) = command {
             if matches!(cmd, Command::DeleteElement(_)) {
                 ivars.selection.set(None);
@@ -1566,6 +1569,9 @@ impl EditorView {
             }
         }
         drop(shot_slot);
+        if created {
+            ivars.tool.set(None);
+        }
         self.redraw();
     }
 
