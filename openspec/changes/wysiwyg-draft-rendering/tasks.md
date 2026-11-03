@@ -2,9 +2,9 @@
 
 ## 1. Машина драга: черновик текста и коллаута
 
-- [ ] 1.1 Ввести в `DragMachine` (`src/editor/drag.rs`) состояние набора текста `TextDraft` (цель: origin+color нового / id правки; кегль; живая строка) с API `begin_text_draft` / `update_text` / `update_text_size` / `commit_text` / `cancel_text`; живая строка у `PendingCallout`. Единый билдер `text_draft_kind`: `text::measure_block` → `clamp_block` / `callout_anchor`, черновик отдаётся через `preview()` с настоящим текстом и якорем. Проверка: `cargo test -p minisnap editor::drag`.
-- [ ] 1.2 Юнит-тесты инварианта «черновик == коммит» в `src/editor/drag.rs`: для нового текста и коллаута на сетке строк (пустая → символ → длинная → многострочная), кеглей и положений у краёв кадра — `preview().kind` совпадает с kind из `commit_text` до и после каждого keystroke; плюс тесты клампа растущего блока у края (блок уезжает внутрь по ходу роста, не прыгает). Проверка: `cargo test -p minisnap editor::drag`.
-- [ ] 1.3 `commit_text` закрывает и правку существующего: пустой ввод — `DeleteElement`, изменившийся — `EditText`, нетронутый — `None`; пустой коллаут — сброс `PendingCallout` без команды. Существующие тесты `commit_callout_text`/`text_tool_starts_new_text` перевести на новый API. Проверка: `cargo test -p minisnap editor::`.
+- [x] 1.1 Ввести в `DragMachine` (`src/editor/drag.rs`) состояние набора текста `TextDraft` (цель: origin+color нового / id правки; кегль; живая строка) с API `begin_text_draft` / `update_text` / `update_text_size` / `commit_text` / `cancel_text`; живая строка у `PendingCallout`. Единый билдер `text_draft_kind`: `text::measure_block` → `clamp_block` / `callout_anchor`, черновик отдаётся через `preview()` с настоящим текстом и якорем. Проверка: `cargo test -p minisnap editor::drag`.
+- [x] 1.2 Юнит-тесты инварианта «черновик == коммит» в `src/editor/drag.rs`: для нового текста и коллаута на сетке строк (пустая → символ → длинная → многострочная), кеглей и положений у краёв кадра — `preview().kind` совпадает с kind из `commit_text` до и после каждого keystroke; плюс тесты клампа растущего блока у края (блок уезжает внутрь по ходу роста, не прыгает). Проверка: `cargo test -p minisnap editor::drag`.
+- [x] 1.3 `commit_text` закрывает и правку существующего: пустой ввод — `DeleteElement`, изменившийся — `EditText`, нетронутый — `None`; пустой коллаут — сброс `PendingCallout` без команды. Существующие тесты `commit_callout_text`/`text_tool_starts_new_text` перевести на новый API. Проверка: `cargo test -p minisnap editor::`.
 
 ## 2. Окно: невидимый прокси ввода
 

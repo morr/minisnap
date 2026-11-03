@@ -309,9 +309,21 @@ define_class!(
 
         #[unsafe(method(controlTextDidChange:))]
         fn __control_text_did_change(&self, _notification: &NSNotification) {
-            // The callout editor follows its growing text so it never runs
-            // over the arrow; other editors are static until they commit.
+            // The live string feeds the machine's draft; the canvas
+            // re-renders it through the committed path. The callout editor
+            // also follows its growing text so it never runs over the
+            // arrow.
+            let text = self
+                .ivars()
+                .text_editor
+                .borrow()
+                .as_ref()
+                .map(|field| field.stringValue().to_string().replace('\u{2028}', "\n"));
+            if let Some(text) = text {
+                self.ivars().machine.borrow_mut().update_text(&text);
+            }
             self.refit_callout_editor();
+            self.redraw();
         }
 
         #[unsafe(method(control:textView:doCommandBySelector:))]
@@ -528,7 +540,10 @@ impl EditorView {
             Some(base),
         );
         let machine = ivars.machine.borrow();
-        let preview = machine.preview(shot.doc.elements());
+        let preview = machine.preview(
+            shot.doc.elements(),
+            Size::new(iw as f64, ih as f64),
+        );
         let editing = match ivars.text_target.get() {
             Some(TextTarget::Existing { id }) => Some(id),
             _ => None,
@@ -1469,7 +1484,13 @@ impl EditorView {
         if let Some(font) = font.as_ref() {
             field.setFont(Some(font));
         }
-        field.setTextColor(Some(&ns_color));
+        // The field is an input proxy, not a display: the glyphs are the
+        // canvas draft's (same renderer as the committed element), so the
+        // field's own text is transparent — same hue, no alpha. The caret
+        // keeps the element's color.
+        field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            r, g, b, 0.0,
+        )));
         // SAFETY: the delegate is this canvas view, alive for the process.
         unsafe { field.setDelegate(Some(ProtocolObject::from_ref(self))) };
         self.addSubview(&field);
@@ -1479,6 +1500,10 @@ impl EditorView {
             if let Some(editor) = field.currentEditor() {
                 // SAFETY: plain selection message with no sender.
                 unsafe { editor.selectAll(None) };
+                if let Some(text_view) = editor.downcast_ref::<NSTextView>() {
+                    // SAFETY: plain setter on the live field editor.
+                    unsafe { text_view.setInsertionPointColor(Some(&ns_color)) };
+                }
             }
         }
         self.redraw();
@@ -1592,90 +1617,39 @@ impl EditorView {
         // the taken slots above make that a no-op.
         field.removeFromSuperview();
 
-        let Some(target) = target else {
-            self.redraw();
-            return;
-        };
-        // A new-element commit runs before the shot borrow is taken: an
-        // empty input redraws (dropping the machine's pending callout with
-        // it), a callout's text lands through the machine's second phase,
-        // a plain text element is assembled here.
-        if let TextTarget::New { origin, callout, color } = target {
-            if text.trim().is_empty() {
-                ivars.machine.borrow_mut().cancel_callout_text();
-                self.redraw();
-                return;
-            }
-            // image_size borrows the shot, so the size is read before the
-            // mutable borrow below; nothing runs in between.
-            let (iw, ih) = self.image_size();
-            let mut shot_slot = ivars.shot.borrow_mut();
-            let Some(shot) = shot_slot.as_mut() else {
-                drop(shot_slot);
-                self.redraw();
-                return;
-            };
-            let id = shot.doc.next_element_id();
-            let command = if callout {
-                ivars.machine.borrow_mut().commit_callout_text(
-                    &text,
-                    Size::new(iw as f64, ih as f64),
-                    id,
-                )
-            } else {
-                // The slider may have grown the input past a frame edge
-                // mid-edit; the element lands where the clamped block sits.
-                let size = ivars.text_size.get();
-                let (w, h) = text::measure_block(&text, size)
-                    .map(|m| (m.width, m.height))
-                    .unwrap_or((size * 4.0, size * 1.25));
-                let origin =
-                    clamp_block(origin, w, h, Rect::new(0.0, 0.0, iw as f64, ih as f64));
-                Some(Command::AddElement(Element {
-                    id,
-                    kind: ElementKind::Text {
-                        origin,
-                        text,
-                        color,
-                        size,
-                    },
-                }))
-            };
-            // Same rule as drawn shapes: the new element stays unselected
-            // until the user clicks it.
-            if let Some(cmd) = command {
-                if let Err(err) = shot.apply(cmd) {
-                    crate::log!("editor: failed to add the text element: {err}");
-                }
-            }
-            drop(shot_slot);
+        if target.is_none() {
             self.redraw();
             return;
         }
-        let TextTarget::Existing { id } = target else {
-            return;
-        };
+        // One last sync before freezing: the field is the draft's source,
+        // and Enter may race the final change notification.
+        ivars.machine.borrow_mut().update_text(&text);
+        // The commit is the machine's: it freezes the very draft the
+        // canvas was showing — no re-derivation on the window side. An
+        // empty new input (which drops the pending callout), an unchanged
+        // edit and an emptied existing element's deletion are all decided
+        // there.
+        // image_size borrows the shot, so the size is read before the
+        // mutable borrow below; nothing runs in between.
+        let (iw, ih) = self.image_size();
         let mut shot_slot = ivars.shot.borrow_mut();
         let Some(shot) = shot_slot.as_mut() else {
             drop(shot_slot);
+            ivars.machine.borrow_mut().cancel_text();
             self.redraw();
             return;
         };
-        let old_text = shot.doc.element(id).and_then(|el| match &el.kind {
-            ElementKind::Text { text, .. } | ElementKind::Callout { text, .. } => {
-                Some(text.clone())
-            }
-            _ => None,
-        });
-        if text.trim().is_empty() {
-            if let Err(err) = shot.apply(Command::DeleteElement(id)) {
-                crate::log!("editor: failed to delete the emptied text: {err}");
-            } else {
+        let command = ivars.machine.borrow_mut().commit_text(
+            shot.doc.elements(),
+            Size::new(iw as f64, ih as f64),
+            shot.doc.next_element_id(),
+        );
+        if let Some(cmd) = command {
+            if matches!(cmd, Command::DeleteElement(_)) {
                 ivars.selection.set(None);
             }
-        } else if old_text.as_deref() != Some(text.as_str()) {
-            if let Err(err) = shot.apply(Command::EditText(id, text)) {
-                crate::log!("editor: failed to update the text: {err}");
+            if let Err(err) = shot.apply(cmd) {
+                crate::log!("editor: failed to commit the text edit: {err}");
             }
         }
         drop(shot_slot);
@@ -1748,7 +1722,7 @@ impl EditorView {
         // a borrow held across the removal would panic that re-entry.
         let field = ivars.text_editor.borrow_mut().take();
         ivars.text_target.take();
-        ivars.machine.borrow_mut().cancel_callout_text();
+        ivars.machine.borrow_mut().cancel_text();
         if let Some(field) = field {
             // Ends editing, which re-enters commit with both slots empty.
             field.removeFromSuperview();

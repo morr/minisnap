@@ -85,6 +85,18 @@ pub(crate) struct PendingCallout {
     pub(crate) width: f64,
 }
 
+/// The open text entry: a brand-new text/callout element or the live
+/// re-edit of an existing one. The machine owns the live string, so the
+/// canvas draft and the committed element come from the same builder —
+/// the commit freezes what is on screen instead of re-deriving it.
+pub(crate) struct TextDraft {
+    pub(crate) target: TextTarget,
+    /// The active input's font size in image pixels (the slider's text
+    /// mode may move it mid-edit).
+    pub(crate) size: f64,
+    pub(crate) text: String,
+}
+
 /// Distance between two points.
 pub(crate) fn point_dist(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
@@ -206,6 +218,34 @@ pub(crate) fn clamp_block(origin: Point, w: f64, h: f64, frame: Rect) -> Point {
     Point::new(origin.x.clamp(min_x, max_x), origin.y.clamp(min_y, max_y))
 }
 
+/// Measured block of `text` at `size`; the fallback (empty or
+/// whitespace-only input, which measures no width) keeps the draft's
+/// anchor math running before the first glyph lands.
+pub(crate) fn block_size(text: &str, size: f64) -> (f64, f64) {
+    text::measure_block(text, size)
+        .map(|m| (m.width, m.height))
+        .unwrap_or((size * 4.0, text::line_height(size)))
+}
+
+/// The draft — and the committed form — of a plain text element: the
+/// measured block clamped into the frame. One builder serves the preview
+/// and the commit, so Enter freezes what is on screen.
+fn text_element_kind(
+    origin: Point,
+    text: &str,
+    color: Rgba,
+    size: f64,
+    image: Size,
+) -> ElementKind {
+    let (w, h) = block_size(text, size);
+    ElementKind::Text {
+        origin: clamp_block(origin, w, h, Rect::new(0.0, 0.0, image.width, image.height)),
+        text: text.to_string(),
+        color,
+        size,
+    }
+}
+
 /// The eight frame handles of a rect (image pixels), corners first for hit
 /// priority. There is no center handle: for crop, drags that miss the
 /// handles move the whole frame (`FrameSpot::Center`); resize has no move
@@ -319,6 +359,9 @@ pub(crate) struct DragMachine {
     /// the second phase of the callout interaction (the first is the arrow
     /// drag in `drag`).
     callout: Option<PendingCallout>,
+    /// The open text entry — opened together with `Signal::BeginText`,
+    /// fed by `update_text`, closed by `commit_text`/`cancel_text`.
+    text: Option<TextDraft>,
     frame: Option<FrameEdit>,
 }
 
@@ -418,21 +461,25 @@ impl DragMachine {
                 // A click on editable text edits it in place; a click on a
                 // callout's arrow moves the whole callout (text follows).
                 if hit_edits_text(&ctx, id, point) {
+                    let target = TextTarget::Existing { id };
+                    self.begin_text(target, ctx.elements);
                     return DownOutcome {
                         selection: Select::Keep,
-                        signal: Some(Signal::BeginText(TextTarget::Existing { id })),
+                        signal: Some(Signal::BeginText(target)),
                     };
                 }
                 if ctx.tool == Some(Tool::Text) && !id_is_textlike(ctx.elements, id) {
                     // The text tool starts a new text over any other
                     // element.
+                    let target = TextTarget::New {
+                        origin: point,
+                        callout: false,
+                        color: ctx.color,
+                    };
+                    self.begin_text(target, ctx.elements);
                     return DownOutcome {
                         selection: Select::Keep,
-                        signal: Some(Signal::BeginText(TextTarget::New {
-                            origin: point,
-                            callout: false,
-                            color: ctx.color,
-                        })),
+                        signal: Some(Signal::BeginText(target)),
                     };
                 }
                 (
@@ -451,15 +498,17 @@ impl DragMachine {
                 // opens its editor instead; in viewing mode the press moves
                 // the window. The frame handles, the text field and the
                 // elements have already claimed their clicks above.
-                match (ctx.tool, draft_kind) {
+                    match (ctx.tool, draft_kind) {
                     (Some(Tool::Text), _) => {
+                        let target = TextTarget::New {
+                            origin: point,
+                            callout: false,
+                            color: ctx.color,
+                        };
+                        self.begin_text(target, ctx.elements);
                         return DownOutcome {
                             selection: Select::Clear,
-                            signal: Some(Signal::BeginText(TextTarget::New {
-                                origin: point,
-                                callout: false,
-                                color: ctx.color,
-                            })),
+                            signal: Some(Signal::BeginText(target)),
                         };
                     }
                     (_, Some(kind)) => (Select::Clear, Drag::Draw(kind)),
@@ -558,11 +607,15 @@ impl DragMachine {
                         size,
                         width,
                     });
-                    outcome.signal = Some(Signal::BeginText(TextTarget::New {
+                    let target = TextTarget::New {
                         origin: anchor,
                         callout: true,
                         color,
-                    }));
+                    };
+                    // A new draft carries no document text; elements stay
+                    // untouched here.
+                    self.begin_text(target, &[]);
+                    outcome.signal = Some(Signal::BeginText(target));
                     return Some(outcome);
                 }
                 // The fresh element stays unselected: drawing must not end
@@ -609,7 +662,7 @@ impl DragMachine {
     }
 
     /// What to draw over the composite for the in-flight interaction.
-    pub(crate) fn preview(&self, elements: &[Element]) -> Preview {
+    pub(crate) fn preview(&self, elements: &[Element], image: Size) -> Preview {
         let mut preview = Preview {
             hide: None,
             extras: Vec::new(),
@@ -638,9 +691,17 @@ impl DragMachine {
             // The frame drag previews through the frame overlay, not here.
             Some(Drag::Frame { .. }) | None => {}
         }
-        // The pending callout (arrow drawn, text being entered) previews on
-        // top until the text commits or the input is cancelled.
-        if let Some(pending) = self.callout.as_ref() {
+        // The open text entry draws its draft as the committed element:
+        // live text in the measured, clamped geometry — halo and all. The
+        // element being re-edited hides behind its draft.
+        if let Some(kind) = self.text_draft_kind(elements, image) {
+            if let Some(TextTarget::Existing { id }) = self.text.as_ref().map(|d| d.target) {
+                preview.hide = Some(id);
+            }
+            preview.extras.push(Element { id: 0, kind });
+        } else if let Some(pending) = self.callout.as_ref() {
+            // A pending callout without a text entry (a transient state —
+            // the entry opens with the signal): the bare arrow at its base.
             preview.extras.push(Element {
                 id: 0,
                 kind: ElementKind::Callout {
@@ -746,6 +807,9 @@ impl DragMachine {
     ) -> Option<Point> {
         let pending = self.callout.as_mut()?;
         pending.size = size;
+        if let Some(draft) = self.text.as_mut() {
+            draft.size = size;
+        }
         Some(callout_anchor(
             pending.base,
             pending.tip,
@@ -755,46 +819,192 @@ impl DragMachine {
         ))
     }
 
-    /// Commit the callout's text — the end of the second phase: a
-    /// non-empty text lands as the element's final form, anchored beside
-    /// the arrow base; an empty input drops the pending arrow and adds
-    /// nothing. None when there is no pending callout or the input was
-    /// empty.
-    pub(crate) fn commit_callout_text(
+    /// Open a text entry for `target`: a new element starts empty at the
+    /// default size; an existing one carries its text and size (the field
+    /// editor still reads the initial string from the document for its
+    /// prefill). Called as the matching `Signal::BeginText` goes out.
+    pub(crate) fn begin_text(&mut self, target: TextTarget, elements: &[Element]) {
+        let draft = match target {
+            TextTarget::New { .. } => TextDraft {
+                target,
+                size: DEFAULT_TEXT_SIZE_PX,
+                text: String::new(),
+            },
+            TextTarget::Existing { id } => {
+                let Some((text, size)) = elements.iter().find(|el| el.id == id).and_then(|el| {
+                    match &el.kind {
+                        ElementKind::Text { text, size, .. }
+                        | ElementKind::Callout { text, size, .. } => {
+                            Some((text.clone(), *size))
+                        }
+                        _ => None,
+                    }
+                }) else {
+                    return;
+                };
+                TextDraft { target, size, text }
+            }
+        };
+        self.text = Some(draft);
+    }
+
+    /// Feed the field editor's live string into the draft — every
+    /// keystroke; the canvas re-renders the draft from it.
+    pub(crate) fn update_text(&mut self, text: &str) {
+        if let Some(draft) = self.text.as_mut() {
+            draft.text = text.to_string();
+        }
+    }
+
+    /// The size slider's text-mode change mid-edit: resize the active
+    /// draft (and the pending callout, whose anchor math re-runs at the
+    /// new size).
+    pub(crate) fn update_text_size(&mut self, size: f64) {
+        if let Some(draft) = self.text.as_mut() {
+            draft.size = size;
+        }
+        if let Some(pending) = self.callout.as_mut() {
+            pending.size = size;
+        }
+    }
+
+    /// The draft element exactly as `commit_text` will freeze it: the live
+    /// text in the committed geometry — a new block measured and clamped
+    /// into the frame, the pending callout anchored beside its base, or
+    /// the existing element's kind with the live text. None without an
+    /// open entry. The window also reads this to place the field editor
+    /// over the block.
+    pub(crate) fn text_draft_kind(
+        &self,
+        elements: &[Element],
+        image: Size,
+    ) -> Option<ElementKind> {
+        let draft = self.text.as_ref()?;
+        match draft.target {
+            TextTarget::New {
+                origin,
+                callout: false,
+                color,
+            } => Some(text_element_kind(
+                origin,
+                &draft.text,
+                color,
+                draft.size,
+                image,
+            )),
+            TextTarget::New { callout: true, .. } => {
+                let pending = self.callout.as_ref()?;
+                let (w, h) = block_size(&draft.text, pending.size);
+                Some(ElementKind::Callout {
+                    tip: pending.tip,
+                    anchor: callout_anchor(
+                        pending.base,
+                        pending.tip,
+                        w,
+                        h,
+                        Rect::new(0.0, 0.0, image.width, image.height),
+                    ),
+                    text: draft.text.clone(),
+                    color: pending.color,
+                    size: pending.size,
+                    width: pending.width,
+                })
+            }
+            TextTarget::Existing { id } => {
+                let el = elements.iter().find(|el| el.id == id)?;
+                match &el.kind {
+                    ElementKind::Text {
+                        origin,
+                        text: _,
+                        color,
+                        size,
+                    } => Some(text_element_kind(
+                        *origin,
+                        &draft.text,
+                        *color,
+                        *size,
+                        image,
+                    )),
+                    // The authored anchor holds; the block only re-clamps
+                    // into the frame as the edited text grows.
+                    ElementKind::Callout {
+                        tip,
+                        anchor,
+                        text: _,
+                        color,
+                        size,
+                        width,
+                    } => {
+                        let (w, h) = block_size(&draft.text, *size);
+                        Some(ElementKind::Callout {
+                            tip: *tip,
+                            anchor: clamp_block(
+                                *anchor,
+                                w,
+                                h,
+                                Rect::new(0.0, 0.0, image.width, image.height),
+                            ),
+                            text: draft.text.clone(),
+                            color: *color,
+                            size: *size,
+                            width: *width,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Close the text entry — the end of every text interaction: a
+    /// non-empty new text or callout lands as the element the draft showed
+    /// (same builder, so Enter cannot move it); an emptied existing
+    /// element deletes; an unchanged or empty new input changes nothing.
+    /// None when there is no open entry or nothing to journal.
+    pub(crate) fn commit_text(
         &mut self,
-        text: &str,
+        elements: &[Element],
         image: Size,
         next_id: u64,
     ) -> Option<Command> {
-        let pending = self.callout.take()?;
-        if text.trim().is_empty() {
-            return None;
+        let draft = self.text.as_ref()?;
+        let kind = self.text_draft_kind(elements, image);
+        let text = draft.text.clone();
+        let target = draft.target;
+        // The entry — and its pending callout — close whatever the input.
+        self.text = None;
+        self.callout = None;
+        match target {
+            TextTarget::Existing { id } => {
+                if text.trim().is_empty() {
+                    return Some(Command::DeleteElement(id));
+                }
+                let changed = elements
+                    .iter()
+                    .find(|el| el.id == id)
+                    .and_then(|el| match &el.kind {
+                        ElementKind::Text { text: old, .. }
+                        | ElementKind::Callout { text: old, .. } => {
+                            Some(old.as_str() != text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(true);
+                changed.then_some(Command::EditText(id, text))
+            }
+            TextTarget::New { .. } => {
+                if text.trim().is_empty() {
+                    return None;
+                }
+                kind.map(|kind| Command::AddElement(Element { id: next_id, kind }))
+            }
         }
-        let (w, h) = text::measure_block(text, pending.size)
-            .map(|m| (m.width, m.height))
-            .unwrap_or((pending.size * 4.0, pending.size * 1.25));
-        Some(Command::AddElement(Element {
-            id: next_id,
-            kind: ElementKind::Callout {
-                tip: pending.tip,
-                anchor: callout_anchor(
-                    pending.base,
-                    pending.tip,
-                    w,
-                    h,
-                    Rect::new(0.0, 0.0, image.width, image.height),
-                ),
-                text: text.to_string(),
-                color: pending.color,
-                size: pending.size,
-                width: pending.width,
-            },
-        }))
     }
 
-    /// Drop the pending callout without committing (cancelled input, a new
-    /// shot arrived).
-    pub(crate) fn cancel_callout_text(&mut self) {
+    /// Drop the open text entry without committing (cancelled input, a new
+    /// shot arrived), together with its pending callout.
+    pub(crate) fn cancel_text(&mut self) {
+        self.text = None;
         self.callout = None;
     }
 }
@@ -908,7 +1118,7 @@ mod tests {
             assert_eq!(outcome.command, None, "a 2 px drag is a plain click");
             assert_eq!(outcome.signal, None, "no text phase for a short callout");
             assert!(
-                machine.preview(&elements).extras.is_empty(),
+                machine.preview(&elements, Size::new(400.0, 300.0)).extras.is_empty(),
                 "nothing previews after a click"
             );
         }
@@ -1250,7 +1460,7 @@ mod tests {
         );
 
         // The arrow previews (with empty text) while the input is open.
-        let preview = machine.preview(&elements);
+        let preview = machine.preview(&elements, Size::new(400.0, 300.0));
         assert_eq!(preview.extras.len(), 1);
         assert!(
             matches!(&preview.extras[0].kind, ElementKind::Callout { text, tip, .. }
@@ -1263,11 +1473,19 @@ mod tests {
             .expect("a pending callout");
         assert!(anchor.x < 50.0, "the block sits left of the base");
 
-        // Committing the text lands the element and closes the phase.
+        // Typing feeds the draft; the commit freezes the very element the
+        // preview showed (the no-jump invariant).
+        machine.update_text("hi");
+        let shown = machine
+            .preview(&elements, Size::new(400.0, 300.0))
+            .extras[0]
+            .kind
+            .clone();
         let command = machine
-            .commit_callout_text("hi", Size::new(400.0, 300.0), 9)
+            .commit_text(&elements, Size::new(400.0, 300.0), 9)
             .expect("a real text");
         let el = assert_add(Some(command), 9);
+        assert_eq!(el.kind, shown, "commit freezes the draft the canvas showed");
         match el.kind {
             ElementKind::Callout { tip, anchor, text, color, size, width } => {
                 assert_eq!(tip, pt(100.0, 50.0));
@@ -1279,9 +1497,12 @@ mod tests {
             }
             other => panic!("expected callout, got {other:?}"),
         }
-        assert!(machine.preview(&elements).extras.is_empty(), "the phase is over");
+        assert!(
+            machine.preview(&elements, Size::new(400.0, 300.0)).extras.is_empty(),
+            "the phase is over"
+        );
         assert_eq!(
-            machine.commit_callout_text("again", Size::new(400.0, 300.0), 10),
+            machine.commit_text(&elements, Size::new(400.0, 300.0), 10),
             None,
             "a second commit has nothing to land"
         );
@@ -1295,8 +1516,138 @@ mod tests {
         machine.drag_to(pt(100.0, 50.0));
         machine.up(pt(100.0, 50.0), 9).expect("drag was active");
         // Whitespace-only input is as good as empty.
-        assert_eq!(machine.commit_callout_text("  ", Size::new(400.0, 300.0), 9), None);
-        assert!(machine.preview(&elements).extras.is_empty(), "the arrow is gone");
+        machine.update_text("  ");
+        assert_eq!(
+            machine.commit_text(&elements, Size::new(400.0, 300.0), 9),
+            None
+        );
+        assert!(
+            machine
+                .preview(&elements, Size::new(400.0, 300.0))
+                .extras
+                .is_empty(),
+            "the arrow is gone"
+        );
+    }
+
+    #[test]
+    fn text_draft_equals_commit_across_strings_sizes_and_edges() {
+        // The no-jump invariant: at every keystroke, whatever the canvas
+        // shows is exactly what Enter lands — across the growing string,
+        // the size and the click position, edge-clamped ones included.
+        let image = Size::new(400.0, 300.0);
+        for text in ["x", "hi", "hello brave new world", "многострочный\nтекст"] {
+            for size in [12.0, 32.0, 64.0] {
+                for origin in [pt(5.0, 5.0), pt(390.0, 290.0), pt(200.0, 150.0)] {
+                    let mut typed = String::new();
+                    for ch in text.chars() {
+                        typed.push(ch);
+                        let mut machine = DragMachine::new();
+                        let elements: Vec<Element> = Vec::new();
+                        let outcome =
+                            machine.down(tool_ctx(ctx(&elements), Tool::Text), origin);
+                        assert!(matches!(
+                            outcome.signal,
+                            Some(Signal::BeginText(TextTarget::New {
+                                callout: false,
+                                ..
+                            }))
+                        ));
+                        machine.update_text_size(size);
+                        machine.update_text(&typed);
+                        let shown = machine
+                            .preview(&elements, image)
+                            .extras[0]
+                            .kind
+                            .clone();
+                        let el = assert_add(
+                            machine.commit_text(&elements, image, 7),
+                            7,
+                        );
+                        assert_eq!(
+                            el.kind, shown,
+                            "commit moved the draft: {typed:?} at {size}/{origin:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_draft_slides_inward_as_it_grows_at_an_edge() {
+        // A click near the right edge types a block that re-clamps into
+        // the frame while it grows — no jump waits for the commit.
+        let image = Size::new(400.0, 300.0);
+        let mut machine = DragMachine::new();
+        let elements: Vec<Element> = Vec::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(390.0, 150.0));
+        machine.update_text("a");
+        let short = match &machine.preview(&elements, image).extras[0].kind {
+            ElementKind::Text { origin, .. } => *origin,
+            other => panic!("expected a text draft, got {other:?}"),
+        };
+        machine.update_text("a much longer line of text");
+        let long = match &machine.preview(&elements, image).extras[0].kind {
+            ElementKind::Text { origin, .. } => *origin,
+            other => panic!("expected a text draft, got {other:?}"),
+        };
+        assert!(long.x < short.x, "the block slides left as it grows");
+        assert_eq!(long.y, short.y, "the vertical anchor holds");
+    }
+
+    #[test]
+    fn callout_draft_equals_commit_while_typing() {
+        let image = Size::new(400.0, 300.0);
+        for text in ["x", "hello callout world", "две\nстроки"] {
+            let mut machine = DragMachine::new();
+            let elements: Vec<Element> = Vec::new();
+            machine.down(tool_ctx(ctx(&elements), Tool::Callout), pt(50.0, 50.0));
+            machine.drag_to(pt(100.0, 50.0));
+            machine.up(pt(100.0, 50.0), 9).expect("drag was active");
+            machine.update_text(text);
+            let shown = machine.preview(&elements, image).extras[0].kind.clone();
+            let el = assert_add(machine.commit_text(&elements, image, 9), 9);
+            assert_eq!(el.kind, shown, "commit moved the callout: {text:?}");
+        }
+    }
+
+    #[test]
+    fn existing_text_edit_commits_through_the_draft() {
+        let image = Size::new(400.0, 300.0);
+        let elements = vec![text_element(4)];
+        // A click on the element with the text tool opens the re-edit.
+        let mut machine = DragMachine::new();
+        let outcome = machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(10.0, 90.0));
+        assert_eq!(
+            outcome.signal,
+            Some(Signal::BeginText(TextTarget::Existing { id: 4 }))
+        );
+        // The draft replaces the element's text and re-clamps with it;
+        // the commit is the plain EditText of what was on screen.
+        machine.update_text("WWWW");
+        let preview = machine.preview(&elements, image);
+        assert_eq!(preview.hide, Some(4), "the element hides behind its draft");
+        assert!(matches!(
+            &preview.extras[0].kind,
+            ElementKind::Text { text, .. } if text == "WWWW"
+        ));
+        assert_eq!(
+            machine.commit_text(&elements, image, 5),
+            Some(Command::EditText(4, "WWWW".into()))
+        );
+        // An unchanged re-edit journals nothing; an emptied one deletes.
+        let mut machine = DragMachine::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(10.0, 90.0));
+        machine.update_text("WW");
+        assert_eq!(machine.commit_text(&elements, image, 5), None);
+        let mut machine = DragMachine::new();
+        machine.down(tool_ctx(ctx(&elements), Tool::Text), pt(10.0, 90.0));
+        machine.update_text(" ");
+        assert_eq!(
+            machine.commit_text(&elements, image, 5),
+            Some(Command::DeleteElement(4))
+        );
     }
 
     #[test]
