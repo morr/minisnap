@@ -226,7 +226,9 @@ impl Hud {
         }
         let cross_ref: &CGPath = &cross_path;
         cross.setPath(Some(cross_ref));
-        cross.setStrokeColor(Some(&NSColor::redColor().CGColor()));
+        // Semi-transparent red (user-requested): the crosshair marks the
+        // cursor pixel without dominating the magnified content.
+        cross.setStrokeColor(Some(&NSColor::redColor().colorWithAlphaComponent(0.5).CGColor()));
         cross.setLineWidth(1.0);
 
         // Two-tone frame over the loupe edge, on top of the grid and the
