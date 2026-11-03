@@ -2,7 +2,7 @@
 
 ## 1. Сброс инструмента после фиксации элемента
 
-- [ ] 1.1 `src/editor_window.rs`, `handle_mouse_up`: после применения `DragOutcome.command` — если это `Command::AddElement(_)`, сбросить `ivars.tool` в `None` до `redraw()`. Проверка: `cargo test` проходит; сценарий «Инструмент отжимается после фиксации» дельты (протяжка стрелки — кнопка отжалась, tool = None в `state`).
+- [x] 1.1 `src/editor_window.rs`, `handle_mouse_up`: после применения `DragOutcome.command` — если это `Command::AddElement(_)`, сбросить `ivars.tool` в `None` до `redraw()`. Проверка: `cargo test` проходит; сценарий «Инструмент отжимается после фиксации» дельты (протяжка стрелки — кнопка отжалась, tool = None в `state`).
 - [ ] 1.2 `src/editor_window.rs`, `commit_text_editor`: после применения команды — если это `Command::AddElement(_)`, сбросить `ivars.tool` в `None` до `redraw()`. Проверка: `cargo test` проходит; фиксация непустого текста/коллаута отжимает кнопку, пустая фиксация, отмена ввода и правка существующего текста — нет (сценарий «Жест без элемента не отжимает инструмент»).
 - [ ] 1.3 Убедиться, что других точек применения `AddElement` вне агентского `agent_command` нет (`grep -n "shot.apply" src/editor_window.rs` — три места: mouse-up, commit_text_editor, commit_frame_edit). Проверка: grep-вывод приложен в recap задачи.
 

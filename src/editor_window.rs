@@ -792,6 +792,7 @@ impl EditorView {
         };
         self.layout_frame_chrome();
         if let Some(cmd) = outcome.command {
+            let drawn = matches!(cmd, Command::AddElement(_));
             let result = ivars
                 .shot
                 .borrow_mut()
@@ -799,6 +800,11 @@ impl EditorView {
                 .map(|shot| shot.apply(cmd));
             if let Some(Err(err)) = result {
                 crate::log!("editor: failed to apply the drag command: {err}");
+            }
+            // A completed draw uses up the one-shot tool (a click below the
+            // drag threshold produces no element and keeps the tool picked).
+            if drawn {
+                ivars.tool.set(None);
             }
         }
         match outcome.signal {
