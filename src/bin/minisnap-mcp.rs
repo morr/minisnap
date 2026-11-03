@@ -36,6 +36,10 @@ impl Instance {
 /// app instead of hanging the agent.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Every step is an HTTP round trip with this timeout, so a pathological
+/// batch would occupy the app's main thread and the agent for minutes.
+const MAX_BATCH_STEPS: usize = 50;
+
 fn main() {
     // stdout is the protocol; diagnostics go to stderr only.
     let stdin = std::io::stdin();
@@ -164,7 +168,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "action",
-            "description": "Run an app-level action through the same code paths as the tray menu and hotkeys. The `action` value is a serde enum: {\"Capture\":{\"edit\":true}}, {\"OpenLatest\"}, {\"OpenEditor\":{\"path\":\"…\"}}, \"CloseEditor\", {\"OverlaySelect\":{\"x\":0,\"y\":0,\"w\":800,\"h\":600}} (captured-frame pixels, finishes the frozen overlay like a drag: crop, shutter, clipboard, save), \"OverlayCancel\", \"PrefsOpen\", \"PrefsClose\", \"Quit\".",
+            "description": "Run an app-level action through the same code paths as the tray menu and hotkeys. For several sequential actions prefer the `batch` tool. The `action` value is a serde enum: {\"Capture\":{\"edit\":true}}, {\"OpenLatest\"}, {\"OpenEditor\":{\"path\":\"…\"}}, \"CloseEditor\", {\"OverlaySelect\":{\"x\":0,\"y\":0,\"w\":800,\"h\":600}} (captured-frame pixels, finishes the frozen overlay like a drag: crop, shutter, clipboard, save), \"OverlayCancel\", \"PrefsOpen\", \"PrefsClose\", \"Quit\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -176,7 +180,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "editor",
-            "description": "Operate on the open editor document (same paths as the toolbar and mouse handlers). The `op` value is a serde enum: {\"SetTool\":{\"tool\":\"arrow\"|\"rect\"|\"line\"|\"pen\"|\"text\"|\"callout\"|\"blur\"|\"crop\"|\"resize\"|null}}, {\"SetColor\":{\"rgba\":[1,0,0,1]}}, {\"SetWidth\":{\"width\":4.0}}, {\"Command\":{\"AddElement\":{\"id\":1,\"kind\":{\"Arrow\":{\"a\":[10,10],\"b\":[200,80],\"color\":[1,0,0,1],\"width\":4}}}}} (journal shape), \"Undo\", \"Redo\", {\"Select\":{\"id\":1}}, {\"Page\":{\"direction\":\"prev\"|\"next\"}}, {\"BeginText\":{\"target\":{\"new\":{\"x\":100,\"y\":80}},\"text\":\"WWWW\"}} (new text; target may also be {\"new_callout\":{\"from\":[x,y],\"to\":[x,y]}} — an arrow drag that opens the phase-two input at its base — or {\"existing\":1}; `text` is optional and lands in the field editor like typed text), {\"FinishText\":{\"commit\":true}} (commit like Enter; false cancels like Esc). Points are frame pixels, origin top-left.",
+            "description": "Operate on the open editor document (same paths as the toolbar and mouse handlers). For several sequential operations prefer the `batch` tool. The `op` value is a serde enum: {\"SetTool\":{\"tool\":\"arrow\"|\"rect\"|\"line\"|\"pen\"|\"text\"|\"callout\"|\"blur\"|\"crop\"|\"resize\"|null}}, {\"SetColor\":{\"rgba\":[1,0,0,1]}}, {\"SetWidth\":{\"width\":4.0}}, {\"Command\":{\"AddElement\":{\"id\":1,\"kind\":{\"Arrow\":{\"a\":[10,10],\"b\":[200,80],\"color\":[1,0,0,1],\"width\":4}}}}} (journal shape), \"Undo\", \"Redo\", {\"Select\":{\"id\":1}}, {\"Page\":{\"direction\":\"prev\"|\"next\"}}, {\"BeginText\":{\"target\":{\"new\":{\"x\":100,\"y\":80}},\"text\":\"WWWW\"}} (new text; target may also be {\"new_callout\":{\"from\":[x,y],\"to\":[x,y]}} — an arrow drag that opens the phase-two input at its base — or {\"existing\":1}; `text` is optional and lands in the field editor like typed text), {\"FinishText\":{\"commit\":true}} (commit like Enter; false cancels like Esc). Points are frame pixels, origin top-left.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -184,6 +188,22 @@ fn tools_list() -> Value {
                     "instance": {"type": "string"}
                 },
                 "required": ["op"]
+            }
+        },
+        {
+            "name": "batch",
+            "description": "Execute several sequential steps against one instance in a single call — prefer batch over repeated action/editor calls whenever more than one step is needed. `steps` is an ordered list; each step is an object with exactly one key: {\"action\": <AgentAction shape>} or {\"editor\": <AgentEditorOp shape>} — the same shapes the action/editor tools take. Steps run in order through the same code paths; the answer reports every step with its number and outcome (done/initiated/rejected/noop/step error). App-level statuses do not stop the chain — a rejected step does not invalidate the rest; a transport error stops it and reports the executed steps. Reads (state, screenshot, log) are not steps, and polling does not batch: Capture only initiates the overlay — poll state between Capture and OverlaySelect. Max 50 steps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "ordered steps; each is {\"action\": …} or {\"editor\": …}, values in the same serde enum shapes as the action/editor tools; max 50"
+                    },
+                    "instance": {"type": "string"}
+                },
+                "required": ["steps"]
             }
         },
         {
@@ -281,6 +301,48 @@ fn call_tool(name: &str, args: &Value) -> Result<Vec<Value>, String> {
             )?;
             Ok(vec![text_content(format_result(&instance, &response))])
         }
+        "batch" => {
+            let instance = pick_instance(instance_arg(args))?;
+            let steps = args
+                .get("steps")
+                .and_then(Value::as_array)
+                .ok_or("batch: missing 'steps' array")?;
+            validate_batch_steps(steps).map_err(|e| format!("batch: {e}"))?;
+            let mut report: Vec<String> = Vec::new();
+            for (index, step) in steps.iter().enumerate() {
+                let (key, value) = batch_step_parts(step).expect("steps validated before execution");
+                let endpoint = if key == "action" { "/action" } else { "/editor" };
+                let body = serde_json::to_string(value).map_err(|e| e.to_string())?;
+                let response = match http_json(instance.record.port, "POST", endpoint, Some(&body)) {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // Nothing more to collect: name the instance, the
+                        // step the chain died on, and what did execute.
+                        let mut message = format!(
+                            "{} — batch stopped before step {} (transport error: {e})",
+                            instance.label(),
+                            index + 1
+                        );
+                        if !report.is_empty() {
+                            message.push_str("; executed steps:\n");
+                            message.push_str(&report.join("\n"));
+                        }
+                        return Err(message);
+                    }
+                };
+                report.push(format!(
+                    "step {} — {}",
+                    index + 1,
+                    describe_step_result(&response)
+                ));
+            }
+            Ok(vec![text_content(format!(
+                "{} — batch of {} steps:\n{}",
+                instance.label(),
+                steps.len(),
+                report.join("\n")
+            ))])
+        }
         "log" => {
             let instance = pick_instance(instance_arg(args))?;
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
@@ -318,6 +380,65 @@ fn format_result(instance: &Instance, response: &Value) -> String {
             serde_json::to_string_pretty(result).unwrap_or_default()
         ),
         None => format!("{} — unexpected response: {response}", instance.label()),
+    }
+}
+
+/// Validate the step list before anything executes: not empty, within the
+/// limit, every step shaped as one `action`/`editor` key — errors name the
+/// step number.
+fn validate_batch_steps(steps: &[Value]) -> Result<(), String> {
+    if steps.is_empty() {
+        return Err("empty 'steps'; nothing to execute".into());
+    }
+    if steps.len() > MAX_BATCH_STEPS {
+        return Err(format!(
+            "{} steps exceed the limit of {MAX_BATCH_STEPS}; split the chain into several batch calls",
+            steps.len()
+        ));
+    }
+    for (index, step) in steps.iter().enumerate() {
+        batch_step_parts(step).map_err(|e| format!("step {}: {e}", index + 1))?;
+    }
+    Ok(())
+}
+
+/// Split one batch step: exactly one of the keys `action`/`editor`, and
+/// its value goes to the matching endpoint verbatim — the same shapes the
+/// single tools take.
+fn batch_step_parts(step: &Value) -> Result<(&'static str, &Value), String> {
+    let object = step.as_object().ok_or_else(|| {
+        format!("expected an object with one of the keys \"action\"/\"editor\", got {step}")
+    })?;
+    let (key, value) = match (object.get("action"), object.get("editor")) {
+        (Some(_), Some(_)) => {
+            return Err("has both \"action\" and \"editor\" keys; one per step".into())
+        }
+        (Some(value), None) => ("action", value),
+        (None, Some(value)) => ("editor", value),
+        (None, None) => {
+            return Err(format!("has neither \"action\" nor \"editor\" key: {step}"));
+        }
+    };
+    if object.len() > 1 {
+        let extra: Vec<&str> = object
+            .keys()
+            .map(String::as_str)
+            .filter(|key| *key != "action" && *key != "editor")
+            .collect();
+        return Err(format!("unexpected extra key(s): {}", extra.join(", ")));
+    }
+    Ok((key, value))
+}
+
+/// One report line for a step's answer: the app's status/detail, the app's
+/// error, or the raw envelope when it is neither.
+fn describe_step_result(response: &Value) -> String {
+    if let Some(error) = response.get("error").and_then(Value::as_str) {
+        return format!("error: {error}");
+    }
+    match response.get("result") {
+        Some(result) => result.to_string(),
+        None => format!("unexpected response: {response}"),
     }
 }
 
@@ -496,8 +617,62 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_six_tools() {
+    fn tools_list_has_seven_tools_and_advertises_batch() {
         let list = tools_list();
-        assert_eq!(list.pointer("/tools").and_then(Value::as_array).map(Vec::len), Some(6));
+        let tools = list.pointer("/tools").and_then(Value::as_array).unwrap();
+        assert_eq!(tools.len(), 7);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"batch"), "tools: {names:?}");
+        for name in ["action", "editor"] {
+            let description = tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .and_then(|tool| tool.get("description").and_then(Value::as_str))
+                .expect("tool present");
+            assert!(
+                description.contains("batch"),
+                "{name} description must point at batch"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_step_parts_accepts_exactly_one_key() {
+        let action_step = json!({"action": "CloseEditor"});
+        let (endpoint, value) = batch_step_parts(&action_step).unwrap();
+        assert_eq!(endpoint, "action");
+        assert_eq!(value, &json!("CloseEditor"));
+        let editor_step = json!({"editor": "Undo"});
+        let (endpoint, value) = batch_step_parts(&editor_step).unwrap();
+        assert_eq!(endpoint, "editor");
+        assert_eq!(value, &json!("Undo"));
+    }
+
+    #[test]
+    fn batch_step_parts_rejects_wrong_shapes() {
+        for step in [
+            json!({"action": "CloseEditor", "editor": "Undo"}),
+            json!({"tool": "arrow"}),
+            json!("CloseEditor"),
+            json!({"action": "CloseEditor", "instance": "main"}),
+        ] {
+            assert!(batch_step_parts(&step).is_err(), "must reject {step}");
+        }
+    }
+
+    #[test]
+    fn batch_validation_enforces_limit_and_names_the_bad_step() {
+        assert!(validate_batch_steps(&[]).is_err());
+        let many: Vec<Value> = (0..=MAX_BATCH_STEPS)
+            .map(|_| json!({"action": "CloseEditor"}))
+            .collect();
+        let error = validate_batch_steps(&many).unwrap_err();
+        assert!(error.contains("50"), "limit named: {error}");
+        let steps = vec![json!({"action": "CloseEditor"}), json!({"bogus": 1})];
+        let error = validate_batch_steps(&steps).unwrap_err();
+        assert!(error.contains("step 2"), "bad step named: {error}");
     }
 }
