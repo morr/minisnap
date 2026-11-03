@@ -238,13 +238,21 @@ fn apply_cmd(state: &mut DocState, cmd: &Command) {
             }
         }
         Command::EditText(id, text) => {
+            let (w, h) = image_size(&state.base);
             for el in &mut state.elements {
-                if el.id == *id {
-                    match &mut el.kind {
-                        ElementKind::Text { text: t, .. } => *t = text.clone(),
-                        ElementKind::Callout { text: t, .. } => *t = text.clone(),
-                        _ => {}
-                    }
+                if el.id != *id {
+                    continue;
+                }
+                if let ElementKind::Text { text: t, .. } | ElementKind::Callout { text: t, .. } =
+                    &mut el.kind
+                {
+                    *t = text.clone();
+                    // The block re-clamps into the frame for its new text
+                    // exactly as the draft showed it, so the commit lands
+                    // what was on screen; the replay reproduces the shift
+                    // (the clamp is a pure function of the command's own
+                    // text and the base size), like SetTextSize's.
+                    clamp_text_block(&mut el.kind, w, h);
                 }
             }
         }
@@ -957,6 +965,42 @@ mod tests {
                 assert_eq!(*anchor, pt(185.0, 30.0));
             }
             other => panic!("expected callout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_text_reclamps_the_block_and_replays() {
+        let mut doc = EditorDoc::new(solid_frame(200, 200));
+        // A block near the right edge: a longer replacement text grows it
+        // past the edge and the anchor shifts inward at the edit itself —
+        // what the draft showed is what lands, nothing jumps later.
+        doc.apply(Command::AddElement(text_element_at(1, pt(180.0, 40.0), "WW", 20.0)));
+        doc.apply(Command::EditText(1, "a much longer text".into()));
+        let (w, _) = text::measure_block("a much longer text", 20.0)
+            .map(|m| (m.width, m.height))
+            .expect("metrics");
+        match &doc.element(1).expect("text").kind {
+            ElementKind::Text { origin, text, .. } => {
+                assert_eq!(text, "a much longer text");
+                assert_eq!(*origin, pt(200.0 - w - 4.0, 40.0));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        // Replaying the journal reproduces the clamped anchor; one undo
+        // returns the authored text and position.
+        let mut replayed = EditorDoc::new(solid_frame(200, 200));
+        for cmd in doc.applied_log() {
+            replayed.apply(cmd.clone());
+        }
+        assert_eq!(replayed.elements(), doc.elements());
+        assert!(doc.undo());
+        match &doc.element(1).expect("text").kind {
+            ElementKind::Text { origin, text, .. } => {
+                assert_eq!(text, "WW");
+                assert_eq!(*origin, pt(180.0, 40.0));
+            }
+            other => panic!("expected text, got {other:?}"),
         }
     }
 

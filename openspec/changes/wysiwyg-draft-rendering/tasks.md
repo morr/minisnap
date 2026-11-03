@@ -13,7 +13,7 @@
 
 ## 3. Правка существующего: якорь по зажиму
 
-- [ ] 3.1 `apply_cmd::EditText` в `src/editor/mod.rs` пересчитывает якорь текстового и коллаут-элемента через `clamp_block` для нового текста (прецедент — `SetTextSize`/`clamp_text_block`); тест: реплей журнала с `EditText` у края кадра воспроизводит тот же якорь, undo возвращает исходный. Проверка: `cargo test -p minisnap editor::tests`.
+- [x] 3.1 `apply_cmd::EditText` в `src/editor/mod.rs` пересчитывает якорь текстового и коллаут-элемента через `clamp_block` для нового текста (прецедент — `SetTextSize`/`clamp_text_block`); тест: реплей журнала с `EditText` у края кадра воспроизводит тот же якорь, undo возвращает исходный. Проверка: `cargo test -p minisnap editor::tests`.
 
 ## 4. Перенос и тяга конца: глубина и маркеры
 
