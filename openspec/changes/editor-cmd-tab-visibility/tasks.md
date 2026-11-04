@@ -7,7 +7,7 @@
 
 ## 2. Политика активации в агент-канале
 
-- [ ] 2.1 В `agent_proto.rs` — поле `activation_policy` в payload `/state`, заполнение в `handle_state` (`src/app.rs` / `src/agent_server.rs`). Проверка: `cargo build --release` проходит; на запущенном приложении `GET /state` до открытия редактора отдаёт `accessory`.
+- [x] 2.1 В `agent_proto.rs` — поле `activation_policy` в payload `/state`, заполнение в `handle_state` (`src/app.rs` / `src/agent_server.rs`). Проверка: `cargo build --release` проходит; на запущенном приложении `GET /state` до открытия редактора отдаёт `accessory`.
 - [ ] 2.2 Мост `src/bin/minisnap-mcp.rs`: строка политики в человекочитаемом тексте `state`, если формат текста её не подхватывает сам; пересборка моста. Проверка: `state` MCP-инструмента показывает `accessory` при скрытом редакторе.
 
 ## 3. Live-проверка на пересобранном приложении

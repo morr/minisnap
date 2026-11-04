@@ -765,8 +765,16 @@ impl AppController {
     /// Assemble the full application state: what is open, what the
     /// document holds, what the config says. Pure read over the ivars.
     fn agent_state(&self) -> crate::agent_proto::AppState {
-        use crate::agent_proto::{AppState, ConfigSummary};
+        use crate::agent_proto::{ActivationPolicy, AppState, ConfigSummary};
 
+        // The real policy, not the desired one: the state reports what the
+        // app is right now. `Prohibited` never applies to minisnap.
+        let activation_policy = match NSApplication::sharedApplication(MainThreadMarker::from(self))
+            .activationPolicy()
+        {
+            NSApplicationActivationPolicy::Regular => ActivationPolicy::Regular,
+            _ => ActivationPolicy::Accessory,
+        };
         let editor = self
             .ivars()
             .editor
@@ -799,6 +807,7 @@ impl AppController {
             prefs_open,
             windows,
             config,
+            activation_policy,
         }
     }
 

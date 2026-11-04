@@ -76,6 +76,17 @@ pub struct EditorState {
     pub elements: Vec<Element>,
 }
 
+/// The app's activation policy, mirroring the editor window's visibility:
+/// `regular` while the editor is visible (minisnap is in the cmd+tab
+/// switcher and the Dock), `accessory` otherwise (menu-bar agent, absent
+/// from cmd+tab).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivationPolicy {
+    Regular,
+    Accessory,
+}
+
 /// Full application state: what is open, what the document holds, what the
 /// config says.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +97,8 @@ pub struct AppState {
     pub prefs_open: bool,
     pub windows: Vec<WindowInfo>,
     pub config: ConfigSummary,
+    /// The activation policy the editor visibility currently maps to.
+    pub activation_policy: ActivationPolicy,
 }
 
 /// Actions of the whole app, mirroring the tray menu and hotkeys.
