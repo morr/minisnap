@@ -79,7 +79,9 @@ own behaviors, not arbitrary macOS UI.
 
 - `instances` — live instances (checkout label, pid, port). Call it first.
 - `state` — full snapshot: open windows with frames, `overlay_active`,
-  `prefs_open`, the editor document (shot path, elements in journal shape
+  `prefs_open`, `activation_policy` (`regular` while the editor window is
+  visible — minisnap is in cmd+tab; `accessory` otherwise), the editor
+  document (shot path, elements in journal shape
   with geometry, selection, active tool, color, stroke width, undo/redo,
   leafing availability) and the config. `editor: null` means the editor
   window was never opened this run; a hidden-but-opened editor still
