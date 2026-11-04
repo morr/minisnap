@@ -147,7 +147,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "state",
-            "description": "Full state of a running minisnap: open windows (editor/overlay/preferences with frames), the editor document (shot path, elements with geometry, selection, tool, color, stroke width, undo/redo), config (hotkeys, save dir).",
+            "description": "Full state of a running minisnap: open windows (editor/overlay/preferences with frames), the editor document (shot path, elements with geometry, selection, tool, color, stroke width, undo/redo), config (hotkeys, save dir), activation policy (regular while the editor window is visible — minisnap is in cmd+tab; accessory otherwise).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"instance": {"type": "string", "description": "checkout label or pid; default: the main checkout, or the only live instance"}}
