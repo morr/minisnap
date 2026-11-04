@@ -98,20 +98,23 @@ define_class!(
         // The system hosts the traffic lights and calls these window methods
         // on a real click (verified with CGEvent clicks on macOS 26, change
         // editor-system-buttons). The miniaturize button sends
-        // `miniaturize:`, not `performMiniaturize:`; an accessory app has no
-        // dock to miniaturize into, so both paths hide the window and the
-        // next `show_shot` brings it back. Green stays native zoom: the
-        // window is `Resizable`, while `toggleFullScreen:` is a no-op
-        // without the `FullScreen` style bit, which would break the system
-        // corner rounding.
+        // `miniaturize:`, not `performMiniaturize:`; the yellow button must
+        // hide the window, not miniaturize it into the dock, so both paths
+        // funnel into `close` — with `releasedWhenClosed == false` that
+        // hides the window, the next `show_shot` brings it back, and the
+        // close routes through the window delegate, keeping the app's
+        // activation policy in step with the hidden editor. Green stays
+        // native zoom: the window is `Resizable`, while `toggleFullScreen:`
+        // is a no-op without the `FullScreen` style bit, which would break
+        // the system corner rounding.
         #[unsafe(method(miniaturize:))]
-        fn __miniaturize(&self, sender: Option<&AnyObject>) {
-            self.orderOut(sender);
+        fn __miniaturize(&self, _sender: Option<&AnyObject>) {
+            self.close();
         }
 
         #[unsafe(method(performMiniaturize:))]
-        fn __perform_miniaturize(&self, sender: Option<&AnyObject>) {
-            self.orderOut(sender);
+        fn __perform_miniaturize(&self, _sender: Option<&AnyObject>) {
+            self.close();
         }
     }
 );

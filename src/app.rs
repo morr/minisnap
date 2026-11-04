@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask, NSEventType,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem,
+    NSStatusItem, NSWindowDelegate,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{
@@ -276,6 +276,20 @@ define_class!(
                 crate::log!("screen recording: now {}", if granted { "granted" } else { "revoked" });
                 self.ivars().permission_granted.set(granted);
             }
+        }
+    }
+
+    unsafe impl NSWindowDelegate for AppController {
+        /// This controller is the delegate of the editor window only, so
+        /// any `windowWillClose` here is the editor window closing (red
+        /// button, Esc/⌘Q/⌘W, agent `CloseEditor`, and the miniaturize
+        /// overrides funneled into `close`). The method fires before the
+        /// close actually hides the window — the visibility predicate
+        /// would still call it visible — so the editor counts as hidden
+        /// straight away.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &objc2_foundation::NSNotification) {
+            self.apply_editor_activation_policy(false);
         }
     }
 );
@@ -1019,16 +1033,10 @@ impl AppController {
     /// window-level trick can put it there, so switching the policy at
     /// runtime is the only mechanism. Idempotent: AppKit treats setting the
     /// current policy as a no-op, the guard just skips the log line.
-    fn sync_activation_policy(&self) {
+    fn apply_editor_activation_policy(&self, editor_visible: bool) {
         let mtm = MainThreadMarker::from(self);
         let app = NSApplication::sharedApplication(mtm);
-        let visible = self
-            .ivars()
-            .editor
-            .borrow()
-            .as_ref()
-            .is_some_and(|editor| editor.window.isVisible());
-        let policy = if visible {
+        let policy = if editor_visible {
             NSApplicationActivationPolicy::Regular
         } else {
             NSApplicationActivationPolicy::Accessory
@@ -1037,6 +1045,19 @@ impl AppController {
             app.setActivationPolicy(policy);
             crate::log!("activation policy: {policy:?}");
         }
+    }
+
+    /// The visibility answer comes from the same predicate the agent state
+    /// and the `only_if_visible` pump use: the window object exists and
+    /// `isVisible()`.
+    fn sync_activation_policy(&self) {
+        let visible = self
+            .ivars()
+            .editor
+            .borrow()
+            .as_ref()
+            .is_some_and(|editor| editor.window.isVisible());
+        self.apply_editor_activation_policy(visible);
     }
 
     /// Open (or focus) the editor window on a shot file. Created lazily and
@@ -1053,6 +1074,14 @@ impl AppController {
             if slot.is_none() {
                 let save_dir = self.ivars().config.borrow().save_dir.clone();
                 *slot = Some(EditorWindow::new(mtm, save_dir));
+                // The controller is the editor window's delegate: any close
+                // of the window returns minisnap to the agent state via
+                // `windowWillClose:`. The delegate reference is weak, and
+                // the controller outlives the window — both live for the
+                // whole process (`run()` forgets the controller).
+                slot.as_ref().expect("editor window")
+                    .window
+                    .setDelegate(Some(ProtocolObject::from_ref(self)));
             }
             slot.as_ref().expect("editor window").show_shot(shot);
         }
