@@ -1012,6 +1012,33 @@ impl AppController {
         }
     }
 
+    /// Keep the activation policy in step with the editor window: a visible
+    /// editor makes minisnap a regular app, so it appears in the cmd+tab
+    /// switcher and gains a Dock icon; a hidden editor returns it to a
+    /// menu-bar agent. An Accessory app never appears in cmd+tab and no
+    /// window-level trick can put it there, so switching the policy at
+    /// runtime is the only mechanism. Idempotent: AppKit treats setting the
+    /// current policy as a no-op, the guard just skips the log line.
+    fn sync_activation_policy(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let app = NSApplication::sharedApplication(mtm);
+        let visible = self
+            .ivars()
+            .editor
+            .borrow()
+            .as_ref()
+            .is_some_and(|editor| editor.window.isVisible());
+        let policy = if visible {
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        };
+        if app.activationPolicy() != policy {
+            app.setActivationPolicy(policy);
+            crate::log!("activation policy: {policy:?}");
+        }
+    }
+
     /// Open (or focus) the editor window on a shot file. Created lazily and
     /// reused: every shot replaces the content of the same window.
     fn open_editor(&self, path: std::path::PathBuf) {
@@ -1029,6 +1056,9 @@ impl AppController {
             }
             slot.as_ref().expect("editor window").show_shot(shot);
         }
+        // A visible editor makes minisnap a regular app (cmd+tab, Dock
+        // icon); the switch must land before the deferred activation.
+        self.sync_activation_policy();
         // Ordering the window key must wait until the tray menu or hotkey
         // path stops tracking; a one-shot timer fires on the next pass.
         let timer = unsafe {

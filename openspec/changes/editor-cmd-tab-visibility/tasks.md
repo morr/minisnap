@@ -2,7 +2,7 @@
 
 ## 1. Переключение политики активации (app.rs, editor_window.rs)
 
-- [ ] 1.1 В `app.rs`: хелпер `sync_activation_policy` (Regular ⇔ редактор `isVisible`, иначе Accessory) и вызов в `open_editor` после `show_shot`; `cargo build --release` проходит, при запуске без редактора поведение не меняется (проверка: приложение стартует агентом, `state` прежний).
+- [x] 1.1 В `app.rs`: хелпер `sync_activation_policy` (Regular ⇔ редактор `isVisible`, иначе Accessory) и вызов в `open_editor` после `show_shot`; `cargo build --release` проходит, при запуске без редактора поведение не меняется (проверка: приложение стартует агентом, `state` прежний).
 - [ ] 1.2 В `app.rs`: конформность `NSWindowDelegate` у `AppController` (паттерн как у `NSApplicationDelegate`), `setDelegate` на окне редактора, `windowWillClose:` → синхронизация при скрытии; в `editor_window.rs`: `miniaturize:`/`performMiniaturize:` переводятся с `orderOut` на `close()`. Проверка: `cargo build --release` проходит; окно редактора после жёлтой кнопки и `CloseEditor` прячется как прежде, повторный `show_shot` поднимает его.
 
 ## 2. Политика активации в агент-канале
