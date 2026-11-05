@@ -1,6 +1,7 @@
 [package]
 name = "minisnap"
 version = "0.1.0"
+default-run = "minisnap"
 edition = "2021"
 description = "macOS menu-bar screenshot utility: frozen-area capture"
 license = "MIT"
