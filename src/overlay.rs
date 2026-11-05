@@ -621,7 +621,17 @@ impl OverlayView {
             CGRect::new(CGPoint::ZERO, ivars.screen_frame.get().size),
         );
         ivars.mouse.set(point);
+        // Loupe latency diagnostics: the per-move HUD cost, visible only
+        // under MINISNAP_CLICK_TRACE.
+        let t0 = if crate::capture::click_trace() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         ivars.hud.update(point, None);
+        if let Some(t0) = t0 {
+            crate::log!("loupe update: {} µs", t0.elapsed().as_micros());
+        }
     }
 
     /// Point the flat ivars (frozen frame, display frames, scale) at the

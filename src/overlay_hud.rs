@@ -124,6 +124,9 @@ const BORDER_FADE_IN_DUR: f64 = 0.25;
 const BORDER_PULSE_DUR: f64 = 0.8;
 /// Animation key of the idle pulse on the border layer.
 const BORDER_PULSE_KEY: &str = "border-pulse";
+/// `loupe_sample_origin` sentinel: sample origins are clamped non-negative,
+/// so this value can never occur naturally.
+const NO_SAMPLE_ORIGIN: (f64, f64) = (-1.0, -1.0);
 
 /// All overlay chrome above the frozen frame: the dimming strips, the
 /// loupe with its grid, crosshair and two-tone frame, the axis guides, the
@@ -163,6 +166,15 @@ pub(crate) struct Hud {
     /// The logical-pixel copy of the frozen frame, alive while the mode is
     /// active (the context and its backing bytes must live together).
     sampler: RefCell<Option<FrameSampler>>,
+    /// Last string pushed into `size_label`: `CATextLayer.string` triggers a
+    /// text re-layout on the render server, so it is set only when the text
+    /// actually changed.
+    label_text: RefCell<String>,
+    /// Origin of the loupe's last uploaded sample rect: the sample snaps to
+    /// whole logical pixels, so while the cursor stays inside one pixel the
+    /// crop is identical and re-uploading it would be wasted render-server
+    /// work. Reset by `present` (a new sampler invalidates the contents).
+    loupe_sample_origin: Cell<(f64, f64)>,
     /// Target screen size and backing scale, recorded by `present`; `dim`
     /// and `update` read them every frame.
     screen: Cell<CGSize>,
@@ -343,6 +355,8 @@ impl Hud {
             size_label,
             border,
             sampler: RefCell::new(None),
+            label_text: RefCell::new(String::new()),
+            loupe_sample_origin: Cell::new(NO_SAMPLE_ORIGIN),
             screen: Cell::new(CGSize::new(0.0, 0.0)),
             scale: Cell::new(1.0),
         }
@@ -407,11 +421,15 @@ impl Hud {
         self.container.setFrame(CGRect::new(CGPoint::ZERO, screen));
         self.apply_contents_scale(scale);
         self.rebuild_border_path();
+        self.rebuild_axis_paths();
         CATransaction::commit();
 
-        // Downsample the new frame to logical pixels for the loupe.
+        // Downsample the new frame to logical pixels for the loupe. The old
+        // upload cache dies with it: the next update must re-upload even if
+        // the sample origin happens to repeat.
         *self.sampler.borrow_mut() =
             frame.and_then(|(image, w_px, h_px)| FrameSampler::new(w_px, h_px, scale, image));
+        self.loupe_sample_origin.set(NO_SAMPLE_ORIGIN);
 
         // Border: reset invisible without animation, fade in, arm the idle
         // pulse (it starts only after the fade completes).
@@ -519,12 +537,18 @@ impl Hud {
 
         let layout = loupe_layout(cursor, screen, scale, sampler);
         let loupe = &self.loupe;
-        if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), layout.sample_rect) {
-            // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
-            // expects it as AnyObject.
-            let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
-            // SAFETY: contents setter with a valid image object.
-            unsafe { loupe.setContents(Some(as_any)) };
+        // The sample snaps to whole logical pixels: while the cursor stays
+        // inside one pixel, the crop is identical — skip the re-upload.
+        let origin = (layout.sample_rect.origin.x, layout.sample_rect.origin.y);
+        if self.loupe_sample_origin.get() != origin {
+            if let Some(cropped) = CGImage::with_image_in_rect(Some(sampler.image()), layout.sample_rect) {
+                // SAFETY: CGImage is an ObjC object at runtime; CALayer.contents
+                // expects it as AnyObject.
+                let as_any: &AnyObject = unsafe { &*(std::ptr::from_ref(&*cropped).cast::<AnyObject>()) };
+                // SAFETY: contents setter with a valid image object.
+                unsafe { loupe.setContents(Some(as_any)) };
+            }
+            self.loupe_sample_origin.set(origin);
         }
         loupe.setFrame(layout.loupe_frame);
         loupe.setHidden(false);
@@ -540,38 +564,67 @@ impl Hud {
             ),
         };
         let label = &self.size_label;
-        set_label_text(label, &text);
+        // CATextLayer re-lays its text out on the render server per string
+        // set; the label only changes when the rounded coordinates do.
+        {
+            let mut cached = self.label_text.borrow_mut();
+            if *cached != text {
+                set_label_text(label, &text);
+                *cached = text;
+            }
+        }
         label.setFrame(layout.label_frame);
         label.setHidden(false);
 
         // Idle: full-screen guides through the cursor with coordinate labels.
-        // Drag: guides off — the rectangle is feedback enough.
+        // Drag: guides off — the rectangle is feedback enough. The guide
+        // paths are fixed full-length lines through the layer origin (built
+        // by `present`); moving the layers tracks the cursor without
+        // re-rasterizing them.
         if dragging {
             self.axis_v_dark.setHidden(true);
             self.axis_v_light.setHidden(true);
             self.axis_h_dark.setHidden(true);
             self.axis_h_light.setHidden(true);
         } else {
-            // One path per direction, shared by the outline and the core.
-            let v_path = CGMutablePath::new();
-            let h_path = CGMutablePath::new();
-            // SAFETY: plain C path builders with a null transform.
-            unsafe {
-                CGMutablePath::move_to_point(Some(&v_path), std::ptr::null(), cursor.x, 0.0);
-                CGMutablePath::add_line_to_point(Some(&v_path), std::ptr::null(), cursor.x, screen.height);
-                CGMutablePath::move_to_point(Some(&h_path), std::ptr::null(), 0.0, cursor.y);
-                CGMutablePath::add_line_to_point(Some(&h_path), std::ptr::null(), screen.width, cursor.y);
-            }
-            let v_ref: &CGPath = &v_path;
-            let h_ref: &CGPath = &h_path;
+            let v_pos = CGPoint::new(cursor.x, 0.0);
+            let h_pos = CGPoint::new(0.0, cursor.y);
             for layer in [&self.axis_v_dark, &self.axis_v_light] {
-                layer.setPath(Some(v_ref));
+                layer.setPosition(v_pos);
                 layer.setHidden(false);
             }
             for layer in [&self.axis_h_dark, &self.axis_h_light] {
-                layer.setPath(Some(h_ref));
+                layer.setPosition(h_pos);
                 layer.setHidden(false);
             }
+        }
+    }
+
+    /// Fixed full-length paths for the axis guides, running through the
+    /// layer's own origin. Built once per target (displays differ in size)
+    /// by `present`; the per-move update only moves the layers
+    /// (`setPosition` is a pure compositor operation). Rebuilding the path
+    /// on every mouseMoved would instead re-rasterize four full-screen
+    /// shape layers on the render server each frame — the loupe visibly
+    /// trailed the cursor because of that.
+    fn rebuild_axis_paths(&self) {
+        let size = self.screen.get();
+        let v_path = CGMutablePath::new();
+        let h_path = CGMutablePath::new();
+        // SAFETY: plain C path builders with a null transform.
+        unsafe {
+            CGMutablePath::move_to_point(Some(&v_path), std::ptr::null(), 0.0, 0.0);
+            CGMutablePath::add_line_to_point(Some(&v_path), std::ptr::null(), 0.0, size.height);
+            CGMutablePath::move_to_point(Some(&h_path), std::ptr::null(), 0.0, 0.0);
+            CGMutablePath::add_line_to_point(Some(&h_path), std::ptr::null(), size.width, 0.0);
+        }
+        let v_ref: &CGPath = &v_path;
+        let h_ref: &CGPath = &h_path;
+        for layer in [&self.axis_v_dark, &self.axis_v_light] {
+            layer.setPath(Some(v_ref));
+        }
+        for layer in [&self.axis_h_dark, &self.axis_h_light] {
+            layer.setPath(Some(h_ref));
         }
     }
 
