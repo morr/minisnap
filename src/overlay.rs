@@ -708,6 +708,28 @@ impl OverlayView {
             window.setFrame_display(screen_frame, false);
             window.makeKeyAndOrderFront(None);
         }
+
+        // Chrome stands at the cursor from the first moment: without this
+        // the loupe waits for the first mouseMoved after presentation — and
+        // after a display switch handle_mouse_moved exits right after
+        // switch_to_surface, so the wait lasted one event longer still.
+        // mouseLocation is read at presentation time (capture latency does
+        // not skew it), in the same AppKit space as ScreenPair.frame. A
+        // cursor that drifted off the target during capture gets no chrome:
+        // the first mouseMoved either switches or places the loupe.
+        let mouse = NSEvent::mouseLocation();
+        if crate::capture::geometry::frame_contains_point(screen_frame, mouse) {
+            let local = CGPoint::new(
+                mouse.x - screen_frame.origin.x,
+                mouse.y - screen_frame.origin.y,
+            );
+            let point = crate::capture::geometry::clamp_point(
+                local,
+                CGRect::new(CGPoint::ZERO, screen_frame.size),
+            );
+            ivars.mouse.set(point);
+            ivars.hud.update(point, None);
+        }
     }
 
     /// Point the frame layer at the T0 frame of the target surface (the

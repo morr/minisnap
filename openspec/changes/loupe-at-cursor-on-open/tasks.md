@@ -2,7 +2,7 @@
 
 ## 1. Начальная установка хрома
 
-- [ ] 1.1 В `present_target` (`src/overlay.rs`) после `Hud::present` добавить начальную установку: `NSEvent::mouseLocation()`, гард «точка внутри `screen_frame` цели» (полуоткрытые границы, как в `switch_candidate`), локальная точка = mouse − origin, `clamp_point`, `ivars.mouse.set`, `Hud::update(point, None)`.
+- [x] 1.1 В `present_target` (`src/overlay.rs`) после `Hud::present` добавить начальную установку: `NSEvent::mouseLocation()`, гард «точка внутри `screen_frame` цели» (полуоткрытые границы, как в `switch_candidate`), локальная точка = mouse − origin, `clamp_point`, `ivars.mouse.set`, `Hud::update(point, None)`.
 
 ## 2. Проверки
 
