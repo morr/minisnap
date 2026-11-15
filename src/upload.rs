@@ -14,9 +14,10 @@ use std::sync::mpsc::Sender;
 
 use block2::RcBlock;
 use objc2::{msg_send, ClassType, Message};
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::{
-    NSData, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSURL, NSURLResponse,
-    NSURLSession, NSURLSessionConfiguration, NSString,
+    NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSMutableURLRequest, NSCopying,
+    NSNumber, NSURL, NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSString,
 };
 
 use crate::app::MainJob;
@@ -102,14 +103,27 @@ pub(crate) struct ArtifactsBackend {
     base_url: String,
     token: String,
     project: String,
+    proxy: Option<ProxySettings>,
 }
 
 impl ArtifactsBackend {
     pub(crate) fn new(provider: &ArtifactsProviderConfig) -> Self {
+        // An unparseable setting is logged once per backend creation (one
+        // upload, not per request) and the upload goes direct — the same
+        // behavior as an empty setting, minus the silent surprise.
+        let proxy = match parse_proxy(&provider.proxy) {
+            Some(settings) => Some(settings),
+            None if provider.proxy.trim().is_empty() => None,
+            None => {
+                crate::log!("upload: proxy setting ignored: {:?}", provider.proxy);
+                None
+            }
+        };
         ArtifactsBackend {
             base_url: provider.base_url.clone(),
             token: provider.token.clone(),
             project: provider.project.clone(),
+            proxy,
         }
     }
 }
@@ -124,11 +138,59 @@ impl UploadBackend for ArtifactsBackend {
         // time, and the completion block holds the session (and the body
         // data) for as long as the chain is in flight.
         let config = NSURLSessionConfiguration::defaultSessionConfiguration();
+        if let Some(settings) = &self.proxy {
+            apply_proxy(&config, settings);
+        }
         let session = unsafe {
             NSURLSession::sessionWithConfiguration_delegate_delegateQueue(&config, None, None)
         };
         upload_attempt(&session, &data, self, names, jobs);
     }
+}
+
+/// Route the session through `settings`. The CFNetwork proxy keys are plain
+/// strings (stable ABI names; objc2-foundation carries no constants for
+/// them), the values are `NSNumber`/`NSString`. `None` never reaches here:
+/// an unset dictionary is what a direct connection means — the session
+/// keeps inheriting the system proxies.
+fn apply_proxy(config: &NSURLSessionConfiguration, settings: &ProxySettings) {
+    let dict = NSMutableDictionary::new();
+    let host = NSString::from_str(&settings.host);
+    let port = NSNumber::new_i32(i32::from(settings.port));
+    let enabled = NSNumber::new_bool(true);
+    // The dictionary is `<AnyObject, AnyObject>` (that is what the session
+    // configuration setter takes), so values go in as `ProtocolObject`
+    // references of the NSCopying objects they are.
+    let put = |key: &str, value: &ProtocolObject<dyn NSCopying>| {
+        // SAFETY: the key is a fresh NSString, the object a live
+        // NSString/NSNumber — the dictionary retains both.
+        unsafe {
+            dict.setObject_forKey(
+                value.as_ref(),
+                ProtocolObject::from_ref(&*NSString::from_str(key)),
+            )
+        };
+    };
+    match settings.scheme {
+        ProxyScheme::Http | ProxyScheme::Https => {
+            // One host:port for both plain and CONNECT-tunneled requests,
+            // the route privoxy fronts for the SSH SOCKS tunnel.
+            put("kCFNetworkProxiesHTTPEnable", ProtocolObject::from_ref(&*enabled));
+            put("kCFNetworkProxiesHTTPProxy", ProtocolObject::from_ref(&*host));
+            put("kCFNetworkProxiesHTTPPort", ProtocolObject::from_ref(&*port));
+            put("kCFNetworkProxiesHTTPSEnable", ProtocolObject::from_ref(&*enabled));
+            put("kCFNetworkProxiesHTTPSProxy", ProtocolObject::from_ref(&*host));
+            put("kCFNetworkProxiesHTTPSPort", ProtocolObject::from_ref(&*port));
+        }
+        ProxyScheme::Socks5 | ProxyScheme::Socks5h => {
+            put("kCFNetworkProxiesSOCKSEnable", ProtocolObject::from_ref(&*enabled));
+            put("kCFNetworkProxiesSOCKSProxy", ProtocolObject::from_ref(&*host));
+            put("kCFNetworkProxiesSOCKSPort", ProtocolObject::from_ref(&*port));
+        }
+    }
+    // SAFETY: plain setter taking the dictionary it copies; the keys and
+    // values are the correct Objective-C types (NSString/NSNumber).
+    unsafe { config.setConnectionProxyDictionary(Some(&dict)) };
 }
 
 /// The connection parameters shared by every attempt of one upload chain.
@@ -187,6 +249,7 @@ fn upload_attempt(
     let base_url = backend.base_url.clone();
     let token = backend.token.clone();
     let project = backend.project.clone();
+    let proxy = backend.proxy.clone();
     let handler = RcBlock::new(
         move |body: *mut NSData,
               response: *mut NSURLResponse,
@@ -206,6 +269,7 @@ fn upload_attempt(
                             base_url: base_url.clone(),
                             token: token.clone(),
                             project: project.clone(),
+                            proxy: proxy.clone(),
                         };
                         upload_attempt(&retained_session, &retained_data, &cfg, rest.clone(), jobs.clone());
                     }
