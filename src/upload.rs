@@ -20,7 +20,7 @@ use objc2_foundation::{
 };
 
 use crate::app::MainJob;
-use crate::config::ArtifactsProviderConfig;
+use crate::config::{ArtifactsProviderConfig, Config};
 
 /// Longest server-side image name — the server rule is
 /// `^[a-z0-9][a-z0-9-]{0,63}$`.
@@ -295,6 +295,21 @@ fn text_field(v: &serde_json::Value) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
+/// The backend of the active enabled provider; `None` when upload is not
+/// configured — the provider is off, unknown, or its token is empty. The
+/// callers answer `None` with the "configure upload" dialog (the capture
+/// stream just logs: it has no window to hang a dialog on).
+pub(crate) fn build_backend(config: &Config) -> Option<Box<dyn UploadBackend>> {
+    if config.upload_provider != "artifacts" {
+        return None;
+    }
+    let provider = &config.upload.artifacts;
+    if !provider.enabled || provider.token.trim().is_empty() {
+        return None;
+    }
+    Some(Box::new(ArtifactsBackend::new(provider)))
+}
+
 /// Upload a saved shot file through `backend`: read the PNG, derive the
 /// server name from the file stem and hand the request off. Only local
 /// failures come back as `Err`; the backend reports its own outcome
@@ -316,6 +331,19 @@ pub(crate) fn upload_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn backend_requires_enabled_provider_with_a_token() {
+        let mut cfg = crate::config::Config::default_with(PathBuf::from("/tmp/pictures"));
+        assert!(build_backend(&cfg).is_none(), "the provider is off by default");
+        cfg.upload.artifacts.enabled = true;
+        assert!(build_backend(&cfg).is_none(), "no token yet");
+        cfg.upload.artifacts.token = "secret".to_string();
+        assert!(build_backend(&cfg).is_some(), "enabled with a token");
+        cfg.upload_provider = "gdrive".to_string();
+        assert!(build_backend(&cfg).is_none(), "unknown active provider");
+    }
 
     #[test]
     fn plain_stem_loses_the_prefix_and_keeps_the_timestamp() {
