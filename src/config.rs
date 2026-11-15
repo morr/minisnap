@@ -90,6 +90,9 @@ pub struct ArtifactsProviderConfig {
     pub token: String,
     /// Project namespace the images land in.
     pub project: String,
+    /// Proxy as `scheme://host:port` (http/https/socks5/socks5h); empty
+    /// (the default) is a direct connection.
+    pub proxy: String,
 }
 
 impl Default for ArtifactsProviderConfig {
@@ -99,6 +102,7 @@ impl Default for ArtifactsProviderConfig {
             base_url: DEFAULT_UPLOAD_BASE_URL.to_string(),
             token: String::new(),
             project: DEFAULT_UPLOAD_PROJECT.to_string(),
+            proxy: String::new(),
         }
     }
 }
@@ -294,6 +298,7 @@ mod tests {
         );
         assert_eq!(cfg.upload.artifacts.token, "");
         assert_eq!(cfg.upload.artifacts.project, "minisnap");
+        assert_eq!(cfg.upload.artifacts.proxy, "");
         assert_eq!(cfg.save_dir, PathBuf::from("/tmp/pictures/minisnap"));
         assert_eq!(cfg.retention, 100);
     }
@@ -316,6 +321,7 @@ mod tests {
         cfg.upload.artifacts.enabled = true;
         cfg.upload.artifacts.token = "secret".to_string();
         cfg.upload.artifacts.project = "gallery".to_string();
+        cfg.upload.artifacts.proxy = "http://127.0.0.1:8118".to_string();
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(cfg, loaded);
@@ -339,6 +345,33 @@ mod tests {
         let mut expected = Config::default_with(PathBuf::from("/tmp/pictures"));
         expected.save_dir = PathBuf::from("/tmp/pictures/minisnap");
         assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn artifacts_section_without_the_proxy_key_loads_with_a_direct_connection() {
+        let dir = temp_dir("no-proxy");
+        let path = dir.join("config.toml");
+        // A pre-proxy config: the artifacts section exists but predates the
+        // proxy key.
+        std::fs::write(
+            &path,
+            "capture_hotkey = \"alt+meta+Digit4\"\n\
+             open_hotkey = \"alt+meta+Digit0\"\n\
+             save_dir = \"/tmp/pictures/minisnap\"\n\
+             retention = 100\n\
+             \n\
+             [upload.artifacts]\n\
+             enabled = true\n\
+             token = \"x\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        let mut expected = Config::default_with(PathBuf::from("/tmp/pictures"));
+        expected.save_dir = PathBuf::from("/tmp/pictures/minisnap");
+        expected.upload.artifacts.enabled = true;
+        expected.upload.artifacts.token = "x".to_string();
+        assert_eq!(cfg, expected);
+        assert_eq!(cfg.upload.artifacts.proxy, "");
     }
 
     #[test]
