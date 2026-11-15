@@ -13,13 +13,15 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask, NSEventType,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff,
+    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask, NSEventType,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSWindowDelegate,
+    NSStatusItem, NSTextFieldDelegate, NSWindowDelegate,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{
-    NSDefaultRunLoopMode, NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
+    NSDefaultRunLoopMode, NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSString,
+    NSNotification, NSTimer,
 };
 use objc2_app_kit::NSApplicationDidChangeScreenParametersNotification;
 
@@ -204,6 +206,29 @@ define_class!(
             }
         }
 
+        /// The upload-section checkbox flipped: persist the enabled state
+        /// right away and reveal/hide the provider fields.
+        #[unsafe(method(uploadProviderToggled:))]
+        fn upload_provider_toggled(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: the sender is the section's switch NSButton.
+            let state: isize = unsafe { msg_send![sender, state] };
+            let enabled = state == NSControlStateValueOn;
+            {
+                let mut config = self.ivars().config.borrow_mut();
+                config.upload.artifacts.enabled = enabled;
+                if let Some(path) = Config::standard_path() {
+                    if let Err(e) = config.save_to(&path) {
+                        crate::log!("prefs: cannot save config: {e}");
+                    }
+                }
+            }
+            crate::log!("prefs: upload provider enabled={enabled}");
+            if let Some(prefs) = self.ivars().prefs.borrow().as_ref() {
+                prefs.set_provider_fields_visible(enabled);
+            }
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             // The registry record belongs to this process only while it
@@ -315,6 +340,18 @@ define_class!(
             self.apply_editor_activation_policy(false);
         }
     }
+
+    unsafe impl NSControlTextEditingDelegate for AppController {
+        /// This controller is the delegate of the upload-section fields
+        /// only, so any text change here is a token/project edit: persist
+        /// the config right away (the change acts without a relaunch).
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _notification: &NSNotification) {
+            self.upload_fields_changed();
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for AppController {}
 );
 
 impl AppController {
@@ -873,7 +910,7 @@ impl AppController {
         let mtm = MainThreadMarker::from(self);
         let mut slot = self.ivars().prefs.borrow_mut();
         if slot.is_none() {
-            let (capture_combo, edit_combo, open_combo) = {
+            let (capture_combo, edit_combo, upload_combo, open_combo, upload_provider) = {
                 let config = self.ivars().config.borrow();
                 (
                     hotkeys::render_combo(config.capture_hotkey.mods, config.capture_hotkey.key),
@@ -881,24 +918,51 @@ impl AppController {
                         config.capture_edit_hotkey.mods,
                         config.capture_edit_hotkey.key,
                     ),
+                    hotkeys::render_combo(
+                        config.capture_upload_hotkey.mods,
+                        config.capture_upload_hotkey.key,
+                    ),
                     hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
+                    config.upload.artifacts.clone(),
                 )
             };
             *slot = Some(prefs::build(
                 mtm,
                 &capture_combo,
                 &edit_combo,
+                &upload_combo,
                 &open_combo,
+                &upload_provider,
                 &self.ivars().checkout_label,
             ));
             let window = slot.as_ref().unwrap();
-            for button in [&window.capture_button, &window.capture_edit_button, &window.open_button] {
+            for button in [
+                &window.capture_button,
+                &window.capture_edit_button,
+                &window.capture_upload_button,
+                &window.open_button,
+            ] {
                 // SAFETY: target is this controller, whose selector lives as
                 // long as the process.
                 unsafe {
                     button.setTarget(Some(self));
                     button.setAction(Some(sel!(prefsRowClicked:)));
                 }
+            }
+            // The upload section: the checkbox toggles the provider, the
+            // fields edit it through the text-editing delegate.
+            let checkbox = &window.upload.checkbox;
+            // SAFETY: target is this controller (see above).
+            unsafe {
+                checkbox.setTarget(Some(self));
+                checkbox.setAction(Some(sel!(uploadProviderToggled:)));
+            }
+            let delegate = ProtocolObject::from_ref(self);
+            // SAFETY: the delegate is this controller, whose selector lives
+            // as long as the process; the fields outlive nothing past it.
+            unsafe {
+                window.upload.token_field.setDelegate(Some(delegate));
+                window.upload.project_field.setDelegate(Some(delegate));
             }
         }
         // Ordering the window key must wait until the tray menu stops
@@ -1032,6 +1096,7 @@ impl AppController {
             match row {
                 prefs::ROW_CAPTURE => config.capture_hotkey = hotkey,
                 prefs::ROW_CAPTURE_EDIT => config.capture_edit_hotkey = hotkey,
+                prefs::ROW_CAPTURE_UPLOAD => config.capture_upload_hotkey = hotkey,
                 prefs::ROW_OPEN_LATEST => config.open_hotkey = hotkey,
                 _ => {}
             }
@@ -1084,6 +1149,13 @@ impl AppController {
             Some(row) if row == prefs::ROW_OPEN_LATEST => "Press keys…".to_string(),
             _ => hotkeys::render_combo(config.open_hotkey.mods, config.open_hotkey.key),
         };
+        let upload_title = match recording {
+            Some(row) if row == prefs::ROW_CAPTURE_UPLOAD => "Press keys…".to_string(),
+            _ => hotkeys::render_combo(
+                config.capture_upload_hotkey.mods,
+                config.capture_upload_hotkey.key,
+            ),
+        };
         prefs_window
             .capture_button
             .setTitle(&NSString::from_str(&capture_title));
@@ -1091,8 +1163,35 @@ impl AppController {
             .capture_edit_button
             .setTitle(&NSString::from_str(&edit_title));
         prefs_window
+            .capture_upload_button
+            .setTitle(&NSString::from_str(&upload_title));
+        prefs_window
             .open_button
             .setTitle(&NSString::from_str(&open_title));
+    }
+
+    /// The upload-section text fields changed (every keystroke): persist
+    /// the token and project right away, so the next upload uses them
+    /// without a relaunch.
+    fn upload_fields_changed(&self) {
+        let prefs_guard = self.ivars().prefs.borrow();
+        let Some(prefs_window) = prefs_guard.as_ref() else {
+            return;
+        };
+        let mut config = self.ivars().config.borrow_mut();
+        let artifacts = &mut config.upload.artifacts;
+        let token = prefs_window.upload.token_field.stringValue().to_string();
+        let project = prefs_window.upload.project_field.stringValue().to_string();
+        let changed = token != artifacts.token || project != artifacts.project;
+        artifacts.token = token;
+        artifacts.project = project;
+        if changed {
+            if let Some(path) = Config::standard_path() {
+                if let Err(e) = config.save_to(&path) {
+                    crate::log!("prefs: cannot save config: {e}");
+                }
+            }
+        }
     }
 
     /// Open the newest saved shot in the editor; an empty folder is a
