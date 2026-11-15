@@ -15,10 +15,10 @@ use std::sync::mpsc::Sender;
 use block2::RcBlock;
 use objc2::{msg_send, ClassType, Message};
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{
-    NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSMutableURLRequest, NSCopying,
-    NSNumber, NSURL, NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSString,
-};
+    use objc2_foundation::{
+        NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSMutableURLRequest, NSCopying,
+        NSNumber, NSURL, NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSString,
+    };
 
 use crate::app::MainJob;
 use crate::config::{ArtifactsProviderConfig, Config};
@@ -148,11 +148,14 @@ impl UploadBackend for ArtifactsBackend {
     }
 }
 
-/// Route the session through `settings`. The CFNetwork proxy keys are plain
-/// strings (stable ABI names; objc2-foundation carries no constants for
-/// them), the values are `NSNumber`/`NSString`. `None` never reaches here:
-/// an unset dictionary is what a direct connection means — the session
-/// keeps inheriting the system proxies.
+/// Route the session through `settings`. The dictionary keys are the
+/// system-proxy entity names — the *values* of the CFNetwork
+/// `kCFNetworkProxies*` constants (plain `"HTTPEnable"`-style strings);
+/// passing the constant names is a silent no-op, the session goes direct.
+/// objc2-foundation carries no constants for them, so the keys are plain
+/// strings; the values are `NSNumber`/`NSString`. `None` never reaches
+/// here: an unset dictionary is what a direct connection means — the
+/// session keeps inheriting the system proxies.
 fn apply_proxy(config: &NSURLSessionConfiguration, settings: &ProxySettings) {
     let dict = NSMutableDictionary::new();
     let host = NSString::from_str(&settings.host);
@@ -175,17 +178,17 @@ fn apply_proxy(config: &NSURLSessionConfiguration, settings: &ProxySettings) {
         ProxyScheme::Http | ProxyScheme::Https => {
             // One host:port for both plain and CONNECT-tunneled requests,
             // the route privoxy fronts for the SSH SOCKS tunnel.
-            put("kCFNetworkProxiesHTTPEnable", ProtocolObject::from_ref(&*enabled));
-            put("kCFNetworkProxiesHTTPProxy", ProtocolObject::from_ref(&*host));
-            put("kCFNetworkProxiesHTTPPort", ProtocolObject::from_ref(&*port));
-            put("kCFNetworkProxiesHTTPSEnable", ProtocolObject::from_ref(&*enabled));
-            put("kCFNetworkProxiesHTTPSProxy", ProtocolObject::from_ref(&*host));
-            put("kCFNetworkProxiesHTTPSPort", ProtocolObject::from_ref(&*port));
+            put("HTTPEnable", ProtocolObject::from_ref(&*enabled));
+            put("HTTPProxy", ProtocolObject::from_ref(&*host));
+            put("HTTPPort", ProtocolObject::from_ref(&*port));
+            put("HTTPSEnable", ProtocolObject::from_ref(&*enabled));
+            put("HTTPSProxy", ProtocolObject::from_ref(&*host));
+            put("HTTPSPort", ProtocolObject::from_ref(&*port));
         }
         ProxyScheme::Socks5 | ProxyScheme::Socks5h => {
-            put("kCFNetworkProxiesSOCKSEnable", ProtocolObject::from_ref(&*enabled));
-            put("kCFNetworkProxiesSOCKSProxy", ProtocolObject::from_ref(&*host));
-            put("kCFNetworkProxiesSOCKSPort", ProtocolObject::from_ref(&*port));
+            put("SOCKSEnable", ProtocolObject::from_ref(&*enabled));
+            put("SOCKSProxy", ProtocolObject::from_ref(&*host));
+            put("SOCKSPort", ProtocolObject::from_ref(&*port));
         }
     }
     // SAFETY: plain setter taking the dictionary it copies; the keys and
@@ -450,6 +453,9 @@ pub(crate) fn upload_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSDictionary;
     use std::path::PathBuf;
 
     #[test]
@@ -668,13 +674,34 @@ mod tests {
     #[test]
     fn proxy_dictionary_builds_without_raising() {
         // Exercises the AppKit-free Foundation path of `apply_proxy`: any
-        // NSException here aborts the test process loudly.
-        for text in ["http://127.0.0.1:8118", "socks5://127.0.0.1:5555"] {
+        // NSException here aborts the test process loudly. The keys must
+        // be the system-proxy entity names ("HTTPEnable", …) — the literal
+        // CFNetwork constant names ("kCFNetworkProxiesHTTPEnable") are an
+        // unknown key and silently ignored, the session goes direct.
+        const HTTP_KEYS: &[&str] = &[
+            "HTTPEnable",
+            "HTTPProxy",
+            "HTTPPort",
+            "HTTPSEnable",
+            "HTTPSProxy",
+            "HTTPSPort",
+        ];
+        const SOCKS_KEYS: &[&str] = &["SOCKSEnable", "SOCKSProxy", "SOCKSPort"];
+        for (text, keys) in [
+            ("http://127.0.0.1:8118", HTTP_KEYS),
+            ("socks5://127.0.0.1:5555", SOCKS_KEYS),
+        ] {
             let config = NSURLSessionConfiguration::defaultSessionConfiguration();
             apply_proxy(&config, &parse_proxy(text).unwrap());
-            let dict = unsafe { config.connectionProxyDictionary() };
-            let dict = dict.expect("the proxy dictionary was just set");
-            assert!(!dict.is_empty(), "{text}: dictionary carries entries");
+            let owned = unsafe { config.connectionProxyDictionary() }
+                .expect("the proxy dictionary was just set");
+            let dict: &NSDictionary = owned.as_ref();
+            for key in keys {
+                let value: Option<Retained<AnyObject>> = unsafe {
+                    msg_send![dict, objectForKey: &*NSString::from_str(key)]
+                };
+                assert!(value.is_some(), "{text}: missing proxy key {key}");
+            }
         }
     }
 }
