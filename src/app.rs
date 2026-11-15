@@ -33,6 +33,7 @@ use crate::hotkey_recorder::{FeedOutcome, Recorder};
 use crate::hotkeys::{self, HotkeyAction, HotkeyRegistry};
 use crate::overlay::{Overlay, OverlayOutcome};
 use crate::prefs;
+use crate::upload;
 use global_hotkey::hotkey::HotKey;
 
 /// Placeholder status-bar icon: a monochrome template SF Symbol until the
@@ -1051,10 +1052,42 @@ impl AppController {
         alert.runModal();
     }
 
+    /// The editor's Upload button: ship the shot file through the
+    /// configured provider. Not configured (provider off, token empty) —
+    /// a dialog steers to Preferences and no request goes out; otherwise
+    /// the file goes to the backend and the button shows the in-flight
+    /// tile until the outcome arrives.
+    fn handle_upload_request(&self, path: &Path) {
+        let backend = match upload::build_backend(&self.ivars().config.borrow()) {
+            Some(backend) => backend,
+            None => {
+                self.show_alert(
+                    "Upload Not Configured",
+                    "Enable the Artifacts provider and enter its access token \
+                     in minisnap's Preferences.",
+                );
+                return;
+            }
+        };
+        let jobs = self.ivars().jobs_tx.clone();
+        if let Err(e) = upload::upload_file(backend.as_ref(), path, jobs) {
+            crate::log!("upload: {e}");
+            self.show_alert("Upload Failed", &e);
+            return;
+        }
+        if let Some(editor) = self.ivars().editor.borrow().as_ref() {
+            editor.set_uploading(true);
+        }
+    }
+
     /// Upload outcome arrived (the upload backend's session queue via the
     /// tick): the public URL replaces the shot in the pasteboard, an
     /// error gets a modal dialog, the app keeps running in both cases.
+    /// In both cases the editor's Upload button leaves its in-flight tile.
     fn upload_finished(&self, result: Result<String, String>) {
+        if let Some(editor) = self.ivars().editor.borrow().as_ref() {
+            editor.set_uploading(false);
+        }
         match result {
             Ok(url) => {
                 if let Err(e) = crate::output::copy_string_to_pasteboard(&url) {
@@ -1274,7 +1307,15 @@ impl AppController {
             let mut slot = self.ivars().editor.borrow_mut();
             if slot.is_none() {
                 let save_dir = self.ivars().config.borrow().save_dir.clone();
-                *slot = Some(EditorWindow::new(mtm, save_dir));
+                // The upload bridge: a weak reference — the controller owns
+                // the editor window, a strong capture here would cycle.
+                let weak: Weak<AppController> = Weak::new(self);
+                let on_upload = Box::new(move |path: &Path| {
+                    if let Some(controller) = weak.load() {
+                        controller.handle_upload_request(path);
+                    }
+                });
+                *slot = Some(EditorWindow::new(mtm, save_dir, on_upload));
                 // The controller is the editor window's delegate: any close
                 // of the window returns minisnap to the agent state via
                 // `windowWillClose:`. The delegate reference is weak, and

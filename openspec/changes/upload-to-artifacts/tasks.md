@@ -19,9 +19,9 @@
 
 ## 4. Тулбар и редактор
 
-- [ ] 4.1 `src/editor_toolbar.rs`: кнопка Upload в конце ряда (после разделителя за инструментами), `ToolbarEvent::UploadRequested`, поле `uploading` в `ToolbarState` (плитка состояния, повторные клики игнорируются); тесты чистой редукции (`uploading` доходит до состояния кнопки). Проверка: `cargo test`.
-- [ ] 4.2 `src/editor_window.rs`: обработка `UploadRequested` → инжектированный при создании колбэк `on_upload(shot_path)`; метод `set_uploading(bool)` пушит состояние через `redraw()`. Проверка: `cargo test`.
-- [ ] 4.3 `src/app.rs`: создание `EditorWindow` с колбэком загрузки — `build_backend` вернул `None` (выключено или токен пуст): диалог «настройте загрузку в настройках», запрос не отправляется; иначе `backend.upload(...)` и `set_uploading(true)`. Проверка: `cargo test`; живой прогон — таск 6.
+- [x] 4.1 `src/editor_toolbar.rs`: кнопка Upload в конце ряда (после разделителя за инструментами), `ToolbarEvent::UploadRequested`, поле `uploading` в `ToolbarState` (плитка состояния, повторные клики игнорируются); тесты чистой редукции (`uploading` доходит до состояния кнопки). Проверка: `cargo test`.
+- [x] 4.2 `src/editor_window.rs`: обработка `UploadRequested` → инжектированный при создании колбэк `on_upload(shot_path)`; метод `set_uploading(bool)` пушит состояние через `redraw()`. Проверка: `cargo test`.
+- [x] 4.3 `src/app.rs`: создание `EditorWindow` с колбэком загрузки — `build_backend` вернул `None` (выключено или токен пуст): диалог «настройте загрузку в настройках», запрос не отправляется; иначе `backend.upload(...)` и `set_uploading(true)`. Проверка: `cargo test`; живой прогон — таск 6.
 
 ## 5. Захват с загрузкой
 

@@ -178,6 +178,12 @@ struct EditorIvars {
     /// Whether the window has been placed already: the first refit centers
     /// it, later refits keep the top-left corner.
     placed: Cell<bool>,
+    /// Whether an upload of the open shot is in flight (the Upload
+    /// button's in-progress tile).
+    uploading: Cell<bool>,
+    /// The upload hook injected at creation: ships the open shot's file to
+    /// the configured provider (the app side owns the provider config).
+    on_upload: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
 }
 
 define_class!(
@@ -214,6 +220,8 @@ define_class!(
                 frame_size: Cell::new(CGSize::ZERO),
                 checker: RefCell::new(None),
                 placed: Cell::new(false),
+                uploading: Cell::new(false),
+                on_upload: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
             unsafe { msg_send![super(this), initWithFrame: frame_rect] }
@@ -951,6 +959,7 @@ impl EditorView {
             text_input,
             can_page_prev,
             can_page_next,
+            ivars.uploading.get(),
         );
         if text_input.is_none() && state.slider_value != ivars.stroke_width.get() {
             // The slider pinned to a stroked selection: its width becomes
@@ -1910,6 +1919,20 @@ impl EditorView {
             }
             ToolbarEvent::PagePrevious => self.page(-1),
             ToolbarEvent::PageNext => self.page(1),
+            ToolbarEvent::UploadRequested => {
+                // The app side owns the provider config and the request;
+                // the bridge is the injected hook.
+                let shot_path = self
+                    .ivars()
+                    .shot
+                    .borrow()
+                    .as_ref()
+                    .map(|shot| shot.shot_path.clone());
+                let on_upload = self.ivars().on_upload.borrow();
+                if let (Some(path), Some(on_upload)) = (shot_path, on_upload.as_ref()) {
+                    on_upload(&path);
+                }
+            }
             ToolbarEvent::SliderChanged(value) => {
                 if self.ivars().text_editor.borrow().is_some() {
                     // Text mode: the open input's size follows the drag;
@@ -2014,9 +2037,17 @@ fn rect_corners(rect: Rect) -> [Point; 4] {
 }
 
 impl EditorWindow {
-    pub fn new(mtm: MainThreadMarker, save_dir: std::path::PathBuf) -> EditorWindow {
+    /// Build the editor window. `on_upload` is the upload bridge: the
+    /// app side injects it at creation and receives the open shot's file
+    /// path for every Upload click.
+    pub fn new(
+        mtm: MainThreadMarker,
+        save_dir: std::path::PathBuf,
+        on_upload: Box<dyn Fn(&std::path::Path)>,
+    ) -> EditorWindow {
         let view = EditorView::new(mtm);
         view.set_save_dir(save_dir);
+        *view.ivars().on_upload.borrow_mut() = Some(on_upload);
         let window = unsafe {
             KeyableWindow::init_with_content_rect(
                 KeyableWindow::alloc(mtm),
@@ -2148,6 +2179,13 @@ impl EditorWindow {
     pub fn show_shot(&self, shot: OpenShot) {
         self.view.display_shot(shot);
         self.window.makeKeyAndOrderFront(None);
+    }
+
+    /// Flip the Upload button's in-flight tile (and its click guard) and
+    /// repaint the strip — the app calls this around a shot upload.
+    pub fn set_uploading(&self, uploading: bool) {
+        self.view.ivars().uploading.set(uploading);
+        self.view.redraw();
     }
 
     /// Snapshot for the agent server: the document and interaction state

@@ -97,6 +97,7 @@ const BAR_TRAILING_PAD: f64 = 12.0;
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
+const UPLOAD_BUTTON_TAG: isize = -4;
 
 /// Toolbar tag of the color-swatch button: the current color lives on the
 /// disc sublayer, so the button's own layer carries the shared hover plate.
@@ -223,6 +224,11 @@ pub enum ToolbarEvent {
     PagePrevious,
     /// The ► leafing button: the next shot of the folder.
     PageNext,
+    /// The Upload button: ship the open shot file to the provider. The
+    /// window owns the not-configured dialog and the button state; a
+    /// click while a upload is in flight never reaches here (the strip
+    /// swallows it).
+    UploadRequested,
     /// The slider moved to `value` on its active range (every drag step;
     /// the window collapses a drag into one undo step). While a text input
     /// is open the active range is the text sizes and the value is the
@@ -545,6 +551,9 @@ pub struct ToolbarState {
     /// Whether the "next shot" button has a newer shot to leaf to; false
     /// paints its chevron in the disabled tint and deadens it.
     pub can_page_next: bool,
+    /// Whether an upload of this shot is in flight; true puts the Upload
+    /// button into its in-progress tile and swallows its clicks.
+    pub uploading: bool,
     /// The open shot's file name in the bar.
     pub file_label: String,
 }
@@ -567,6 +576,7 @@ pub fn toolbar_state(
     text_input: Option<f64>,
     can_page_prev: bool,
     can_page_next: bool,
+    uploading: bool,
 ) -> ToolbarState {
     let (can_undo, can_redo) = doc
         .map(|doc| (doc.can_undo(), doc.can_redo()))
@@ -597,6 +607,7 @@ pub fn toolbar_state(
         can_redo,
         can_page_prev,
         can_page_next,
+        uploading,
         file_label,
     }
 }
@@ -641,6 +652,11 @@ pub(crate) struct ToolbarIvars {
     /// skip read these, not the tint.
     can_page_prev: Cell<bool>,
     can_page_next: Cell<bool>,
+    /// The Upload button (the row's last control).
+    upload_button: RefCell<Option<Retained<NSButton>>>,
+    /// Whether an upload is in flight, as the last state push painted it;
+    /// the click guard reads this.
+    uploading: Cell<bool>,
     /// The window-side sink for everything the user does to the toolbar.
     on_event: RefCell<Option<OnEvent>>,
 }
@@ -674,6 +690,8 @@ define_class!(
                 active_tool: Cell::new(None),
                 can_page_prev: Cell::new(false),
                 can_page_next: Cell::new(false),
+                upload_button: RefCell::new(None),
+                uploading: Cell::new(false),
                 on_event: RefCell::new(None),
             });
             // SAFETY: NSView's designated initializer with plain ivars set.
@@ -735,6 +753,16 @@ define_class!(
             if let Some(tool) = Tool::from_tag(tag) {
                 self.emit(ToolbarEvent::ToolToggled(tool));
             }
+        }
+
+        #[unsafe(method(uploadClicked:))]
+        fn __upload_clicked(&self, _sender: Option<&AnyObject>) {
+            // A second click during a upload is swallowed: the window
+            // would queue a duplicate request on the same file.
+            if self.ivars().uploading.get() {
+                return;
+            }
+            self.emit(ToolbarEvent::UploadRequested);
         }
 
         // The swatch click is pure toolbar UI: open or close the popover.
@@ -975,6 +1003,25 @@ impl ToolbarView {
             }
             tool_buttons.push((tool.tag(), button));
         }
+        // The Upload button closes the row: the file of the open shot goes
+        // to the configured provider; while a upload is in flight the
+        // button wears its in-progress tile and swallows clicks.
+        let upload_sep = bar_separator(mtm);
+        toolbar.addArrangedSubview(&upload_sep);
+        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &upload_sep);
+        let upload_button = symbol_button(
+            mtm,
+            "square.and.arrow.up",
+            "Upload",
+            UPLOAD_BUTTON_TAG,
+        );
+        // SAFETY: target is this strip view, alive for the process.
+        unsafe {
+            upload_button.setTarget(Some(&view));
+            upload_button.setAction(Some(sel!(uploadClicked:)));
+        }
+        toolbar.addArrangedSubview(&upload_button);
+        *view.ivars().upload_button.borrow_mut() = Some(upload_button);
 
         // The strip stretches with the window: its frame is built from the
         // initial size, and a fixed-width stack squeezes the row — the
@@ -1032,6 +1079,7 @@ impl ToolbarView {
         }
         self.update_tool_highlight(state.tool);
         self.update_page_buttons(state.can_page_prev, state.can_page_next);
+        self.update_upload_button(state.uploading);
         self.show_color(state.color);
         // The slider skips an equal value, so a push never re-enters the
         // slider handler as a phantom drag; the range rides along, so a
@@ -1149,6 +1197,37 @@ impl ToolbarView {
                 }
             }
         }
+    }
+
+    /// Paint the Upload button from the in-flight flag: the in-progress
+    /// tile is an accent wash on the shared plate with the icon tinted
+    /// accent, rest is the plain icon look. The flag lands in the ivars —
+    /// the click guard reads it, so a click during an upload is swallowed.
+    fn update_upload_button(&self, uploading: bool) {
+        self.ivars().uploading.set(uploading);
+        let Some(button) = self.ivars().upload_button.borrow().clone() else {
+            return;
+        };
+        let accent: Retained<NSColor> = NSColor::controlAccentColor();
+        let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
+            ICON_TINT[0],
+            ICON_TINT[1],
+            ICON_TINT[2],
+            ICON_TINT[3],
+        );
+        let tint = if uploading { &accent } else { &icon };
+        animate_plate_changes(|| {
+            if let Some(plate) = plate(&button) {
+                let bg = if uploading {
+                    Some(accent.colorWithAlphaComponent(ACTIVE_WASH))
+                } else {
+                    None
+                };
+                plate.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
+            }
+            button.setContentTintColor(Some(tint));
+            center_toolbar_layers(&button);
+        });
     }
 
     /// Slide the system traffic lights' hosting view vertically so their
@@ -1647,23 +1726,23 @@ mod tests {
     #[test]
     fn reduction_tracks_undo_redo_from_the_journal() {
         let mut doc = test_doc();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
         assert!(!state.can_undo);
         assert!(!state.can_redo);
 
         let id = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(id, 4.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
         assert!(state.can_undo);
         assert!(!state.can_redo);
 
         doc.undo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
         assert!(!state.can_undo);
         assert!(state.can_redo);
 
         doc.redo();
-        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
         assert!(state.can_undo);
         assert!(!state.can_redo);
     }
@@ -1683,6 +1762,7 @@ mod tests {
             None,
             true,
             true,
+            false,
         );
         // The selection's own width wins over the width for new elements.
         assert_eq!(state.slider_value, 7.0);
@@ -1698,13 +1778,13 @@ mod tests {
         let mut doc = test_doc();
         let high = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(high, 99.0)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high), None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(high), None, true, true, false);
         assert_eq!(state.slider_value, STROKE_MAX);
 
         doc.undo();
         let low = doc.next_element_id();
         doc.apply(Command::AddElement(arrow_element(low, 0.2)));
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low), None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], Some(low), None, true, true, false);
         assert_eq!(state.slider_value, STROKE_MIN);
     }
 
@@ -1722,11 +1802,11 @@ mod tests {
                 size: 32.0,
             },
         }));
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id), None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], Some(id), None, true, true, false);
         assert_eq!(state.slider_value, 5.5);
 
         // No selection at all: same story.
-        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, 5.5, [1.0; 4], None, None, true, true, false);
         assert_eq!(state.slider_value, 5.5);
     }
 
@@ -1747,12 +1827,13 @@ mod tests {
             Some(32.0),
             true,
             true,
+            false,
         );
         assert_eq!(state.slider_value, 32.0);
         assert_eq!(state.slider_range, (TEXT_SIZE_MIN, TEXT_SIZE_MAX));
 
         // A text size outside the range still clamps into it.
-        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], None, Some(500.0), true, true);
+        let state = toolbar_state(Some(&doc), String::new(), None, 3.0, [1.0; 4], None, Some(500.0), true, true, false);
         assert_eq!(state.slider_value, TEXT_SIZE_MAX);
     }
 
@@ -1768,6 +1849,7 @@ mod tests {
             None,
             true,
             true,
+            false,
         );
         assert!(!state.can_undo);
         assert!(!state.can_redo);
@@ -1779,23 +1861,31 @@ mod tests {
     #[test]
     fn reduction_passes_leafing_availability_through() {
         // The middle of the list: both directions available.
-        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true);
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
         assert!(state.can_page_prev);
         assert!(state.can_page_next);
 
         // The oldest shot: the previous direction is out.
-        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, true);
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, true, false);
         assert!(!state.can_page_prev);
         assert!(state.can_page_next);
 
         // The newest shot: the next direction is out.
-        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, false);
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, false, false);
         assert!(state.can_page_prev);
         assert!(!state.can_page_next);
 
         // A single-shot folder, no folder, a shot missing from the listing.
-        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, false);
+        let state = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, false, false, false);
         assert!(!state.can_page_prev);
         assert!(!state.can_page_next);
+    }
+
+    #[test]
+    fn reduction_carries_the_uploading_flag_to_the_button() {
+        let idle = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, false);
+        assert!(!idle.uploading);
+        let in_flight = toolbar_state(None, String::new(), None, DEFAULT_STROKE_WIDTH, [1.0; 4], None, None, true, true, true);
+        assert!(in_flight.uploading);
     }
 }
