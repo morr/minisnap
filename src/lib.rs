@@ -20,3 +20,4 @@ pub mod permission;
 pub mod plates;
 pub mod prefs;
 pub mod sound;
+pub mod upload;

@@ -8,7 +8,7 @@
 
 ## 2. Модуль загрузки (провайдеры)
 
-- [ ] 2.1 `src/upload.rs` — чистая часть: trait `UploadBackend` (`upload(png, name, jobs_tx)`), `upload_name(stem) -> String` (`MiniSnap_…[@<n>x][_N]` → `shot-…`, маркер плотности и локальный суффикс отброшены, правило имени сервера соблюдено), суффиксация `-2…-9`, разбор JSON ответа (`url` из 201/200, ошибка из неуспешных статусов); юнит-тесты на матрицу имён (с маркером, с `@2x_2`, длинное имя) и разбор ответа. Проверка: `cargo test`.
+- [x] 2.1 `src/upload.rs` — чистая часть: trait `UploadBackend` (`upload(png, name, jobs_tx)`), `upload_name(stem) -> String` (`MiniSnap_…[@<n>x][_N]` → `shot-…`, маркер плотности и локальный суффикс отброшены, правило имени сервера соблюдено), суффиксация `-2…-9`, разбор JSON ответа (`url` из 201/200, ошибка из неуспешных статусов); юнит-тесты на матрицу имён (с маркером, с `@2x_2`, длинное имя) и разбор ответа. Проверка: `cargo test`.
 - [ ] 2.2 `src/upload.rs` — `ArtifactsBackend` как первая реализация trait'а: NSURLSession `uploadTask` (PUT `/api/images/{name}`, `Authorization: Bearer`, `Content-Type: image/png`, `X-Project`, `X-Create-Only: true`), комплишн в фоновой очереди шлёт `MainJob::UploadFinished { result }`; 409 → повтор со следующим суффиксом до `-9`; включение фичи `NSURLSession` в objc2-foundation. Проверка: `cargo test` (чистые части), компиляция транспорта; живой прогон — таск 6.
 - [ ] 2.3 `src/upload.rs`: фабрика `build_backend(&Config) -> Option<Box<dyn UploadBackend>>` — активный провайдер из конфига; `None` когда провайдер выключен или токен пуст; юнит-тесты трёх исходов (выключен, включён без токена, включён с токеном). Проверка: `cargo test`.
 
