@@ -17,8 +17,17 @@ pub struct Config {
     pub capture_hotkey: HotKey,
     /// Global hotkey that starts the capture-and-edit mode.
     pub capture_edit_hotkey: HotKey,
+    /// Global hotkey that starts the capture-and-upload mode.
+    #[serde(rename = "capture-upload-hotkey")]
+    pub capture_upload_hotkey: HotKey,
     /// Global hotkey that opens the latest saved shot.
     pub open_hotkey: HotKey,
+    /// Which upload provider id is active (a provider from the registry).
+    #[serde(rename = "upload-provider", default = "default_upload_provider")]
+    pub upload_provider: String,
+    /// Provider sections under `[upload]`.
+    #[serde(default)]
+    pub upload: UploadConfig,
     /// Directory where shots are saved silently.
     pub save_dir: PathBuf,
     /// Maximum number of saved shots kept on disk.
@@ -44,6 +53,56 @@ pub fn default_capture_edit_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit5)
 }
 
+pub fn default_capture_upload_hotkey() -> HotKey {
+    HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit6)
+}
+
+pub fn default_upload_provider() -> String {
+    "artifacts".to_string()
+}
+
+/// Root of the artifacts server; overridable for self-hosted installs.
+pub const DEFAULT_UPLOAD_BASE_URL: &str = "https://artifacts.spacehubstore.com";
+
+/// Project namespace used by default on the artifacts server.
+pub const DEFAULT_UPLOAD_PROJECT: &str = "minisnap";
+
+/// Upload provider sections, keyed by provider id (the TOML tables under
+/// `[upload]`). A future hosting provider adds a section here and its own
+/// branch in `upload::build_backend`; tables unknown to this build are
+/// ignored on load, so configs written elsewhere keep loading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct UploadConfig {
+    #[serde(default)]
+    pub artifacts: ArtifactsProviderConfig,
+}
+
+/// Settings of the Artifacts upload provider (`[upload.artifacts]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ArtifactsProviderConfig {
+    /// Uploads go out only while the provider is enabled.
+    pub enabled: bool,
+    /// Server root; a config-only setting (self-hosted installs).
+    pub base_url: String,
+    /// Access token; never written to the log or the agent channel.
+    pub token: String,
+    /// Project namespace the images land in.
+    pub project: String,
+}
+
+impl Default for ArtifactsProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: DEFAULT_UPLOAD_BASE_URL.to_string(),
+            token: String::new(),
+            project: DEFAULT_UPLOAD_PROJECT.to_string(),
+        }
+    }
+}
+
 pub fn default_open_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit0)
 }
@@ -54,7 +113,10 @@ impl Config {
         Config {
             capture_hotkey: default_capture_hotkey(),
             capture_edit_hotkey: default_capture_edit_hotkey(),
+            capture_upload_hotkey: default_capture_upload_hotkey(),
             open_hotkey: default_open_hotkey(),
+            upload_provider: default_upload_provider(),
+            upload: UploadConfig::default(),
             save_dir: pictures_dir.join("minisnap"),
             retention: 100,
             agent_server_enabled: true,
@@ -81,8 +143,15 @@ impl Config {
             capture_edit_hotkey: raw
                 .capture_edit_hotkey
                 .unwrap_or_else(default_capture_edit_hotkey),
+            capture_upload_hotkey: raw
+                .capture_upload_hotkey
+                .unwrap_or_else(default_capture_upload_hotkey),
             capture_hotkey: raw.capture_hotkey,
             open_hotkey: raw.open_hotkey,
+            upload_provider: raw
+                .upload_provider
+                .unwrap_or_else(default_upload_provider),
+            upload: raw.upload.unwrap_or_default(),
             save_dir: raw.save_dir,
             retention: raw.retention,
             agent_server_enabled: raw.agent_server_enabled.unwrap_or(true),
@@ -145,7 +214,12 @@ impl Config {
 struct RawConfig {
     capture_hotkey: HotKey,
     capture_edit_hotkey: Option<HotKey>,
+    #[serde(rename = "capture-upload-hotkey")]
+    capture_upload_hotkey: Option<HotKey>,
     open_hotkey: HotKey,
+    #[serde(rename = "upload-provider")]
+    upload_provider: Option<String>,
+    upload: Option<UploadConfig>,
     save_dir: PathBuf,
     retention: u32,
     /// Optional so pre-agent-server files load unchanged.
@@ -204,9 +278,22 @@ mod tests {
             HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit5)
         );
         assert_eq!(
+            cfg.capture_upload_hotkey,
+            HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit6)
+        );
+        assert_eq!(
             cfg.open_hotkey,
             HotKey::new(Some(Modifiers::ALT | Modifiers::META), Code::Digit0)
         );
+        assert_eq!(cfg.upload_provider, "artifacts");
+        assert_eq!(cfg.upload.artifacts, ArtifactsProviderConfig::default());
+        assert!(!cfg.upload.artifacts.enabled);
+        assert_eq!(
+            cfg.upload.artifacts.base_url,
+            "https://artifacts.spacehubstore.com"
+        );
+        assert_eq!(cfg.upload.artifacts.token, "");
+        assert_eq!(cfg.upload.artifacts.project, "minisnap");
         assert_eq!(cfg.save_dir, PathBuf::from("/tmp/pictures/minisnap"));
         assert_eq!(cfg.retention, 100);
     }
@@ -225,10 +312,57 @@ mod tests {
     fn config_round_trips_through_toml() {
         let dir = temp_dir("roundtrip");
         let path = dir.join("nested").join("config.toml");
-        let cfg = Config::default_with(PathBuf::from("/tmp/pictures"));
+        let mut cfg = Config::default_with(PathBuf::from("/tmp/pictures"));
+        cfg.upload.artifacts.enabled = true;
+        cfg.upload.artifacts.token = "secret".to_string();
+        cfg.upload.artifacts.project = "gallery".to_string();
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(cfg, loaded);
+    }
+
+    #[test]
+    fn config_without_the_upload_section_loads_with_defaults() {
+        let dir = temp_dir("partial");
+        let path = dir.join("config.toml");
+        // A pre-upload config: no capture-upload-hotkey, no upload keys.
+        std::fs::write(
+            &path,
+            "capture_hotkey = \"alt+meta+Digit4\"\n\
+             capture_edit_hotkey = \"alt+meta+Digit5\"\n\
+             open_hotkey = \"alt+meta+Digit0\"\n\
+             save_dir = \"/tmp/pictures/minisnap\"\n\
+             retention = 100\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        let mut expected = Config::default_with(PathBuf::from("/tmp/pictures"));
+        expected.save_dir = PathBuf::from("/tmp/pictures/minisnap");
+        assert_eq!(cfg, expected);
+    }
+
+    #[test]
+    fn unknown_upload_provider_does_not_break_reading() {
+        let dir = temp_dir("unknown-provider");
+        let path = dir.join("config.toml");
+        // A newer config with a provider this build does not know: reading
+        // survives and the active provider stays whatever the file says.
+        std::fs::write(
+            &path,
+            "capture_hotkey = \"alt+meta+Digit4\"\n\
+             open_hotkey = \"alt+meta+Digit0\"\n\
+             save_dir = \"/tmp/pictures/minisnap\"\n\
+             retention = 100\n\
+             upload-provider = \"gdrive\"\n\
+             \n\
+             [upload.gdrive]\n\
+             enabled = true\n\
+             token = \"x\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.upload_provider, "gdrive");
+        assert_eq!(cfg.upload.artifacts, ArtifactsProviderConfig::default());
     }
 
     #[test]
