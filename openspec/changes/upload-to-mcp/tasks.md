@@ -7,7 +7,7 @@
 
 ## 2. Действие в приложении
 
-- [ ] 2.1 `src/app.rs`: из `handle_upload_request` выделен общий хвост `start_upload` (состояние кнопки → `upload_file` → откат при локальной ошибке); маршрут `AgentAction::Upload` в `agent_action` через новый `agent_upload` — rejected (нет редактора/снимка, в полёте, не настроено — без диалога) или `initiated`; строка успеха в `upload_finished` несёт публичный URL. Проверка: `cargo test`.
+- [x] 2.1 `src/app.rs`: из `handle_upload_request` выделен общий хвост `start_upload` (состояние кнопки → `upload_file` → откат при локальной ошибке); маршрут `AgentAction::Upload` в `agent_action` через новый `agent_upload` — rejected (нет редактора/снимка, в полёте, не настроено — без диалога) или `initiated`; строка успеха в `upload_finished` несёт публичный URL. Проверка: `cargo test`.
 
 ## 3. Мост и описание для агентов
 

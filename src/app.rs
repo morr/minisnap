@@ -735,9 +735,7 @@ impl AppController {
                     None => ActionResult::noop("no preferences window open"),
                 }
             }
-            // Task 2.1 replaces this placeholder with the real agent
-            // upload path (shared tail with the editor button).
-            AgentAction::Upload {} => ActionResult::rejected("agent upload is not wired yet"),
+            AgentAction::Upload {} => self.agent_upload(),
             AgentAction::Quit => {
                 crate::agent_server::deregister(std::process::id());
                 let mtm = MainThreadMarker::from(self);
@@ -1061,21 +1059,31 @@ impl AppController {
     /// The editor's Upload button: ship the shot file through the
     /// configured provider. Not configured (provider off, token empty) —
     /// a dialog steers to Preferences and no request goes out; otherwise
-    /// the button flips to its in-flight state BEFORE the request leaves,
-    /// so a fast double-click cannot race the guard, and stays there until
-    /// the outcome arrives.
+    /// the shared tail flips the button to its in-flight state BEFORE the
+    /// request leaves, so a fast double-click cannot race the guard.
     fn handle_upload_request(&self, path: &Path) {
-        let backend = match upload::build_backend(&self.ivars().config.borrow()) {
-            Some(backend) => backend,
-            None => {
-                self.show_alert(
-                    "Upload Not Configured",
-                    "Enable the Artifacts provider and enter its access token \
-                     in minisnap's Preferences.",
-                );
-                return;
-            }
+        let Some(backend) = upload::build_backend(&self.ivars().config.borrow()) else {
+            self.show_alert(
+                "Upload Not Configured",
+                "Enable the Artifacts provider and enter its access token \
+                 in minisnap's Preferences.",
+            );
+            return;
         };
+        if let Err(e) = self.start_upload(backend, path) {
+            self.show_alert("Upload Failed", &e);
+        }
+    }
+
+    /// Shared tail of the editor button and the agent upload action: flip
+    /// the Upload button into its in-flight tile and hand the file to the
+    /// backend. `Err` is a local failure (the file was not read) — the
+    /// button state is rolled back here, the caller owns the feedback.
+    fn start_upload(
+        &self,
+        backend: Box<dyn upload::UploadBackend>,
+        path: &Path,
+    ) -> Result<(), String> {
         if let Some(editor) = self.ivars().editor.borrow().as_ref() {
             editor.set_uploading(true);
         }
@@ -1087,7 +1095,42 @@ impl AppController {
                 editor.set_uploading(false);
             }
             crate::log!("upload: {e}");
-            self.show_alert("Upload Failed", &e);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Agent upload: the same request the editor's Upload button fires,
+    /// with the channel's result semantics instead of user-facing dialogs —
+    /// every refusal is a `rejected` carrying the reason, a started
+    /// request is `initiated` (poll `editor.uploading` in `/state`; the
+    /// public URL lands in the pasteboard and the log). The token never
+    /// reaches the channel.
+    fn agent_upload(&self) -> crate::agent_proto::ActionResult {
+        use crate::agent_proto::ActionResult;
+        let editor = self.ivars().editor.borrow();
+        let Some(editor) = editor.as_ref() else {
+            return ActionResult::rejected("the editor window is not open");
+        };
+        let Some(path) = editor.shot_path() else {
+            return ActionResult::rejected("the editor holds no shot");
+        };
+        if editor.is_uploading() {
+            return ActionResult::rejected("an upload is already in flight");
+        }
+        drop(editor);
+        let Some(backend) = upload::build_backend(&self.ivars().config.borrow()) else {
+            return ActionResult::rejected(
+                "upload is not configured: enable the Artifacts provider \
+                 and set its token in Preferences",
+            );
+        };
+        match self.start_upload(backend, &path) {
+            Ok(()) => ActionResult::initiated(
+                "upload started; poll /state (editor.uploading) — the public \
+                 URL lands in the pasteboard and the log",
+            ),
+            Err(e) => ActionResult::rejected(format!("upload failed to start: {e}")),
         }
     }
 
@@ -1101,10 +1144,11 @@ impl AppController {
         }
         match result {
             Ok(url) => {
+                // The URL is public (it names the hosted image) — the log
+                // line is how an agent reads the outcome from the channel.
+                crate::log!("upload: done, url: {url}");
                 if let Err(e) = crate::output::copy_string_to_pasteboard(&url) {
                     crate::log!("upload: pasteboard: {e}");
-                } else {
-                    crate::log!("upload: done, url is in the pasteboard");
                 }
             }
             Err(message) => {
