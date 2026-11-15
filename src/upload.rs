@@ -8,10 +8,19 @@
 //! state of the shot.
 
 use std::fs;
+use std::iter;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
+use block2::RcBlock;
+use objc2::{msg_send, ClassType, Message};
+use objc2_foundation::{
+    NSData, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSURL, NSURLResponse,
+    NSURLSession, NSURLSessionConfiguration, NSString,
+};
+
 use crate::app::MainJob;
+use crate::config::ArtifactsProviderConfig;
 
 /// Longest server-side image name — the server rule is
 /// `^[a-z0-9][a-z0-9-]{0,63}$`.
@@ -28,6 +37,165 @@ const NAME_PREFIX: &str = "shot-";
 /// `jobs` — the tick pumps it back onto the main thread.
 pub(crate) trait UploadBackend {
     fn upload(&self, png: Vec<u8>, name: &str, jobs: Sender<MainJob>);
+}
+
+/// The Artifacts server backend: `PUT /api/images/{name}` with the PNG as
+/// the body, create-only (`X-Create-Only: true`); a 409 retries with the
+/// next `-2`…`-9` suffix. Transport — the system NSURLSession; each
+/// completion lands on the session's background queue.
+pub(crate) struct ArtifactsBackend {
+    base_url: String,
+    token: String,
+    project: String,
+}
+
+impl ArtifactsBackend {
+    pub(crate) fn new(provider: &ArtifactsProviderConfig) -> Self {
+        ArtifactsBackend {
+            base_url: provider.base_url.clone(),
+            token: provider.token.clone(),
+            project: provider.project.clone(),
+        }
+    }
+}
+
+impl UploadBackend for ArtifactsBackend {
+    fn upload(&self, png: Vec<u8>, name: &str, jobs: Sender<MainJob>) {
+        let names: Vec<String> = iter::once(name.to_string())
+            .chain(retry_names(name))
+            .collect();
+        let data = NSData::from_vec(png);
+        // A session per upload: the action is user-initiated and one at a
+        // time, and the completion block holds the session (and the body
+        // data) for as long as the chain is in flight.
+        let config = NSURLSessionConfiguration::defaultSessionConfiguration();
+        let session = unsafe {
+            NSURLSession::sessionWithConfiguration_delegate_delegateQueue(&config, None, None)
+        };
+        upload_attempt(&session, &data, self, names, jobs);
+    }
+}
+
+/// The connection parameters shared by every attempt of one upload chain.
+struct Attempt<'a> {
+    backend: &'a ArtifactsBackend,
+    data: &'a NSData,
+    session: &'a NSURLSession,
+}
+
+/// One PUT attempt with `names[0]`; on 409 the rest of the names are
+/// retried by a fresh attempt. The completion block captures the session
+/// and the body, so they outlive this call while the task is in flight.
+fn upload_attempt(
+    session: &NSURLSession,
+    data: &NSData,
+    backend: &ArtifactsBackend,
+    names: Vec<String>,
+    jobs: Sender<MainJob>,
+) {
+    let Some(name) = names.first() else {
+        let _ = jobs.send(MainJob::UploadFinished {
+            result: Err("upload: every name attempt is taken".to_string()),
+        });
+        return;
+    };
+    let rest = names[1..].to_vec();
+
+    let url_string = format!("{}/api/images/{name}", backend.base_url.trim_end_matches('/'));
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(&url_string)) else {
+        let _ = jobs.send(MainJob::UploadFinished {
+            result: Err(format!("upload: bad server url {url_string:?}")),
+        });
+        return;
+    };
+    let request = NSMutableURLRequest::requestWithURL(&url);
+    request.setHTTPMethod(&NSString::from_str("PUT"));
+    // A stuck server must not leave the editor tile spinning forever.
+    request.setTimeoutInterval(30.0);
+    let auth = NSString::from_str(&format!("Bearer {}", backend.token));
+    request.setValue_forHTTPHeaderField(Some(&auth), &NSString::from_str("Authorization"));
+    request.setValue_forHTTPHeaderField(
+        Some(&NSString::from_str("image/png")),
+        &NSString::from_str("Content-Type"),
+    );
+    let project = NSString::from_str(&backend.project);
+    request.setValue_forHTTPHeaderField(Some(&project), &NSString::from_str("X-Project"));
+    request.setValue_forHTTPHeaderField(
+        Some(&NSString::from_str("true")),
+        &NSString::from_str("X-Create-Only"),
+    );
+    request.setHTTPBody(Some(data));
+
+    let retained_session = session.retain();
+    let retained_data = data.retain();
+    let jobs = jobs.clone();
+    let base_url = backend.base_url.clone();
+    let token = backend.token.clone();
+    let project = backend.project.clone();
+    let handler = RcBlock::new(
+        move |body: *mut NSData,
+              response: *mut NSURLResponse,
+              error: *mut NSError|
+              -> () {
+            match unsafe { classify_reply(body, response, error) } {
+                UploadReply::Created(url) => {
+                    let _ = jobs.send(MainJob::UploadFinished { result: Ok(url) });
+                }
+                UploadReply::Conflict => {
+                    if rest.is_empty() {
+                        let _ = jobs.send(MainJob::UploadFinished {
+                            result: Err("upload: every name attempt is taken".to_string()),
+                        });
+                    } else {
+                        let cfg = ArtifactsBackend {
+                            base_url: base_url.clone(),
+                            token: token.clone(),
+                            project: project.clone(),
+                        };
+                        upload_attempt(&retained_session, &retained_data, &cfg, rest.clone(), jobs.clone());
+                    }
+                }
+                UploadReply::Failed(message) => {
+                    let _ = jobs.send(MainJob::UploadFinished { result: Err(message) });
+                }
+            }
+        },
+    );
+    let task = unsafe {
+        session.uploadTaskWithRequest_fromData_completionHandler(&request, Some(data), &handler)
+    };
+    task.resume();
+}
+
+/// Classify the raw URLSession completion parameters via [`parse_reply`].
+///
+/// # Safety
+/// The pointers are the completion block's parameters, valid for the call.
+unsafe fn classify_reply(
+    body: *mut NSData,
+    response: *mut NSURLResponse,
+    error: *mut NSError,
+) -> UploadReply {
+    if !error.is_null() {
+        let message = unsafe { (*error).localizedDescription().to_string() };
+        return UploadReply::Failed(format!("upload failed: {message}"));
+    }
+    let status = unsafe {
+        response.as_ref().and_then(|r| {
+            let is_http: bool = msg_send![r, isKindOfClass: NSHTTPURLResponse::class()];
+            is_http.then(|| {
+                let code: isize = msg_send![r, statusCode];
+                code as u16
+            })
+        })
+    };
+    let Some(status) = status else {
+        return UploadReply::Failed("upload: no HTTP response".to_string());
+    };
+    let text = unsafe { body.as_ref() }
+        .map(|data| String::from_utf8_lossy(&data.to_vec()).into_owned())
+        .unwrap_or_default();
+    parse_reply(status, &text)
 }
 
 /// Server-side image name derived from a shot file stem: the local

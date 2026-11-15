@@ -72,6 +72,12 @@ pub(crate) enum MainJob {
         path: std::path::PathBuf,
         only_if_visible: bool,
     },
+    /// An upload finished: the public image URL on success, a readable
+    /// failure message otherwise. Sent from the upload backend's session
+    /// queue.
+    UploadFinished {
+        result: Result<String, String>,
+    },
     /// An agent-server request arrived over HTTP; the pump hands it to the
     /// controller on the main thread and the reply goes back over the
     /// channel.
@@ -241,6 +247,9 @@ define_class!(
                         } else {
                             self.open_editor(path);
                         }
+                    }
+                    Some(MainJob::UploadFinished { result }) => {
+                        self.upload_finished(result)
                     }
                     Some(MainJob::Agent(job)) => {
                         let result = self.handle_agent(job.request);
@@ -942,6 +951,39 @@ impl AppController {
         self.ivars().permission_dialog_visible.set(false);
         if response == NSAlertFirstButtonReturn {
             crate::permission::open_screen_recording_settings();
+        }
+    }
+
+    /// A modal single-button warning dialog (an upload failure must be
+    /// seen, even if it interrupts the user's other work — a v1 trade-off).
+    fn show_alert(&self, title: &str, message: &str) {
+        let mtm = MainThreadMarker::from(self);
+        let app = NSApplication::sharedApplication(mtm);
+        app.activate();
+        app.activateIgnoringOtherApps(true);
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(message));
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.runModal();
+    }
+
+    /// Upload outcome arrived (the upload backend's session queue via the
+    /// tick): the public URL replaces the shot in the pasteboard, an
+    /// error gets a modal dialog, the app keeps running in both cases.
+    fn upload_finished(&self, result: Result<String, String>) {
+        match result {
+            Ok(url) => {
+                if let Err(e) = crate::output::copy_string_to_pasteboard(&url) {
+                    crate::log!("upload: pasteboard: {e}");
+                } else {
+                    crate::log!("upload: done, url is in the pasteboard");
+                }
+            }
+            Err(message) => {
+                crate::log!("upload: failed: {message}");
+                self.show_alert("Upload Failed", &message);
+            }
         }
     }
 

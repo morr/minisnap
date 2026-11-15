@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
-    NSPasteboardTypeTIFF,
+    NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
 use objc2_core_foundation::{CFRetained, CFString, CFURL, CGRect};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::NSDictionary;
+use objc2_foundation::{NSDictionary, NSString};
 use objc2_image_io::CGImageDestination;
 
 /// Crop the T0 frame to `rect` (top-left-origin pixel space). None for an
@@ -45,6 +45,21 @@ pub fn copy_to_pasteboard(image: &CGImage) -> Result<(), String> {
         return Err(format!("pasteboard rejected data (png={png_ok}, tiff={tiff_ok})"));
     }
     Ok(())
+}
+
+/// Put a string (the uploaded image URL) on the general pasteboard.
+/// Main thread.
+pub fn copy_string_to_pasteboard(text: &str) -> Result<(), String> {
+    MainThreadMarker::new().ok_or("not on the main thread")?;
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let string = NSString::from_str(text);
+    let ok = pb.setString_forType(&string, unsafe { NSPasteboardTypeString });
+    if ok {
+        Ok(())
+    } else {
+        Err("pasteboard rejected the string".to_string())
+    }
 }
 
 /// Local calendar components of a Unix timestamp shifted by `utc_offset_secs`
