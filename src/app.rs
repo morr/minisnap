@@ -94,6 +94,7 @@ struct AppIvars {
     // Kept for re-reading the shortcuts from the preferences window.
     capture_item: Retained<NSMenuItem>,
     capture_edit_item: Retained<NSMenuItem>,
+    capture_upload_item: Retained<NSMenuItem>,
     open_latest_item: Retained<NSMenuItem>,
     // The capture action consults the config when the mode is wired up.
     config: RefCell<Config>,
@@ -142,6 +143,11 @@ define_class!(
         #[unsafe(method(captureAndEdit:))]
         fn capture_and_edit(&self, _sender: Option<&AnyObject>) {
             self.start_capture(CaptureKind::Edit);
+        }
+
+        #[unsafe(method(captureAndUpload:))]
+        fn capture_and_upload(&self, _sender: Option<&AnyObject>) {
+            self.start_capture(CaptureKind::Upload);
         }
 
         #[unsafe(method(openLatestImage:))]
@@ -412,6 +418,16 @@ impl AppController {
         };
         menu.addItem(&capture_edit_item);
 
+        let capture_upload_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str("Capture and Upload"),
+                Some(sel!(captureAndUpload:)),
+                &NSString::from_str(""),
+            )
+        };
+        menu.addItem(&capture_upload_item);
+
         let open_latest_item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
@@ -455,6 +471,7 @@ impl AppController {
             status_item: status_item.clone(),
             capture_item: capture_item.clone(),
             capture_edit_item: capture_edit_item.clone(),
+            capture_upload_item: capture_upload_item.clone(),
             open_latest_item: open_latest_item.clone(),
             config: RefCell::new(config.clone()),
             hotkeys: RefCell::new(HotkeyRegistry::new()),
@@ -478,6 +495,7 @@ impl AppController {
         for item in [
             &capture_item,
             &capture_edit_item,
+            &capture_upload_item,
             &open_latest_item,
             &prefs_item,
             &quit_item,
@@ -491,6 +509,7 @@ impl AppController {
             (config.capture_hotkey, config.capture_edit_hotkey, config.open_hotkey);
         Self::apply_menu_hotkey(&capture_item, &capture_hk);
         Self::apply_menu_hotkey(&capture_edit_item, &edit_hk);
+        Self::apply_menu_hotkey(&capture_upload_item, &config.capture_upload_hotkey);
         Self::apply_menu_hotkey(&open_latest_item, &open_hk);
 
         let mut hotkeys = HotkeyRegistry::new();
@@ -1116,6 +1135,10 @@ impl AppController {
                 );
             Self::apply_menu_hotkey(&self.ivars().capture_item, &config.capture_hotkey);
             Self::apply_menu_hotkey(&self.ivars().capture_edit_item, &config.capture_edit_hotkey);
+            Self::apply_menu_hotkey(
+                &self.ivars().capture_upload_item,
+                &config.capture_upload_hotkey,
+            );
             Self::apply_menu_hotkey(&self.ivars().open_latest_item, &config.open_hotkey);
             crate::log!(
                 "prefs: hotkeys applied: capture={} open={}",
