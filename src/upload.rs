@@ -664,4 +664,17 @@ mod tests {
         assert_eq!(parse_proxy("http://127.0.0.1:8118/path"), None, "no path");
         assert_eq!(parse_proxy("privoxy on 8118"), None);
     }
+
+    #[test]
+    fn proxy_dictionary_builds_without_raising() {
+        // Exercises the AppKit-free Foundation path of `apply_proxy`: any
+        // NSException here aborts the test process loudly.
+        for text in ["http://127.0.0.1:8118", "socks5://127.0.0.1:5555"] {
+            let config = NSURLSessionConfiguration::defaultSessionConfiguration();
+            apply_proxy(&config, &parse_proxy(text).unwrap());
+            let dict = unsafe { config.connectionProxyDictionary() };
+            let dict = dict.expect("the proxy dictionary was just set");
+            assert!(!dict.is_empty(), "{text}: dictionary carries entries");
+        }
+    }
 }
