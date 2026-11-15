@@ -20,7 +20,7 @@ use objc2_app_kit::{
     NSCellStyleMask, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType,
     NSFocusRingType, NSFontWeightRegular, NSGraphicsContext, NSImage,
     NSImageSymbolConfiguration, NSLayoutConstraintOrientation, NSLineBreakMode,
-    NSPopover, NSPopoverDelegate, NSStackView, NSTextAlignment, NSTextField,
+    NSPopover, NSPopoverDelegate, NSStackView, NSStackViewGravity, NSTextAlignment, NSTextField,
     NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation,
     NSView, NSViewController, NSWindowButton,
 };
@@ -98,6 +98,9 @@ const BAR_TRAILING_PAD: f64 = 12.0;
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
 const UPLOAD_BUTTON_TAG: isize = -4;
+
+/// The Upload button's hover dim (the bezeled control has no plate tile).
+const UPLOAD_HOVER_ALPHA: f64 = 0.75;
 
 /// Toolbar tag of the color-swatch button: the current color lives on the
 /// disc sublayer, so the button's own layer carries the shared hover plate.
@@ -1003,24 +1006,17 @@ impl ToolbarView {
             }
             tool_buttons.push((tool.tag(), button));
         }
-        // The Upload button closes the row: the file of the open shot goes
-        // to the configured provider; while a upload is in flight the
-        // button wears its in-progress tile and swallows clicks.
-        let upload_sep = bar_separator(mtm);
-        toolbar.addArrangedSubview(&upload_sep);
-        toolbar.setCustomSpacing_afterView(BAR_ZONE_SPACING, &upload_sep);
-        let upload_button = symbol_button(
-            mtm,
-            "square.and.arrow.up",
-            "Upload",
-            UPLOAD_BUTTON_TAG,
-        );
+        // The Upload button closes the row, pinned to the trailing edge as
+        // a real (bezeled) button: the file of the open shot goes to the
+        // configured provider; while a upload is in flight the button is
+        // disabled and swallows clicks.
+        let upload_button = text_button(mtm, "Upload", UPLOAD_BUTTON_TAG);
         // SAFETY: target is this strip view, alive for the process.
         unsafe {
             upload_button.setTarget(Some(&view));
             upload_button.setAction(Some(sel!(uploadClicked:)));
         }
-        toolbar.addArrangedSubview(&upload_button);
+        toolbar.addView_inGravity(&upload_button, NSStackViewGravity::Trailing);
         *view.ivars().upload_button.borrow_mut() = Some(upload_button);
 
         // The strip stretches with the window: its frame is built from the
@@ -1199,35 +1195,17 @@ impl ToolbarView {
         }
     }
 
-    /// Paint the Upload button from the in-flight flag: the in-progress
-    /// tile is an accent wash on the shared plate with the icon tinted
-    /// accent, rest is the plain icon look. The flag lands in the ivars —
-    /// the click guard reads it, so a click during an upload is swallowed.
+    /// Paint the Upload button from the in-flight flag: the system
+    /// disabled look is the in-flight state — visually inert and
+    /// unclickable until the outcome lands. The flag also lands in the
+    /// ivars: the click guard reads it, so a click during an upload is
+    /// swallowed even before AppKit disables the control.
     fn update_upload_button(&self, uploading: bool) {
         self.ivars().uploading.set(uploading);
         let Some(button) = self.ivars().upload_button.borrow().clone() else {
             return;
         };
-        let accent: Retained<NSColor> = NSColor::controlAccentColor();
-        let icon = NSColor::colorWithSRGBRed_green_blue_alpha(
-            ICON_TINT[0],
-            ICON_TINT[1],
-            ICON_TINT[2],
-            ICON_TINT[3],
-        );
-        let tint = if uploading { &accent } else { &icon };
-        animate_plate_changes(|| {
-            if let Some(plate) = plate(&button) {
-                let bg = if uploading {
-                    Some(accent.colorWithAlphaComponent(ACTIVE_WASH))
-                } else {
-                    None
-                };
-                plate.setBackgroundColor(bg.map(|color| color.CGColor()).as_deref());
-            }
-            button.setContentTintColor(Some(tint));
-            center_toolbar_layers(&button);
-        });
+        button.setEnabled(!uploading);
     }
 
     /// Slide the system traffic lights' hosting view vertically so their
@@ -1280,8 +1258,8 @@ impl ToolbarView {
     /// event's window decides which surface is under the cursor; `None`
     /// (the cursor left both) clears both.
     fn hover_at(&self, event: Option<&NSEvent>) {
-        let (toolbar_hit, preset_hit) = match event {
-            None => (None, None),
+        let (toolbar_hit, preset_hit, upload_hover) = match event {
+            None => (None, None, false),
             Some(event) => {
                 let point = event.locationInWindow();
                 // Compared by window number: NSEvent::window needs a
@@ -1289,9 +1267,9 @@ impl ToolbarView {
                 let strip_number = self.window().map(|window| window.windowNumber());
                 let in_editor_window = strip_number == Some(event.windowNumber());
                 if in_editor_window {
-                    (self.panel_button_at(point), None)
+                    (self.panel_button_at(point), None, self.upload_hit(point))
                 } else {
-                    (None, self.palette_button_at(point))
+                    (None, self.palette_button_at(point), false)
                 }
             }
         };
@@ -1368,7 +1346,29 @@ impl ToolbarView {
                     layer.setBorderColor(Some(&hover_ring.CGColor()));
                 }
             }
+            // The Upload button is a bezeled control, not a plate tile: its
+            // hover is a slight dim, the bezel carries the look.
+            if let Some(button) = self.ivars().upload_button.borrow().as_ref() {
+                button.setAlphaValue(if upload_hover {
+                    UPLOAD_HOVER_ALPHA
+                } else {
+                    1.0
+                });
+            }
         });
+    }
+
+    /// Whether the window-space point lands on the Upload button.
+    fn upload_hit(&self, point: CGPoint) -> bool {
+        let upload = self.ivars().upload_button.borrow();
+        let Some(button) = upload.as_ref() else {
+            return false;
+        };
+        let frame = button.convertRect_toView(button.bounds(), None);
+        point.x >= frame.origin.x
+            && point.x <= frame.origin.x + frame.size.width
+            && point.y >= frame.origin.y
+            && point.y <= frame.origin.y + frame.size.height
     }
 
     /// Tag of the palette preset under a window-space point, if the
@@ -1668,6 +1668,25 @@ pub(crate) fn icon_button(
         .heightAnchor()
         .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
         .setActive(true);
+    let name = NSString::from_str(title);
+    button.setToolTip(Some(&name));
+    button.setAccessibilityLabel(Some(&name));
+    button
+}
+
+/// A bezeled text toolbar button (the Upload control): the system rounded
+/// bezel is the button look, the in-flight state is the system disabled
+/// look. Width rides the title's intrinsic size; it never takes first
+/// responder, so keys stay with the canvas.
+pub(crate) fn text_button(mtm: MainThreadMarker, title: &str, tag: isize) -> Retained<NSButton> {
+    // SAFETY: class convenience constructor, no external invariants.
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(&NSString::from_str(title), None, None, mtm)
+    };
+    button.setTag(tag);
+    button.setFocusRingType(NSFocusRingType::None);
+    button.setRefusesFirstResponder(true);
+    button.setTranslatesAutoresizingMaskIntoConstraints(false);
     let name = NSString::from_str(title);
     button.setToolTip(Some(&name));
     button.setAccessibilityLabel(Some(&name));

@@ -446,7 +446,10 @@ impl AppController {
                 NSMenuItem::alloc(mtm),
                 &NSString::from_str("Preferences"),
                 Some(sel!(openPreferences:)),
-                &NSString::from_str(""),
+                // The macOS convention: ⌘, opens the preferences while the
+                // app is active — focus in the editor window or an open
+                // menu both count.
+                &NSString::from_str(","),
             )
         };
         menu.addItem(&prefs_item);
@@ -1055,8 +1058,9 @@ impl AppController {
     /// The editor's Upload button: ship the shot file through the
     /// configured provider. Not configured (provider off, token empty) —
     /// a dialog steers to Preferences and no request goes out; otherwise
-    /// the file goes to the backend and the button shows the in-flight
-    /// tile until the outcome arrives.
+    /// the button flips to its in-flight state BEFORE the request leaves,
+    /// so a fast double-click cannot race the guard, and stays there until
+    /// the outcome arrives.
     fn handle_upload_request(&self, path: &Path) {
         let backend = match upload::build_backend(&self.ivars().config.borrow()) {
             Some(backend) => backend,
@@ -1069,14 +1073,18 @@ impl AppController {
                 return;
             }
         };
-        let jobs = self.ivars().jobs_tx.clone();
-        if let Err(e) = upload::upload_file(backend.as_ref(), path, jobs) {
-            crate::log!("upload: {e}");
-            self.show_alert("Upload Failed", &e);
-            return;
-        }
         if let Some(editor) = self.ivars().editor.borrow().as_ref() {
             editor.set_uploading(true);
+        }
+        let jobs = self.ivars().jobs_tx.clone();
+        if let Err(e) = upload::upload_file(backend.as_ref(), path, jobs) {
+            // A local read failure never reaches the server; roll the
+            // button state back.
+            if let Some(editor) = self.ivars().editor.borrow().as_ref() {
+                editor.set_uploading(false);
+            }
+            crate::log!("upload: {e}");
+            self.show_alert("Upload Failed", &e);
         }
     }
 
