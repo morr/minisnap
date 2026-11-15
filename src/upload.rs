@@ -39,6 +39,61 @@ pub(crate) trait UploadBackend {
     fn upload(&self, png: Vec<u8>, name: &str, jobs: Sender<MainJob>);
 }
 
+/// The proxy scheme of a [`ProxySettings`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyScheme {
+    /// HTTP proxy; HTTPS requests go through its CONNECT tunnel.
+    Http,
+    /// HTTPS-to-proxy connection.
+    Https,
+    /// SOCKS5; best effort — NSURLSession's dictionary support for SOCKS
+    /// is incomplete on some macOS versions, the reliable user path is an
+    /// HTTP front (privoxy) before the SSH SOCKS tunnel.
+    Socks5,
+    /// SOCKS5 with remote DNS resolution.
+    Socks5h,
+}
+
+/// A parsed proxy setting: where upload requests are routed through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxySettings {
+    scheme: ProxyScheme,
+    host: String,
+    port: u16,
+}
+
+/// Parse a proxy setting of the form `scheme://host:port`. Schemes:
+/// `http`, `https`, `socks5`, `socks5h` (case-insensitive). The port is
+/// required — silent defaults like 80/1080 are a source of undiagnosable
+/// failures — and must be in 1..=65535. No userinfo (`user:pass@host`),
+/// no path. Empty, garbage, and anything unparseable give `None`, which
+/// the backend treats as a direct connection.
+pub(crate) fn parse_proxy(text: &str) -> Option<ProxySettings> {
+    let text = text.trim();
+    let (scheme_text, rest) = text.split_once("://")?;
+    let scheme = match scheme_text.to_ascii_lowercase().as_str() {
+        "http" => ProxyScheme::Http,
+        "https" => ProxyScheme::Https,
+        "socks5" => ProxyScheme::Socks5,
+        "socks5h" => ProxyScheme::Socks5h,
+        _ => return None,
+    };
+    // No path, no userinfo: a single host:port pair only.
+    if rest.is_empty() || rest.contains(['/', '@']) {
+        return None;
+    }
+    let (host, port_text) = rest.rsplit_once(':')?;
+    let port = port_text.parse::<u16>().ok()?;
+    if port == 0 || host.is_empty() {
+        return None;
+    }
+    Some(ProxySettings {
+        scheme,
+        host: host.to_string(),
+        port,
+    })
+}
+
 /// The Artifacts server backend: `PUT /api/images/{name}` with the PNG as
 /// the body, create-only (`X-Create-Only: true`); a 409 retries with the
 /// next `-2`…`-9` suffix. Transport — the system NSURLSession; each
@@ -467,5 +522,82 @@ mod tests {
             parse_reply(502, "<html>bad gateway</html>"),
             UploadReply::Failed("<html>bad gateway</html>".into())
         );
+    }
+
+    #[test]
+    fn http_and_https_proxies_parse() {
+        assert_eq!(
+            parse_proxy("http://127.0.0.1:8118"),
+            Some(ProxySettings {
+                scheme: ProxyScheme::Http,
+                host: "127.0.0.1".into(),
+                port: 8118
+            })
+        );
+        assert_eq!(
+            parse_proxy("https://proxy.example.com:3128"),
+            Some(ProxySettings {
+                scheme: ProxyScheme::Https,
+                host: "proxy.example.com".into(),
+                port: 3128
+            })
+        );
+    }
+
+    #[test]
+    fn socks_proxies_parse() {
+        assert_eq!(
+            parse_proxy("socks5://127.0.0.1:5555"),
+            Some(ProxySettings {
+                scheme: ProxyScheme::Socks5,
+                host: "127.0.0.1".into(),
+                port: 5555
+            })
+        );
+        assert_eq!(
+            parse_proxy("socks5h://127.0.0.1:5555"),
+            Some(ProxySettings {
+                scheme: ProxyScheme::Socks5h,
+                host: "127.0.0.1".into(),
+                port: 5555
+            })
+        );
+    }
+
+    #[test]
+    fn scheme_case_does_not_matter() {
+        let parsed = parse_proxy("HTTP://127.0.0.1:8118");
+        assert_eq!(parsed.map(|p| p.scheme), Some(ProxyScheme::Http));
+    }
+
+    #[test]
+    fn proxy_without_a_port_is_rejected() {
+        assert_eq!(parse_proxy("http://127.0.0.1"), None);
+        assert_eq!(parse_proxy("socks5://127.0.0.1"), None);
+    }
+
+    #[test]
+    fn proxy_port_outside_the_valid_range_is_rejected() {
+        assert_eq!(parse_proxy("http://127.0.0.1:0"), None);
+        assert_eq!(parse_proxy("http://127.0.0.1:65536"), None);
+        assert_eq!(parse_proxy("http://127.0.0.1:99999"), None);
+        assert_eq!(parse_proxy("http://127.0.0.1:notaport"), None);
+    }
+
+    #[test]
+    fn garbage_proxy_strings_are_rejected() {
+        assert_eq!(parse_proxy(""), None);
+        assert_eq!(parse_proxy("   "), None);
+        assert_eq!(parse_proxy("127.0.0.1:8118"), None, "no scheme");
+        assert_eq!(parse_proxy("ftp://127.0.0.1:21"), None, "unknown scheme");
+        assert_eq!(parse_proxy("http://"), None, "nothing after the scheme");
+        assert_eq!(parse_proxy("http://:8118"), None, "no host");
+        assert_eq!(
+            parse_proxy("http://user:pass@127.0.0.1:8118"),
+            None,
+            "userinfo is not supported"
+        );
+        assert_eq!(parse_proxy("http://127.0.0.1:8118/path"), None, "no path");
+        assert_eq!(parse_proxy("privoxy on 8118"), None);
     }
 }

@@ -3,7 +3,7 @@
 ## 1. Конфигурация и разбор прокси
 
 - [x] 1.1 `src/config.rs`: поле `proxy: String` в `ArtifactsProviderConfig` (TOML-ключ `proxy`, дефолт — пустая строка; частичный конфиг и старые файлы читаются); юнит-тест: дефолт пустой, сериализация/чтение, частичный конфиг без `proxy`. Проверка: `cargo test`.
-- [ ] 1.2 `src/upload.rs`: чистый разбор `parse_proxy(&str) -> Option<ProxySettings>` (scheme http/https/socks5/socks5h, host, порт обязателен 1–65535; мусор/пусто/без порта → `None`); юнит-тесты матрицы (http, https, socks5, socks5h, без порта, мусор, пусто). Проверка: `cargo test`.
+- [x] 1.2 `src/upload.rs`: чистый разбор `parse_proxy(&str) -> Option<ProxySettings>` (scheme http/https/socks5/socks5h, host, порт обязателен 1–65535; мусор/пусто/без порта → `None`); юнит-тесты матрицы (http, https, socks5, socks5h, без порта, мусор, пусто). Проверка: `cargo test`.
 - [ ] 1.3 `src/upload.rs`: `ArtifactsBackend` хранит `Option<ProxySettings>`; при построении сессии словарь `kCFNetworkProxies*` (HTTP+HTTPS записи; SOCKS для socks5/socks5h) уходит в `setConnectionProxyDictionary`, пустая настройка — словарь не задаётся; неразбираемая строка — запись в журнал и прямое соединение. Проверка: `cargo test` (чистые части), компиляция транспорта; живой прогон — таск 3.
 
 ## 2. Настройки
