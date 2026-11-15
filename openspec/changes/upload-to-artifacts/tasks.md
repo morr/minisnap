@@ -3,8 +3,8 @@
 ## 1. Конфигурация и хоткей
 
 - [x] 1.1 `src/config.rs`: секция провайдеров — `upload-provider` (активный провайдер, `artifacts`) + serde-enum вложенных секций с `ArtifactsProviderConfig { enabled: false, base_url, token, project }` и дефолтами (`https://artifacts.spacehubstore.com`, пусто, `minisnap`); хоткей `capture_upload_hotkey` (`⌘⌥6`, ключ `capture-upload-hotkey`); юнит-тест: дефолты, сериализация/чтение, частичный конфиг (нет upload-секции) читается, незнакомый провайдер не роняет чтение. Проверка: `cargo test`.
-- [ ] 1.2 `src/hotkeys.rs`: вариант `HotkeyAction::CaptureUpload`; реестр применяет четвёртую комбинацию из конфига; `src/app.rs` tick-обработчик маппит её в захват с загрузкой. Проверка: `cargo test`.
-- [ ] 1.3 `src/app.rs`: `MainJob::CaptureReady { edit: bool }` → `CaptureKind { Plain, Edit, Upload }` (поле `kind` в job, параметр `start_capture`); агентский `Capture { edit }` маппится `true → Edit`, `false → Plain`; ветки существующих действий не меняют поведения. Проверка: `cargo test`.
+- [x] 1.2 `src/hotkeys.rs`: вариант `HotkeyAction::CaptureUpload`; реестр применяет четвёртую комбинацию из конфига; `src/app.rs` tick-обработчик маппит её в захват с загрузкой. Проверка: `cargo test`.
+- [x] 1.3 `src/app.rs`: `MainJob::CaptureReady { edit: bool }` → `CaptureKind { Plain, Edit, Upload }` (поле `kind` в job, параметр `start_capture`); агентский `Capture { edit }` маппится `true → Edit`, `false → Plain`; ветки существующих действий не меняют поведения. Проверка: `cargo test`.
 
 ## 2. Модуль загрузки (провайдеры)
 

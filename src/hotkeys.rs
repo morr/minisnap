@@ -14,6 +14,8 @@ pub enum HotkeyAction {
     Capture,
     /// Start the frozen-area capture mode and open the editor afterwards.
     CaptureEdit,
+    /// Start the frozen-area capture mode and upload the shot afterwards.
+    CaptureUpload,
     /// Open the latest saved shot.
     OpenLatest,
 }
@@ -35,10 +37,16 @@ impl HotkeyRegistry {
         }
     }
 
-    /// Replace the current registrations with the three actions. If one
+    /// Replace the current registrations with the four actions. If one
     /// combination is already taken by another app it is reported, and the
     /// other ones are still registered.
-    pub fn apply(&mut self, capture: HotKey, capture_edit: HotKey, open: HotKey) {
+    pub fn apply(
+        &mut self,
+        capture: HotKey,
+        capture_edit: HotKey,
+        capture_upload: HotKey,
+        open: HotKey,
+    ) {
         self.manager.borrow_mut().take();
         let manager = match GlobalHotKeyManager::new() {
             Ok(m) => m,
@@ -51,6 +59,7 @@ impl HotkeyRegistry {
         for (hotkey, action) in [
             (capture, HotkeyAction::Capture),
             (capture_edit, HotkeyAction::CaptureEdit),
+            (capture_upload, HotkeyAction::CaptureUpload),
             (open, HotkeyAction::OpenLatest),
         ] {
             match manager.register(hotkey) {

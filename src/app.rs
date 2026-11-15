@@ -43,14 +43,27 @@ const STATUS_ITEM_SQUARE_LENGTH: f64 = -2.0;
 /// How often the main-thread tick polls global-hotkey events, in seconds.
 const TICK_INTERVAL: f64 = 0.05;
 
+/// What follows the usual output after a capture finishes. The agent
+/// channel speaks only Plain/Edit (`Capture { edit }`); Upload comes from
+/// the hotkey and the tray menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureKind {
+    /// Output the shot; a visible editor window may show it, none is raised.
+    Plain,
+    /// Output the shot and open the editor window.
+    Edit,
+    /// Output the shot and upload the saved file to the active provider.
+    Upload,
+}
+
 /// Owned data produced on background threads, dispatched on the main thread
 /// by the tick. The controller itself is main-thread-only, so jobs carry
 /// data instead of closures over it.
 pub(crate) enum MainJob {
     CaptureReady {
         result: Result<crate::capture::T0Capture, String>,
-        /// Open the editor window after the usual output.
-        edit: bool,
+        /// What to do with the shot after the usual output.
+        kind: CaptureKind,
     },
     /// A finished capture produced a shot file to open in the editor.
     /// With `only_if_visible`, the job is dropped unless the editor window
@@ -115,12 +128,12 @@ define_class!(
     impl AppController {
         #[unsafe(method(captureFrozenArea:))]
         fn capture_frozen_area(&self, _sender: Option<&AnyObject>) {
-            self.start_capture(false);
+            self.start_capture(CaptureKind::Plain);
         }
 
         #[unsafe(method(captureAndEdit:))]
         fn capture_and_edit(&self, _sender: Option<&AnyObject>) {
-            self.start_capture(true);
+            self.start_capture(CaptureKind::Edit);
         }
 
         #[unsafe(method(openLatestImage:))]
@@ -210,8 +223,8 @@ define_class!(
             loop {
                 let next = self.ivars().jobs_rx.borrow_mut().try_recv().ok();
                 match next {
-                    Some(MainJob::CaptureReady { result, edit }) => {
-                        self.capture_ready(result, edit)
+                    Some(MainJob::CaptureReady { result, kind }) => {
+                        self.capture_ready(result, kind)
                     }
                     Some(MainJob::OpenEditor {
                         path,
@@ -238,8 +251,9 @@ define_class!(
             }
             for action in self.ivars().hotkeys.borrow().pending_actions() {
                 match action {
-                    HotkeyAction::Capture => self.start_capture(false),
-                    HotkeyAction::CaptureEdit => self.start_capture(true),
+                    HotkeyAction::Capture => self.start_capture(CaptureKind::Plain),
+                    HotkeyAction::CaptureEdit => self.start_capture(CaptureKind::Edit),
+                    HotkeyAction::CaptureUpload => self.start_capture(CaptureKind::Upload),
                     HotkeyAction::OpenLatest => self.open_latest(),
                 }
             }
@@ -434,7 +448,12 @@ impl AppController {
         Self::apply_menu_hotkey(&open_latest_item, &open_hk);
 
         let mut hotkeys = HotkeyRegistry::new();
-        hotkeys.apply(capture_hk, edit_hk, open_hk);
+        hotkeys.apply(
+            capture_hk,
+            edit_hk,
+            config.capture_upload_hotkey,
+            open_hk,
+        );
         this.ivars().hotkeys.replace(hotkeys);
 
         // Display configuration changes cancel the overlay mode (4.7).
@@ -669,7 +688,11 @@ impl AppController {
         if self.ivars().overlay.borrow().is_active() {
             return ActionResult::rejected("the capture overlay is already active");
         }
-        self.start_capture(edit);
+        self.start_capture(if edit {
+            CaptureKind::Edit
+        } else {
+            CaptureKind::Plain
+        });
         ActionResult::initiated(
             "capture started; the overlay opens when the frozen frame is ready (poll /state)",
         )
@@ -978,7 +1001,12 @@ impl AppController {
             self.ivars()
                 .hotkeys
                 .borrow_mut()
-                .apply(config.capture_hotkey, config.capture_edit_hotkey, config.open_hotkey);
+                .apply(
+                    config.capture_hotkey,
+                    config.capture_edit_hotkey,
+                    config.capture_upload_hotkey,
+                    config.open_hotkey,
+                );
             Self::apply_menu_hotkey(&self.ivars().capture_item, &config.capture_hotkey);
             Self::apply_menu_hotkey(&self.ivars().capture_edit_item, &config.capture_edit_hotkey);
             Self::apply_menu_hotkey(&self.ivars().open_latest_item, &config.open_hotkey);
@@ -1116,7 +1144,7 @@ impl AppController {
     /// Start the frozen-area capture: freeze every display at T0 and open
     /// the overlay on the one under the cursor. With `edit`, the shot opens
     /// in the editor window after the usual output.
-    fn start_capture(&self, edit: bool) {
+    fn start_capture(&self, kind: CaptureKind) {
         // No permission — no capture: explain instead (7.2). The preflight
         // here also re-checks after the user granted the permission in
         // System Settings without a relaunch.
@@ -1145,13 +1173,17 @@ impl AppController {
         std::thread::spawn(move || {
             objc2::rc::autoreleasepool(|_pool| {
                 let result = crate::capture::capture_t0(mouse_sckit);
-                let _ = jobs_tx.send(MainJob::CaptureReady { result, edit });
+                let _ = jobs_tx.send(MainJob::CaptureReady { result, kind });
             });
         });
     }
 
     /// T0 data arrived: enter the frozen-frame overlay mode. Main thread.
-    fn capture_ready(&self, result: Result<crate::capture::T0Capture, String>, edit: bool) {
+    fn capture_ready(
+        &self,
+        result: Result<crate::capture::T0Capture, String>,
+        kind: CaptureKind,
+    ) {
         let Ok(t0) = result else {
             if let Err(e) = &result {
                 crate::log!("capture: {e}");
@@ -1187,7 +1219,7 @@ impl AppController {
                         crate::log!("output: saved {}", path.display());
                         let _ = jobs_tx.send(MainJob::OpenEditor {
                             path,
-                            only_if_visible: !edit,
+                            only_if_visible: !matches!(kind, CaptureKind::Edit),
                         });
                     }
                     Err(e) => crate::log!("output: save: {e}"),
