@@ -11,7 +11,7 @@
 
 ## 3. Мост и описание для агентов
 
-- [ ] 3.1 `src/bin/minisnap-mcp.rs`: описание `action` перечисляет `{"Upload":{}}`, описание `state` упоминает `uploading`; тест `tools_list` проверяет упоминание Upload в описании `action`. `AGENTS.md`: раздел про MCP — форма в списке `action`, `uploading` в описании `state`, семантика `initiated` (поллить `editor.uploading`). Проверка: `cargo test`.
+- [x] 3.1 `src/bin/minisnap-mcp.rs`: описание `action` перечисляет `{"Upload":{}}`, описание `state` упоминает `uploading`; тест `tools_list` проверяет упоминание Upload в описании `action`. `AGENTS.md`: раздел про MCP — форма в списке `action`, `uploading` в описании `state`, семантика `initiated` (поллить `editor.uploading`). Проверка: `cargo test`.
 
 ## 4. Скиллы и живая проверка
 

@@ -83,7 +83,8 @@ own behaviors, not arbitrary macOS UI.
   visible — minisnap is in cmd+tab; `accessory` otherwise), the editor
   document (shot path, elements in journal shape
   with geometry, selection, active tool, color, stroke width, undo/redo,
-  leafing availability) and the config. `editor: null` means the editor
+  leafing availability, `uploading` — an upload of the shot is in
+  flight) and the config. `editor: null` means the editor
   window was never opened this run; a hidden-but-opened editor still
   reports its document.
 - `screenshot {target, path?}` — `target: "composite"` renders the editor
@@ -93,7 +94,10 @@ own behaviors, not arbitrary macOS UI.
   image plus the PNG path.
 - `action {action}` — app-level actions, serde enum shapes:
   `{"Capture":{"edit":true}}`, `{"OpenEditor":{"path":"…"}}`,
-  `{"OverlaySelect":{"x":…,"y":…,"w":…,"h":…}}`, and the unit variants
+  `{"OverlaySelect":{"x":…,"y":…,"w":…,"h":…}}`, `{"Upload":{}}`
+  (upload the open editor shot like the toolbar button: `initiated`,
+  poll `uploading`; the public URL lands in the pasteboard and the log),
+  and the unit variants
   `OpenLatest`, `"CloseEditor"`, `"OverlayCancel"`, `"PrefsOpen"`,
   `"PrefsClose"`, `"Quit"`.
 - `editor {op}` — editor operations:
@@ -117,8 +121,10 @@ own behaviors, not arbitrary macOS UI.
 **Semantics worth knowing.**
 
 - Action/operation results carry a status: `done` (synchronous effect),
-  `initiated` (async — only `Capture`: poll `state` until
-  `overlay_active`), `rejected` (current state forbids it, with the
+  `initiated` (async — `Capture`: poll `state` until
+  `overlay_active`; `Upload`: poll until the editor's `uploading` goes
+  `false`, then read the URL from the log or the pasteboard),
+  `rejected` (current state forbids it, with the
   reason), `noop` (nothing to do). A dead or misconfigured app is a short
   readable error, never a crash.
 - The capture flow: `Capture` → poll `state` → `OverlaySelect` with the

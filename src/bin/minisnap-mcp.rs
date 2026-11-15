@@ -147,7 +147,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "state",
-            "description": "Full state of a running minisnap: open windows (editor/overlay/preferences with frames), the editor document (shot path, elements with geometry, selection, tool, color, stroke width, undo/redo), config (hotkeys, save dir), activation policy (regular while the editor window is visible — minisnap is in cmd+tab; accessory otherwise).",
+            "description": "Full state of a running minisnap: open windows (editor/overlay/preferences with frames), the editor document (shot path, elements with geometry, selection, tool, color, stroke width, undo/redo, uploading — an upload of the shot is in flight), config (hotkeys, save dir), activation policy (regular while the editor window is visible — minisnap is in cmd+tab; accessory otherwise).",
             "inputSchema": {
                 "type": "object",
                 "properties": {"instance": {"type": "string", "description": "checkout label or pid; default: the main checkout, or the only live instance"}}
@@ -168,7 +168,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "action",
-            "description": "Run an app-level action through the same code paths as the tray menu and hotkeys. For several sequential actions prefer the `batch` tool. The `action` value is a serde enum: {\"Capture\":{\"edit\":true}}, {\"OpenLatest\"}, {\"OpenEditor\":{\"path\":\"…\"}}, \"CloseEditor\", {\"OverlaySelect\":{\"x\":0,\"y\":0,\"w\":800,\"h\":600}} (captured-frame pixels, finishes the frozen overlay like a drag: crop, shutter, clipboard, save), \"OverlayCancel\", \"PrefsOpen\", \"PrefsClose\", \"Quit\".",
+            "description": "Run an app-level action through the same code paths as the tray menu and hotkeys. For several sequential actions prefer the `batch` tool. The `action` value is a serde enum: {\"Capture\":{\"edit\":true}}, {\"OpenLatest\"}, {\"OpenEditor\":{\"path\":\"…\"}}, \"CloseEditor\", {\"OverlaySelect\":{\"x\":0,\"y\":0,\"w\":800,\"h\":600}} (captured-frame pixels, finishes the frozen overlay like a drag: crop, shutter, clipboard, save), \"OverlayCancel\", \"PrefsOpen\", \"PrefsClose\", {\"Upload\":{}} (upload the open editor shot like the toolbar button — answers initiated, poll state's editor.uploading; the public URL lands in the pasteboard and the log), \"Quit\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -637,6 +637,27 @@ mod tests {
                 "{name} description must point at batch"
             );
         }
+    }
+
+    #[test]
+    fn action_description_advertises_upload_and_state_mentions_uploading() {
+        let list = tools_list();
+        let tools = list.pointer("/tools").and_then(Value::as_array).unwrap();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .and_then(|tool| tool.get("description").and_then(Value::as_str))
+                .expect("tool present")
+        };
+        assert!(
+            description("action").contains("{\"Upload\":{}}"),
+            "action description must spell the Upload form"
+        );
+        assert!(
+            description("state").contains("uploading"),
+            "state description must name the uploading flag"
+        );
     }
 
     #[test]
