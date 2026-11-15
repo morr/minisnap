@@ -19,13 +19,14 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 | `src/hotkeys.rs` | глобальные хоткеи: регистрация, опрос событий, клавишные соответствия сканкодов |
 | `src/hotkey_recorder.rs` | чистая машина рекордера комбинаций для настроек: правила записи (повторный вход, Esc-отмена, голая клавиша/неизвестный keycode), без AppKit, юнит-тесты |
 | `src/permission.rs` | разрешения Screen Recording / Accessibility |
-| `src/prefs.rs` | окно настроек: три строки-рекордера комбинаций |
-| `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция), миграция легаси-дефолтов |
+| `src/prefs.rs` | окно настроек: четыре строки-рекордера комбинаций + раздел загрузки (галочка провайдера и её поля) |
+| `src/config.rs` | конфиг TOML (хоткеи, папка, ретенция, секция провайдеров загрузки), миграция легаси-дефолтов |
 | `src/capture.rs` | захват момента T0: кадры всех дисплеев, целевой — под курсором, список окон; единственный конвертер координат (`mod geometry`) |
 | `src/overlay.rs` | полноэкранный оверлей заморозки: сессия выделения, вуали соседних дисплеев, цель следует за курсором |
 | `src/overlay_hud.rs` | HUD оверлея — весь хром над кадром: dim-полосы, лупа (с даунсэмплом кадра), оси, подпись, красная рамка с пульсом |
 | `src/output.rs` | вывод результата: буфер обмена, тихое сохранение PNG, имена, ретенция, листинг папки |
 | `src/sound.rs` | звук затвора в момент съёмки: системный файл по цепочке путей, ключ `disable-sound` |
+| `src/upload.rs` | провайдеры загрузки снимка на hosting: trait-граница + реализация Artifacts (NSURLSession), ответ через `MainJob::UploadFinished` |
 | `src/editor_window.rs` | окно редактора и канвас: ввод текста, chrome рамки; мышиные обработчики тонкие — `pixel_point` + пересылка в машину драга |
 | `src/editor_toolbar.rs` | тулбар и хром окна редактора: панель-полоса, слайдер, поповер палитры; стык с ядром — `set_state(ToolbarState)` / `ToolbarEvent` |
 | `src/editor_arrow_tuner.rs` | debug-тюнер стрелки за `MINISNAP_ARROW_DEBUG`: панель параметров, спеки, промпт в буфер; события едут через `ToolbarEvent` |
@@ -43,7 +44,7 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 1. Хоткей или пункт меню → `AppController::start_capture(edit)` (`src/app.rs`): preflight разрешения, конвертация позиции мыши `geometry::point_to_sckit`, фоновый `std::thread` → `capture::capture_t0(mouse_sckit)` — снимки всех дисплеев подряд в том же единственном фоновом потоке.
 2. Результат приезжает по `mpsc` как `MainJob::CaptureReady`; метод `tick:` (повторяющийся `NSTimer`) перекачивает jobs в главный поток и там же забирает `HotkeyRegistry::pending_actions()` — глобальные хоткеи опрашиваются, их обработчиков в чужих потоках нет.
 3. `capture_ready` → `Overlay::show(t0, callback)`: замороженный кадр дисплея с курсором (цель из `T0Capture.target`); пока режим активен, перевод курсора на другой дисплей переключает цель на его кадр.
-4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `sound::play_shutter` → `output::copy_to_pasteboard` → `output::save_to_file`; затем всегда → `MainJob::OpenEditor { path, only_if_visible: !edit }` через тот же тик — «capture and edit» шлёт `only_if_visible: false`, обычный захват `true`, и решение «показывать ли снимок в редакторе» принимает обработчик в `tick:` (см. `minisnap-shell`).
+4. Callback оверлея: `OverlayOutcome::Selected { pixel_rect, image, scale }` → `output::crop` → `sound::play_shutter` → `output::copy_to_pasteboard` → `output::save_to_file`; затем всегда → `MainJob::OpenEditor { path, only_if_visible: !edit }` через тот же тик — «capture and edit» шлёт `only_if_visible: false`, обычный захват `true`, и решение «показывать ли снимок в редакторе» принимает обработчик в `tick:` (см. `minisnap-shell`). Режим capture-and-upload после сохранения запускает ещё и фоновую загрузку файла (`src/upload.rs`), её ответ доезжает тем же тиком как `MainJob::UploadFinished`.
 5. `open_editor` → `session::OpenShot::open(path, default_root())` → единственное переиспользуемое `EditorWindow::show_shot(shot)`.
 6. Правки: `OpenShot::apply`/`apply_width`/`undo`/`redo` → `render::render_composite` → `output::encode_png_atomic` (файл снимка) + журнал сессии в tmp.
 
@@ -57,5 +58,5 @@ description: Orientation map of the minisnap macOS screenshot utility codebase �
 |---|---|---|---|
 | `minisnap-shell` | оболочка приложения | `app.rs`, `config.rs`, `prefs.rs`, `hotkeys.rs`, `hotkey_recorder.rs`, `permission.rs`, `agent_server.rs`, `agent_proto.rs`, `logbuf.rs` | `tray-app`, `global-hotkeys`, `preferences`, `screen-recording-permission`, `agent-control` |
 | `minisnap-capture` | заморозка и выделение | `capture.rs`, `overlay.rs` | `frozen-capture` |
-| `minisnap-output` | вывод снимков | `output.rs`, `sound.rs` | `capture-output` |
+| `minisnap-output` | вывод снимков | `output.rs`, `sound.rs`, `upload.rs` | `capture-output`, `shot-upload` |
 | `minisnap-editor` | аннотирование | `editor_window.rs`, `src/editor/` | `shot-editor` |

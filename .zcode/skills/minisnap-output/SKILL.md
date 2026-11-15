@@ -1,11 +1,11 @@
 ---
 name: minisnap-output
-description: Map of the minisnap output domain (src/output.rs, src/sound.rs) — clipboard copy of a finished shot, silent PNG saving with timestamped collision-safe file names, retention of old shots, listing shots for open-latest and editor paging, and the system shutter sound played when a capture completes. Use for tasks about copy_to_pasteboard, save_to_file, shot file naming or recognition, retention limits, latest_shot/sorted_shots listings, or play_shutter and the disable-sound system switch. Not for shell config, capture/overlay, or editor UI.
+description: Map of the minisnap output domain (src/output.rs, src/sound.rs, src/upload.rs) — clipboard copy of a finished shot, silent PNG saving with timestamped collision-safe file names, retention of old shots, listing shots for open-latest and editor paging, the system shutter sound played when a capture completes, and the upload providers that ship a saved shot to an image hosting. Use for tasks about copy_to_pasteboard, save_to_file, shot file naming or recognition, retention limits, latest_shot/sorted_shots listings, play_shutter and the disable-sound system switch, or UploadBackend/ArtifactsBackend, upload naming, and the provider proxy. Not for shell config, capture/overlay, or editor UI.
 ---
 
 # Домен output — вывод результата захвата
 
-`src/output.rs` превращает завершённое выделение в результат: кроп кадра T0, копия в буфер обмена, тихое сохранение PNG с именем по времени, ретенция папки и листинг снимков. `src/sound.rs` — звуковой фидбек того же момента: системный щелчок затвора по завершении выделения. Всё работает с уже готовым `CGImage`; захват и координаты — домен `minisnap-capture`, окно и инструменты редактора — `minisnap-editor`. Нормативное поведение — спека `capture-output`.
+`src/output.rs` превращает завершённое выделение в результат: кроп кадра T0, копия в буфер обмена, тихое сохранение PNG с именем по времени, ретенция папки и листинг снимков. `src/sound.rs` — звуковой фидбек того же момента: системный щелчок затвора по завершении выделения. `src/upload.rs` — третья половина вывода: доставка сохранённого снимка на hosting-провайдер. Всё работает с уже готовым `CGImage`; захват и координаты — домен `minisnap-capture`, окно и инструменты редактора — `minisnap-editor`. Нормативное поведение — спеки `capture-output` и `shot-upload`.
 
 ## Карта модулей
 
@@ -13,11 +13,13 @@ description: Map of the minisnap output domain (src/output.rs, src/sound.rs) —
 |---|---|
 | `src/output.rs` | кроп кадра, копия в буфер обмена, тихое сохранение PNG с уникальными именами, ретенция папки, листинг снимков |
 | `src/sound.rs` | системный звук затвора: цепочка путей системных файлов, системный ключ выключения, обязательный prewarm |
+| `src/upload.rs` | провайдеры загрузки снимка: trait-граница `UploadBackend`, реализация Artifacts (create-only с повтором имён), фабрика `build_backend` из конфига, имена загрузок из имён файлов, настройка прокси |
 
 ## Поток данных
 
 - **Захват завершён** (`src/app.rs`, callback `OverlayOutcome::Selected`): `crop` → пустой результат — только лог и выход; далее `sound::play_shutter()` (звук до буфера и файла — «снимок сделан», а не «файл записан») → `copy_to_pasteboard` (ошибка логируется, сохранение всё равно идёт) → `save_to_file(&image, &save_dir, retention, scale)`, scale — backing scale дисплея захвата. `save_dir` и `retention` берутся из `Config` (`src/config.rs`). При `edit`-режиме путь уезжает в `MainJob::OpenEditor` через тик.
 - **Редактор правит снимок** (`OpenShot::persist` в `src/editor/session.rs`, после каждой команды/undo/redo): `render_composite` → `encode_png_atomic(&composite, &self.shot_path)` — файл снимка перезаписывается на месте, атомарно. Оригинал сессии пишется тем же `encode_png` через собственный `write_atomic` сессии.
+- **Правка → persist → загрузка**: правка перезаписывает файл снимка на месте, поэтому загрузка (`upload_file`) всегда читает с диска актуальное состояние снимка. Запуск — кнопка Upload тулбара или ветка `CaptureKind::Upload`; `app.rs` строит бекенд на каждую загрузку (`build_backend` из `Config`), так что настройки (включение, токен, прокси) действуют без перезапуска. Ответ приезжает `MainJob::UploadFinished` через общий тик: успех — URL заменяет снимок в буфере, ошибка — модальный алерт; кнопка Upload всё это время в состоянии «загрузка».
 - **⌘C в редакторе** (`copy_composite` в `src/editor_window.rs`): композит без маркеров → `copy_to_pasteboard`.
 - **«Открыть последний»** (`open_latest` в `src/app.rs`): `latest_shot(&config.save_dir)` → `open_editor`; пустая папка — тихий no-op.
 - **Листание в редакторе** (`page` в `src/editor_window.rs`): `sorted_shots(&save_dir)`, позиция текущего файла, `clamp` на края.
@@ -37,5 +39,10 @@ description: Map of the minisnap output domain (src/output.rs, src/sound.rs) —
 - **Звук затвора — не ассет приложения, а системный файл по цепочке путей** (`shutter_sound_paths`); путь переезжает между релизами macOS, первый существующий файл берётся, ничего не нашлось — снимок продолжается без звука. Собственного выключателя в config нет: honored системный ключ `com.apple.screencapture disable-sound`, тот же, что глушит звук системной утилиты скриншотов.
 - **Первый в процессе `play` — ~0.8 с инициализации CoreAudio, холодный pref-read — ~0.15 с** (замеры в `#[ignore]`-тесте `timing_report`); поэтому `prewarm` на старте обязателен для нового процесса, а не опция — без него первый снимок держит главный поток (общий с fade-out оверлея) почти секунду. Тёплые `play` — микросекунды.
 - **`NSSound` в `thread_local`-слоте**: объект, уроненный сразу после `play`, обрезает звук, поэтому инстанс кешируется и переиспользуется; повторный `play` на том же инстансе перезапускает звук с начала — наложений при быстрых снимках нет. Все вызовы из главного потока (обработчик `Selected` в тике).
+- **Граница upload-домена:** сетевой транспорт, имена и разбор ответа — `src/upload.rs`; всё видимое пользователю (диалоги, буфер, состояние кнопки) — `app.rs`. Новый хостинг = новая реализация trait'а + секция конфига + запись в реестре полей prefs; вызывающие не меняются.
+- **Create-only с повтором**: сервер никогда не перезаписывает чужое изображение; 409 уводит повтор к следующему суффиксу имени, до исчерпания. Повторная загрузка того же снимка после правки поэтому **нормально** попадает в `-2` — имя производно от файла (дата создания снимка, не правки), она стабильна.
+- **Прокси разбирается один раз — на создании бекенда**: пустая настройка словарь прокси не задаёт вовсе (сессия наследует системные прокси); неразбираемая строка даёт запись в журнал и прямое соединение, без алерта. Прокси — не секрет, но в журнал тоже не выводится. Ключи словаря — строковые имена CFNetwork-констант (в objc2-foundation их нет).
+- **Сессия — на каждую загрузку**; комплишн-блок держит сессию и тело запроса, пока цепочка попыток в полёте, и отвечает на фоновой очереди сессии — в главный поток попадает только через тик.
+- **Токен провайдера хранится только в локальном конфиге** и не попадает в журнал и агентский канал; `build_backend` возвращает `None` и на выключенного провайдера, и на пустой токен — вызывающий различий не делает.
 
 Скрытые договорённости с другими доменами (пиксельное пространство координат, владение `CGImage`, главный поток) — в скиле `minisnap-architecture`.
