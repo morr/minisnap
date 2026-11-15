@@ -13,8 +13,8 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask, NSEventType,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOn,
+    NSControlTextEditingDelegate, NSEvent, NSEventMask, NSEventType,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
     NSStatusItem, NSTextFieldDelegate, NSWindowDelegate,
 };
@@ -1405,6 +1405,10 @@ impl AppController {
             (config.save_dir.clone(), config.retention)
         };
         let jobs_tx = self.ivars().jobs_tx.clone();
+        // The callback must not hold the controller strongly: the
+        // controller owns the overlay, a strong capture would cycle. The
+        // upload-capture branch rides the weak reference back.
+        let weak: Weak<AppController> = Weak::new(self);
         overlay.show(t0, Box::new(move |outcome| match outcome {
             OverlayOutcome::Selected {
                 pixel_rect,
@@ -1423,9 +1427,17 @@ impl AppController {
                     Ok(path) => {
                         crate::log!("output: saved {}", path.display());
                         let _ = jobs_tx.send(MainJob::OpenEditor {
-                            path,
+                            path: path.clone(),
                             only_if_visible: !matches!(kind, CaptureKind::Edit),
                         });
+                        if matches!(kind, CaptureKind::Upload) {
+                            // The same configure-or-ship path as the
+                            // editor's Upload button (the spec keeps one
+                            // path for the button and the combination).
+                            if let Some(controller) = weak.load() {
+                                controller.handle_upload_request(&path);
+                            }
+                        }
                     }
                     Err(e) => crate::log!("output: save: {e}"),
                 }
