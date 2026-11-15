@@ -61,6 +61,9 @@ pub struct EditorState {
     pub text_input_active: bool,
     /// The font size the slider rides while the input is open.
     pub text_size: Option<f64>,
+    /// An upload of the shot is in flight (the Upload button's in-flight
+    /// tile); an agent polls this to see the request settle.
+    pub uploading: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub can_page_prev: bool,

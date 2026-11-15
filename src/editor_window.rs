@@ -996,6 +996,7 @@ impl EditorView {
             selection: ivars.selection.get(),
             text_input_active,
             text_size: text_input_active.then_some(ivars.text_size.get()),
+            uploading: ivars.uploading.get(),
             can_undo: state.can_undo,
             can_redo: state.can_redo,
             can_page_prev: state.can_page_prev,
@@ -2186,6 +2187,22 @@ impl EditorWindow {
     pub fn set_uploading(&self, uploading: bool) {
         self.view.ivars().uploading.set(uploading);
         self.view.redraw();
+    }
+
+    /// The path of the open shot; `None` while the document holds no shot.
+    /// The app's agent upload action ships this file.
+    pub fn shot_path(&self) -> Option<std::path::PathBuf> {
+        self.view
+            .ivars()
+            .shot
+            .borrow()
+            .as_ref()
+            .map(|shot| shot.shot_path.clone())
+    }
+
+    /// Whether an upload is in flight (the Upload button's in-flight tile).
+    pub fn is_uploading(&self) -> bool {
+        self.view.ivars().uploading.get()
     }
 
     /// Snapshot for the agent server: the document and interaction state
