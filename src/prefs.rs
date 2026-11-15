@@ -36,6 +36,7 @@ const ROW_HEIGHT: f64 = 29.0;
 enum FieldKey {
     Token,
     Project,
+    Proxy,
 }
 
 /// One field row of a provider section: what it shows, what it edits.
@@ -68,6 +69,11 @@ const UPLOAD_PROVIDERS: &[UploadProvider] = &[UploadProvider {
             label: "Project",
             placeholder: "project namespace",
         },
+        UploadField {
+            key: FieldKey::Proxy,
+            label: "Proxy",
+            placeholder: "http://127.0.0.1:8118",
+        },
     ],
 }];
 
@@ -97,6 +103,7 @@ pub struct UploadSectionUi {
     pub checkbox: Retained<NSButton>,
     pub token_field: Retained<NSTextField>,
     pub project_field: Retained<NSTextField>,
+    pub proxy_field: Retained<NSTextField>,
     /// The field rows; arranged subviews of the stack only while visible.
     field_rows: Vec<Retained<NSStackView>>,
 }
@@ -285,15 +292,18 @@ pub fn build(
     let mut field_rows = Vec::new();
     let mut token_field = None;
     let mut project_field = None;
+    let mut proxy_field = None;
     for field_spec in provider.fields {
         let value = match field_spec.key {
             FieldKey::Token => upload_provider.token.as_str(),
             FieldKey::Project => upload_provider.project.as_str(),
+            FieldKey::Proxy => upload_provider.proxy.as_str(),
         };
         let (row_stack, field) = field_row(mtm, field_spec.label, field_spec.placeholder, value);
         match field_spec.key {
             FieldKey::Token => token_field = Some(field.clone()),
             FieldKey::Project => project_field = Some(field.clone()),
+            FieldKey::Proxy => proxy_field = Some(field.clone()),
         }
         if upload_provider.enabled {
             stack.addArrangedSubview(&row_stack);
@@ -305,6 +315,7 @@ pub fn build(
         checkbox,
         token_field: token_field.expect("registry must define the token field"),
         project_field: project_field.expect("registry must define the project field"),
+        proxy_field: proxy_field.expect("registry must define the proxy field"),
         field_rows,
     };
 

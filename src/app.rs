@@ -1235,8 +1235,8 @@ impl AppController {
     }
 
     /// The upload-section text fields changed (every keystroke): persist
-    /// the token and project right away, so the next upload uses them
-    /// without a relaunch.
+    /// the token, project and proxy right away, so the next upload uses
+    /// them without a relaunch.
     fn upload_fields_changed(&self) {
         let prefs_guard = self.ivars().prefs.borrow();
         let Some(prefs_window) = prefs_guard.as_ref() else {
@@ -1246,9 +1246,12 @@ impl AppController {
         let artifacts = &mut config.upload.artifacts;
         let token = prefs_window.upload.token_field.stringValue().to_string();
         let project = prefs_window.upload.project_field.stringValue().to_string();
-        let changed = token != artifacts.token || project != artifacts.project;
+        let proxy = prefs_window.upload.proxy_field.stringValue().to_string();
+        let changed =
+            token != artifacts.token || project != artifacts.project || proxy != artifacts.proxy;
         artifacts.token = token;
         artifacts.project = project;
+        artifacts.proxy = proxy;
         if changed {
             if let Some(path) = Config::standard_path() {
                 if let Err(e) = config.save_to(&path) {
