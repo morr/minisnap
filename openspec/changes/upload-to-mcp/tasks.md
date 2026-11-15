@@ -2,7 +2,7 @@
 
 ## 1. Протокол и состояние
 
-- [ ] 1.1 `src/agent_proto.rs`: вариант `AgentAction::Upload` (форма `{"Upload":{}}`, doc-comment — семантика кнопки Upload, async-ответ); юнит-тест: сериализация/разбор `"Upload"` туда-обратно и в форме с пустым объектом. Проверка: `cargo test`.
+- [x] 1.1 `src/agent_proto.rs`: вариант `AgentAction::Upload` (форма `{"Upload":{}}`, doc-comment — семантика кнопки Upload, async-ответ); юнит-тест: сериализация/разбор `"Upload"` туда-обратно и в форме с пустым объектом; временное плечо-заглушка в `agent_action`, чтобы match оставался исчерпывающим и сборка была зелёной (заменяется в 2.1). Проверка: `cargo test`.
 - [ ] 1.2 `src/agent_proto.rs` + `src/editor_window.rs`: поле `uploading: bool` в `EditorState` (заполняется из Cell'а view в `agent_state`); геттеры `EditorWindow::shot_path()` и `EditorWindow::is_uploading()` — тонкие делегаты к view. Проверка: `cargo test`.
 
 ## 2. Действие в приложении

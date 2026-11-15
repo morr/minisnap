@@ -735,6 +735,9 @@ impl AppController {
                     None => ActionResult::noop("no preferences window open"),
                 }
             }
+            // Task 2.1 replaces this placeholder with the real agent
+            // upload path (shared tail with the editor button).
+            AgentAction::Upload {} => ActionResult::rejected("agent upload is not wired yet"),
             AgentAction::Quit => {
                 crate::agent_server::deregister(std::process::id());
                 let mtm = MainThreadMarker::from(self);

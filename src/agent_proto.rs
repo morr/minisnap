@@ -125,6 +125,13 @@ pub enum AgentAction {
     PrefsOpen,
     /// Close the preferences window.
     PrefsClose,
+    /// Upload the shot open in the editor through the configured provider —
+    /// the same request the editor's Upload button fires. Async like the
+    /// capture: the answer is `initiated`, the outcome (the public URL in
+    /// the pasteboard and the log, or a failure) arrives via the tick.
+    /// An empty struct variant on purpose: the wire form is `{"Upload":{}}`
+    /// (a unit variant would only take the bare `"Upload"` string).
+    Upload {},
     /// Terminate the application.
     Quit,
 }
@@ -291,6 +298,15 @@ mod tests {
         let back: AgentEditorOp = serde_json::from_str(&json).unwrap();
         assert_eq!(json, serde_json::to_string(&back).unwrap());
         assert!(json.contains("AddElement"));
+    }
+
+    #[test]
+    fn action_shapes_roundtrip() {
+        // The contract's wire form: the empty object payload.
+        let back: AgentAction = serde_json::from_str("{\"Upload\":{}}").unwrap();
+        assert!(matches!(back, AgentAction::Upload {}));
+        let json = serde_json::to_string(&AgentAction::Upload {}).unwrap();
+        assert_eq!(json, "{\"Upload\":{}}");
     }
 
     #[test]
