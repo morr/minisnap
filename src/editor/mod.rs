@@ -354,7 +354,6 @@ fn redraw_at_size(image: &CGImage, width: usize, height: usize) -> Option<CFReta
     CGBitmapContextCreateImage(Some(&ctx))
 }
 
-/// Shift every coordinate of an element by a delta.
 /// Shift every coordinate of an element by a delta in base pixel space.
 pub(crate) fn shift_element(kind: &mut ElementKind, dx: f64, dy: f64) {
     let shift = |p: &mut Point| {
@@ -414,8 +413,8 @@ fn scale_element(kind: &mut ElementKind, sx: f64, sy: f64) {
     }
 }
 
-/// Move one end of an arrow/line/callout. Other kinds have no ends.
-/// Move one end of an arrow/line/callout to `point`.
+/// Move one end of an arrow/line/callout to `point`; other kinds have no
+/// ends.
 pub(crate) fn set_endpoint(kind: &mut ElementKind, end: Endpoint, point: Point) {
     match kind {
         ElementKind::Arrow { a, b, .. } | ElementKind::Line { a, b, .. } => match end {
@@ -629,45 +628,36 @@ mod tests {
     use super::*;
     use objc2_core_foundation::CFRetained;
     use objc2_core_foundation::CFData;
-    use objc2_core_graphics::{CGDataProvider, CGColorSpace, CGImageAlphaInfo, CGContext};
-    use objc2_core_graphics::CGBitmapContextCreateImage;
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGDataProvider,
+        CGImageAlphaInfo,
+    };
 
-    // The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
-    // only wraps the block-based adaptive variant).
-    extern "C-unwind" {
-        fn CGBitmapContextCreate(
-            data: *mut std::ffi::c_void,
-            width: usize,
-            height: usize,
-            bits_per_component: usize,
-            bytes_per_row: usize,
-            space: &CGColorSpace,
-            bitmap_info: u32,
-        ) -> *mut CGContext;
-    }
-
-    /// A solid gray frame of the given size for document tests.
-    pub(crate) fn solid_frame(w: usize, h: usize) -> Retained<CGImage> {
-        let buf = vec![128u8; w * h * 4];
+    /// Wrap a caller-filled RGBA byte buffer as an image — the shared tail
+    /// of the frame builders below.
+    fn frame_from_buf(buf: &[u8], w: usize, h: usize) -> Retained<CGImage> {
         let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
         // SAFETY: buf outlives the context within this function.
-        let ctx_ptr = unsafe {
+        let ctx = unsafe {
             CGBitmapContextCreate(
                 buf.as_ptr() as *mut std::ffi::c_void,
                 w,
                 h,
                 8,
                 w * 4,
-                &space,
+                Some(&space),
                 CGImageAlphaInfo::PremultipliedLast.0,
             )
-        };
-        assert!(!ctx_ptr.is_null(), "bitmap context");
-        // SAFETY: non-null context from the constructor above.
-        let ctx = unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
+        }
+        .expect("bitmap context");
         CGBitmapContextCreateImage(Some(&ctx))
             .expect("image from context")
             .into()
+    }
+
+    /// A solid gray frame of the given size for document tests.
+    pub(crate) fn solid_frame(w: usize, h: usize) -> Retained<CGImage> {
+        frame_from_buf(&vec![128u8; w * h * 4], w, h)
     }
 
     fn pt(x: f64, y: f64) -> Point {
@@ -1101,25 +1091,7 @@ mod tests {
                 buf[i + 3] = 255;
             }
         }
-        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
-        // SAFETY: buf outlives the context within this function.
-        let ctx_ptr = unsafe {
-            CGBitmapContextCreate(
-                buf.as_ptr() as *mut std::ffi::c_void,
-                w,
-                h,
-                8,
-                w * 4,
-                &space,
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        };
-        assert!(!ctx_ptr.is_null(), "bitmap context");
-        // SAFETY: non-null context from the constructor above.
-        let ctx = unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
-        CGBitmapContextCreateImage(Some(&ctx))
-            .expect("image from context")
-            .into()
+        frame_from_buf(&buf, w, h)
     }
 
     /// A deterministic high-frequency noise frame: no flat regions, so any
@@ -1136,25 +1108,7 @@ mod tests {
                 buf[i + 3] = 255;
             }
         }
-        let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
-        // SAFETY: buf outlives the context within this function.
-        let ctx_ptr = unsafe {
-            CGBitmapContextCreate(
-                buf.as_ptr() as *mut std::ffi::c_void,
-                w,
-                h,
-                8,
-                w * 4,
-                &space,
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        };
-        assert!(!ctx_ptr.is_null(), "bitmap context");
-        // SAFETY: non-null context from the constructor above.
-        let ctx = unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
-        CGBitmapContextCreateImage(Some(&ctx))
-            .expect("image from context")
-            .into()
+        frame_from_buf(&buf, w, h)
     }
 
     /// The image's raw RGBA bytes, top row first (the CGImage's own data).

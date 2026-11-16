@@ -1,6 +1,6 @@
 //! The editor window: one reusable `NSWindow` showing the open shot — the
 //! base frame plus annotations, drawn with CoreGraphics into a custom
-//! `NSView`, with an annotation toolbar in the left column. Selection
+//! `NSView`, with the annotation toolbar strip across the top. Selection
 //! markers are drawn on top in the canvas and never become part of a saved
 //! composite.
 
@@ -521,6 +521,7 @@ impl EditorView {
         let base = shot.doc.base();
         let (iw, ih) = self.image_size();
         if iw == 0 || ih == 0 {
+            CGContext::restore_g_state(Some(&cg));
             return;
         }
         let frame = self.frame_rect();
@@ -617,8 +618,6 @@ impl EditorView {
         // Handle dots: white fill with the accent ring. A dot sitting on
         // the window edge is pressed inward just enough to stay fully
         // visible; its hit zone stays at the true spot.
-        let accent: Retained<NSColor> = NSColor::controlAccentColor();
-        let accent_cg = accent.CGColor();
         for (_, point) in self.frame_spot_points() {
             let r = HANDLE_RADIUS_PT;
             let cx = (frame.origin.x + point.x * sx).clamp(
@@ -633,21 +632,7 @@ impl EditorView {
                 CGPoint::new(cx - r, cy - r),
                 CGSize::new(2.0 * r, 2.0 * r),
             );
-            // A soft shadow keeps the dots readable over light frames.
-            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
-            let shadow_cg = shadow.CGColor();
-            CGContext::set_shadow_with_color(
-                Some(cg),
-                CGSize::new(0.0, 1.0),
-                2.0,
-                Some(&shadow_cg),
-            );
-            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-            CGContext::fill_ellipse_in_rect(Some(cg), marker);
-            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
-            CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
-            CGContext::set_line_width(Some(cg), 1.5);
-            CGContext::stroke_ellipse_in_rect(Some(cg), marker);
+            draw_accent_dot(cg, marker);
         }
     }
 
@@ -679,27 +664,11 @@ impl EditorView {
                 }
             }
         };
-        let accent: Retained<NSColor> = NSColor::controlAccentColor();
-        let accent_cg = accent.CGColor();
         for p in points {
             let r = MARKER_RADIUS_PT;
             let marker_rect =
                 CGRect::new(CGPoint::new(p.x - r, p.y - r), CGSize::new(2.0 * r, 2.0 * r));
-            // A soft shadow keeps the markers readable over light frames.
-            let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
-            let shadow_cg = shadow.CGColor();
-            CGContext::set_shadow_with_color(
-                Some(cg),
-                CGSize::new(0.0, 1.0),
-                2.0,
-                Some(&shadow_cg),
-            );
-            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-            CGContext::fill_ellipse_in_rect(Some(cg), marker_rect);
-            CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
-            CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
-            CGContext::set_line_width(Some(cg), 1.5);
-            CGContext::stroke_ellipse_in_rect(Some(cg), marker_rect);
+            draw_accent_dot(cg, marker_rect);
         }
     }
 
@@ -710,11 +679,7 @@ impl EditorView {
         self.commit_text_editor();
         // The frame-handle tolerance is a view-space constant the window
         // converts into image pixels through the view scale.
-        let (sx, sy) = self.view_scale();
-        let tolerance = Point::new(
-            (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001),
-            (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001),
-        );
+        let tolerance = self.handle_tolerance();
         let shot_guard = ivars.shot.borrow();
         let ctx = DownCtx {
             tool: ivars.tool.get(),
@@ -1112,17 +1077,13 @@ impl EditorView {
         elements: &'a [crate::editor::Element],
     ) -> DownCtx<'a> {
         let ivars = self.ivars();
-        let (sx, sy) = self.view_scale();
         DownCtx {
             tool,
             color: ivars.color.get(),
             stroke_width: ivars.stroke_width.get(),
             elements,
             frame: ivars.machine.borrow().current_frame(),
-            handle_tolerance: crate::editor::Point::new(
-                (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001),
-                (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001),
-            ),
+            handle_tolerance: self.handle_tolerance(),
         }
     }
 
@@ -1347,6 +1308,16 @@ impl EditorView {
             return (1.0, 1.0);
         }
         (frame.size.width / iw as f64, frame.size.height / ih as f64)
+    }
+
+    /// The frame-handle hit tolerance in image pixels: the view-space grab
+    /// radius (the handle dot plus slack) converted through the view scale.
+    fn handle_tolerance(&self) -> Point {
+        let (sx, sy) = self.view_scale();
+        Point::new(
+            (HANDLE_RADIUS_PT + 3.0) / sx.max(0.001),
+            (HANDLE_RADIUS_PT + 3.0) / sy.max(0.001),
+        )
     }
 
     /// View-space rect for the field proxy over a text block whose
@@ -2035,6 +2006,23 @@ fn rect_corners(rect: Rect) -> [Point; 4] {
         Point::new(r.max_x(), r.max_y()),
         Point::new(r.x, r.max_y()),
     ]
+}
+
+/// A white dot with a soft shadow and the system accent ring — the marker
+/// style the selection handles and the crop/resize frame handles share.
+fn draw_accent_dot(cg: &CGContext, rect: CGRect) {
+    // A soft shadow keeps the dot readable over light frames.
+    let shadow = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.35);
+    let shadow_cg = shadow.CGColor();
+    CGContext::set_shadow_with_color(Some(cg), CGSize::new(0.0, 1.0), 2.0, Some(&shadow_cg));
+    CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+    CGContext::fill_ellipse_in_rect(Some(cg), rect);
+    CGContext::set_shadow_with_color(Some(cg), CGSize::ZERO, 0.0, None);
+    let accent: Retained<NSColor> = NSColor::controlAccentColor();
+    let accent_cg = accent.CGColor();
+    CGContext::set_stroke_color_with_color(Some(cg), Some(&accent_cg));
+    CGContext::set_line_width(Some(cg), 1.5);
+    CGContext::stroke_ellipse_in_rect(Some(cg), rect);
 }
 
 impl EditorWindow {

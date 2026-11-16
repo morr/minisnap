@@ -489,7 +489,7 @@ impl DragMachine {
                 // opens its editor instead; in viewing mode the press moves
                 // the window. The frame handles, the text field and the
                 // elements have already claimed their clicks above.
-                    match (ctx.tool, draft_kind) {
+                match (ctx.tool, draft_kind) {
                     (Some(Tool::Text), _) => {
                         let target = TextTarget::New {
                             origin: point,

@@ -4,25 +4,11 @@
 
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGInterpolationQuality,
-    CGLineCap, CGLineJoin, CGContext,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo,
+    CGInterpolationQuality, CGLineCap, CGLineJoin, CGContext,
 };
 
 use super::{Element, ElementKind, Rect};
-
-// The plain CoreGraphics bitmap-context constructor (objc2-core-graphics
-// only wraps the block-based adaptive variant).
-extern "C-unwind" {
-    fn CGBitmapContextCreate(
-        data: *mut std::ffi::c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: &CGColorSpace,
-        bitmap_info: u32,
-    ) -> *mut CGContext;
-}
 
 /// A plain RGBA bitmap context of the given pixel size. The context owns its
 /// buffer; keep the context alive while drawing into it and snapshot with
@@ -32,22 +18,19 @@ pub(crate) fn bitmap_context(width: usize, height: usize) -> Option<CFRetained<C
         return None;
     }
     let space = CGColorSpace::new_device_rgb()?;
-    // SAFETY: the context owns its buffer for as long as the returned
-    // context is alive.
-    let ctx_ptr = unsafe {
+    // SAFETY: a null data pointer hands buffer ownership to the context for
+    // as long as it is alive.
+    unsafe {
         CGBitmapContextCreate(
             std::ptr::null_mut(),
             width,
             height,
             8,
             width * 4,
-            &space,
+            Some(&space),
             CGImageAlphaInfo::PremultipliedLast.0,
         )
-    };
-    // SAFETY: ctx_ptr comes from a Create-rule constructor; on success we
-    // take ownership of the +1 reference.
-    unsafe { std::ptr::NonNull::new(ctx_ptr).map(|p| CFRetained::from_raw(p)) }
+    }
 }
 
 /// Render the base frame with all elements into a standalone image at the
