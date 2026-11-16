@@ -194,7 +194,6 @@ pub fn modifier_flags(mods: Modifiers) -> NSEventModifierFlags {
 /// Render a modifier+key combo as glyphs in the system order (⌃⌥⇧⌘).
 /// Used by minisnap's own UI (the preferences recorder); the tray menu
 /// renders shortcuts itself via `NSMenuItem.keyEquivalent`.
-#[allow(dead_code)] // wired up by the preferences window
 pub fn render_combo(mods: Modifiers, key: Code) -> String {
     let mut out = String::new();
     if mods.contains(Modifiers::CONTROL) {
@@ -214,7 +213,6 @@ pub fn render_combo(mods: Modifiers, key: Code) -> String {
 }
 
 /// Human-readable symbol for a key code (used by `render_combo`).
-#[allow(dead_code)] // wired up by the preferences window
 pub fn key_symbol(key: Code) -> String {
     match key {
         Code::Space => "␣".into(),

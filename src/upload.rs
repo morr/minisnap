@@ -15,10 +15,10 @@ use std::sync::mpsc::Sender;
 use block2::RcBlock;
 use objc2::{msg_send, ClassType, Message};
 use objc2::runtime::ProtocolObject;
-    use objc2_foundation::{
-        NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSMutableURLRequest, NSCopying,
-        NSNumber, NSURL, NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSString,
-    };
+use objc2_foundation::{
+    NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSMutableURLRequest, NSCopying,
+    NSNumber, NSURL, NSURLResponse, NSURLSession, NSURLSessionConfiguration, NSString,
+};
 
 use crate::app::MainJob;
 use crate::config::{ArtifactsProviderConfig, Config};
@@ -196,13 +196,6 @@ fn apply_proxy(config: &NSURLSessionConfiguration, settings: &ProxySettings) {
     unsafe { config.setConnectionProxyDictionary(Some(&dict)) };
 }
 
-/// The connection parameters shared by every attempt of one upload chain.
-struct Attempt<'a> {
-    backend: &'a ArtifactsBackend,
-    data: &'a NSData,
-    session: &'a NSURLSession,
-}
-
 /// One PUT attempt with `names[0]`; on 409 the rest of the names are
 /// retried by a fresh attempt. The completion block captures the session
 /// and the body, so they outlive this call while the task is in flight.
@@ -274,7 +267,13 @@ fn upload_attempt(
                             project: project.clone(),
                             proxy: proxy.clone(),
                         };
-                        upload_attempt(&retained_session, &retained_data, &cfg, rest.clone(), jobs.clone());
+                        upload_attempt(
+                            &retained_session,
+                            &retained_data,
+                            &cfg,
+                            rest.clone(),
+                            jobs.clone(),
+                        );
                     }
                 }
                 UploadReply::Failed(message) => {

@@ -153,7 +153,8 @@ mod tests {
     }
 
     #[test]
-    fn disable_sound_key_is_honored_and_restored() {        use objc2_core_foundation::{
+    fn disable_sound_key_is_honored_and_restored() {
+        use objc2_core_foundation::{
             CFPreferencesAppSynchronize, CFPreferencesSetAppValue, CFRetained, CFPropertyList, Type,
         };
 
