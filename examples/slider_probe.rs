@@ -12,7 +12,6 @@ use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{
     extern_methods, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
-use std::cell::RefCell;
 use std::ptr::NonNull;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor, NSEvent,
@@ -375,7 +374,7 @@ define_class!(
             unsafe {
                 let next = self.nextResponder();
                 if let Some(next) = next {
-                    let _: () = unsafe { msg_send![&*next, mouseDown: event] };
+                    let _: () = msg_send![&*next, mouseDown: event];
                 }
             }
         }
@@ -561,6 +560,10 @@ fn class_name(v: Option<Retained<objc2_app_kit::NSView>>) -> String {
         .unwrap_or_else(|| "<nil>".into())
 }
 
+// The probe tries both activation calls on purpose (the legacy
+// activateIgnoringOtherApps is the fallback when the cooperative
+// activate is denied) — same pair as src/app.rs.
+#[allow(deprecated)]
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -632,12 +635,10 @@ fn main() {
     let file_label =
         objc2_app_kit::NSTextField::labelWithString(&NSString::from_str("shot.png"), mtm);
     file_label.setTranslatesAutoresizingMaskIntoConstraints(false);
-    unsafe {
-        file_label
-            .widthAnchor()
-            .constraintEqualToConstant(FILE_LABEL_WIDTH)
-            .setActive(true);
-    }
+    file_label
+        .widthAnchor()
+        .constraintEqualToConstant(FILE_LABEL_WIDTH)
+        .setActive(true);
     toolbar.addArrangedSubview(&file_label);
 
     let swatch = unsafe {
@@ -645,16 +646,14 @@ fn main() {
     };
     swatch.setBordered(false);
     swatch.setTranslatesAutoresizingMaskIntoConstraints(false);
-    unsafe {
-        swatch
-            .widthAnchor()
-            .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.width)
-            .setActive(true);
-        swatch
-            .heightAnchor()
-            .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
-            .setActive(true);
-    }
+    swatch
+        .widthAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.width)
+        .setActive(true);
+    swatch
+        .heightAnchor()
+        .constraintEqualToConstant(TOOLBAR_BUTTON_SIZE.height)
+        .setActive(true);
     toolbar.addArrangedSubview(&swatch);
 
     let slider = WidthSliderView::new(mtm);
@@ -699,10 +698,6 @@ fn main() {
             | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     content.addSubview(&canvas);
-
-    extern "C" {
-        fn objc2_app_kit_width_changed();
-    }
 
     window.makeKeyAndOrderFront(None);
     window.setFrameOrigin(CGPoint::new(x, y));
@@ -756,9 +751,7 @@ fn main() {
     }
 
     // Log window moves: didMoveNotification arrives on drags.
-    let center = unsafe {
-        objc2_foundation::NSNotificationCenter::defaultCenter()
-    };
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
     let win_for_note = window.clone();
     let note_block = block2::RcBlock::new(move |_note: NonNull<NSNotification>| {
         let wf = win_for_note.frame();

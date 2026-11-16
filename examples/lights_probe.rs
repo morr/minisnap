@@ -54,6 +54,10 @@ impl ProbeWindow {
     );
 }
 
+// The probe tries both activation calls on purpose (see the comment at
+// the call site) — the legacy activateIgnoringOtherApps is the fallback
+// when the cooperative activate is denied.
+#[allow(deprecated)]
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;

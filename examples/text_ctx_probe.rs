@@ -3,7 +3,7 @@
 //! AppKit bitmap-rep context (the nature of the window backing and of
 //! `cacheDisplayInRect`)? Prints both ink tops in image rows.
 
-use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSBackingStoreType, NSBezierPath, NSBitmapImageFileType, NSColor, NSGraphicsContext,
     NSTextField, NSView, NSWindow, NSWindowStyleMask,
@@ -63,23 +63,19 @@ define_class!(
             // translate(4,4) (>=5) → clip image rect (>=4) → base image
             // (>=1) → draw_elements.
             CGContext::save_g_state(Some(&cg));
-            let path = unsafe {
-                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    CGRect::new(CGPoint::new(4.0, 4.0), CGSize::new(192.0, 146.0)),
-                    8.0,
-                    8.0,
-                )
-            };
-            unsafe { NSColor::colorWithSRGBRed_green_blue_alpha(0.97, 0.97, 0.97, 1.0).setFill() };
-            unsafe { path.fill() };
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                CGRect::new(CGPoint::new(4.0, 4.0), CGSize::new(192.0, 146.0)),
+                8.0,
+                8.0,
+            );
+            NSColor::colorWithSRGBRed_green_blue_alpha(0.97, 0.97, 0.97, 1.0).setFill();
+            path.fill();
             if stage >= 2 {
-                unsafe { path.addClip() };
+                path.addClip();
             }
             if stage >= 3 {
                 // The checker: a light fill over the card, like checker_color.
-                unsafe {
-                    NSColor::colorWithSRGBRed_green_blue_alpha(0.85, 0.85, 0.87, 1.0).setFill()
-                };
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.85, 0.85, 0.87, 1.0).setFill();
                 CGContext::fill_rect(
                     Some(&cg),
                     CGRect::new(CGPoint::new(4.0, 4.0), CGSize::new(192.0, 146.0)),
@@ -107,19 +103,19 @@ define_class!(
     }
 );
 
-objc2::extern_methods!(
-    unsafe impl ProbeView {
+impl ProbeView {
+    objc2::extern_methods!(
         #[unsafe(method(initWithFrame:))]
         unsafe fn init_with_frame(
             this: objc2::rc::Allocated<Self>,
             frame_rect: CGRect,
         ) -> objc2::rc::Retained<Self>;
-    }
-);
+    );
+}
 
 fn solid_frame(w: usize, h: usize) -> CFRetained<CGImage> {
     use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage};
-    let buf = vec![128u8; w * h * 4];
+    let _buf = vec![128u8; w * h * 4];
     let space = CGColorSpace::new_device_rgb().expect("rgb colorspace");
     let ctx = unsafe {
         CGBitmapContextCreate(
@@ -133,7 +129,7 @@ fn solid_frame(w: usize, h: usize) -> CFRetained<CGImage> {
         )
     }
     .expect("bitmap context");
-    unsafe { CGBitmapContextCreateImage(Some(&ctx)) }.expect("image from context")
+    CGBitmapContextCreateImage(Some(&ctx)).expect("image from context")
 }
 
 fn ink_top(bytes: &[u8], w: usize, h: usize) -> Option<f64> {
@@ -172,7 +168,7 @@ fn main() {
 
     // Raw CG bitmap (the composite path).
     let one_x =
-        minisnap::editor::render::render_composite(&base, &[element.clone()]).expect("composite");
+        minisnap::editor::render::render_composite(&base, std::slice::from_ref(&element)).expect("composite");
     let top_cg = ink_top(&pixel_bytes(&one_x), 200, 150);
     println!("raw CG bitmap: ink top at image row {:?}", top_cg);
 
@@ -201,39 +197,32 @@ fn main() {
         )
     };
     let content = window.contentView().expect("content view");
-    unsafe { probe.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(200.0, 150.0))) };
-    unsafe {
-        probe.setAutoresizingMask(
-            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-        )
-    };
+    probe.setFrame(CGRect::new(CGPoint::ZERO, CGSize::new(200.0, 150.0)));
+    probe.setAutoresizingMask(
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
     // A toolbar-ish sibling drawn BEFORE the canvas: a plain NSView with
     // an NSTextField label — AppKit text drawing, like the real toolbar's
     // file label. If the label's drawing leaves the shared cached context
     // with a flipped text matrix, the canvas's CoreText output flips.
-    let toolbar = unsafe {
-        NSView::initWithFrame(
-            mtm.alloc::<objc2_app_kit::NSView>(),
-            CGRect::new(CGPoint::new(0.0, 150.0), CGSize::new(200.0, 36.0)),
-        )
-    };
-    let label = unsafe {
-        NSTextField::labelWithString(&objc2_foundation::NSString::from_str("test-gray.png"), mtm)
-    };
-    unsafe {
-        label.setFrame(CGRect::new(
-            CGPoint::new(8.0, 8.0),
-            CGSize::new(120.0, 20.0),
-        ))
-    };
+    let toolbar = NSView::initWithFrame(
+        mtm.alloc::<objc2_app_kit::NSView>(),
+        CGRect::new(CGPoint::new(0.0, 150.0), CGSize::new(200.0, 36.0)),
+    );
+    let label =
+        NSTextField::labelWithString(&objc2_foundation::NSString::from_str("test-gray.png"), mtm);
+    label.setFrame(CGRect::new(
+        CGPoint::new(8.0, 8.0),
+        CGSize::new(120.0, 20.0),
+    ));
     toolbar.addSubview(&label);
     content.addSubview(&toolbar);
     content.addSubview(&probe);
     let rep = content
         .bitmapImageRepForCachingDisplayInRect(content.bounds())
         .expect("bitmap rep");
-    unsafe { content.cacheDisplayInRect_toBitmapImageRep(content.bounds(), &rep) };
+    content.cacheDisplayInRect_toBitmapImageRep(content.bounds(), &rep);
 
     // Serialize the rep the way agent_window_png does, drop the PNG next
     // to the Swift scanners.
