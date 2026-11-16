@@ -97,6 +97,7 @@ const BAR_TRAILING_PAD: f64 = 12.0;
 /// Toolbar tags of the ◄/► leafing buttons.
 const PAGE_PREV_TAG: isize = -2;
 const PAGE_NEXT_TAG: isize = -3;
+/// Toolbar tag of the Upload button (the row's trailing control).
 const UPLOAD_BUTTON_TAG: isize = -4;
 
 /// The Upload button's hover dim (the bezeled control has no plate tile).
@@ -229,7 +230,7 @@ pub enum ToolbarEvent {
     PageNext,
     /// The Upload button: ship the open shot file to the provider. The
     /// window owns the not-configured dialog and the button state; a
-    /// click while a upload is in flight never reaches here (the strip
+    /// click while an upload is in flight never reaches here (the strip
     /// swallows it).
     UploadRequested,
     /// The slider moved to `value` on its active range (every drag step;
@@ -616,7 +617,7 @@ pub fn toolbar_state(
 }
 
 /// The stroke width of an element the width slider styles; None for kinds
-/// without one (text, callout, blur).
+/// without one (text, blur) — a callout's width is its pointer's stroke.
 pub(crate) fn stroke_width_of(kind: &ElementKind) -> Option<f64> {
     match kind {
         ElementKind::Arrow { width, .. }
@@ -760,7 +761,7 @@ define_class!(
 
         #[unsafe(method(uploadClicked:))]
         fn __upload_clicked(&self, _sender: Option<&AnyObject>) {
-            // A second click during a upload is swallowed: the window
+            // A second click during an upload is swallowed: the window
             // would queue a duplicate request on the same file.
             if self.ivars().uploading.get() {
                 return;
@@ -1008,7 +1009,7 @@ impl ToolbarView {
         }
         // The Upload button closes the row, pinned to the trailing edge as
         // a real (bezeled) button: the file of the open shot goes to the
-        // configured provider; while a upload is in flight the button is
+        // configured provider; while an upload is in flight the button is
         // disabled and swallows clicks.
         let upload_button = text_button(mtm, "Upload", UPLOAD_BUTTON_TAG);
         // SAFETY: target is this strip view, alive for the process.

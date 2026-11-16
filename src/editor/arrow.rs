@@ -13,7 +13,7 @@ use super::{Point, Rgba};
 /// The knobs of the arrow construction — head proportions, notch and wing
 /// curves, fill, shadow — in one `Copy` struct. `ArrowParams::DEFAULT` is
 /// the shipped look; the debug tuner (`arrow_tuner_panel` in
-/// `editor_window.rs`, shown under `MINISNAP_ARROW_DEBUG`) rewrites the
+/// `editor_arrow_tuner.rs`, shown under `MINISNAP_ARROW_DEBUG`) rewrites the
 /// live copy in `ARROW_PARAMS` on every slider tick, and each render
 /// re-reads it, so the arrows respond instantly.
 #[derive(Clone, Copy, Debug)]
