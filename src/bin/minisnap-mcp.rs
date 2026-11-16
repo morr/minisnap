@@ -560,10 +560,10 @@ fn http_json(port: u16, method: &str, path_qs: &str, body: Option<&str>) -> Resu
     // The body is the JSON envelope; a non-2xx status surfaces through the
     // envelope's error field, so the status line itself is not parsed.
     serde_json::from_str(body).map_err(|e| {
-        format!(
-            "bad JSON from 127.0.0.1:{port}: {e}; body: {}",
-            &body[..body.len().min(200)]
-        )
+        // `chars` (not a byte slice): a mid-character byte index would
+        // panic the bridge on a non-ASCII body.
+        let snippet: String = body.chars().take(200).collect();
+        format!("bad JSON from 127.0.0.1:{port}: {e}; body: {snippet}")
     })
 }
 
