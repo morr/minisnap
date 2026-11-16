@@ -1061,7 +1061,8 @@ impl OverlayView {
     }
 
     /// Complete the mode: hide everything and hand the outcome to the owner.
-    fn finish(&self, request: FinishRequest) {        let ivars = self.ivars();
+    fn finish(&self, request: FinishRequest) {
+        let ivars = self.ivars();
         if !ivars.active.get() || ivars.finishing.get() {
             return;
         }

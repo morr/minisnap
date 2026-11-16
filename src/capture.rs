@@ -7,14 +7,11 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGDisplayCopyDisplayMode,
-    CGDisplayMode, CGImage, CGImageAlphaInfo, CGContext, CGRectContainsPoint,
-};
-use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType};
-use objc2_core_graphics::{
-    CGWindowListCopyWindowInfo, CGWindowListOption, CGRectMakeWithDictionaryRepresentation,
+    CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext,
+    CGDisplayCopyDisplayMode, CGDisplayMode, CGImage, CGImageAlphaInfo, CGRectContainsPoint,
+    CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
     kCGNullWindowID, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSArray, NSError};
@@ -46,10 +43,7 @@ pub struct T0Window {
     /// Frame in the window server's global points (top-left origin, same
     /// space as ScreenCaptureKit's), from `CGWindowListCopyWindowInfo` —
     /// the compositor's truth for both bounds and front-to-back order.
-    // Consumed by the overlay's click-to-window hit-testing.
-    #[allow(dead_code)]
     pub frame: CGRect,
-    #[allow(dead_code)]
     pub window_id: u32,
 }
 
@@ -221,8 +215,6 @@ pub struct T0Capture {
     /// failed have no surface and stay unreachable for target switching.
     pub surfaces: Vec<T0Surface>,
     /// Visible regular windows, front-to-back.
-    // Consumed by the overlay's click-to-window hit-testing.
-    #[allow(dead_code)]
     pub windows: Vec<T0Window>,
 }
 
@@ -372,27 +364,34 @@ pub fn resolve_click_target(
     );
     let candidates = candidate_frames(t0_windows, point);
     // Fresh shareable content provides the live SCWindow objects needed to
-    // render candidates; fetched off the main thread by the caller.
-    if let Some(content) = shareable_content().ok() {
-        // SAFETY: plain property access on live shareable content.
-        let live = unsafe { content.windows() };
-        for (id, frame) in &candidates {
-            let Some(window) = live.iter().find(|w| unsafe { w.windowID() } == *id) else {
+    // render candidates; fetched off the main thread by the caller. A failed
+    // refresh skips the render check and falls back to the topmost window —
+    // logged, so the fallback is not mistaken for a failed verification.
+    match shareable_content() {
+        Ok(content) => {
+            // SAFETY: plain property access on live shareable content.
+            let live = unsafe { content.windows() };
+            for (id, frame) in &candidates {
+                let Some(window) = live.iter().find(|w| unsafe { w.windowID() } == *id) else {
+                    if click_trace() {
+                        crate::log!("click-verify: id={id} not in the SCK list, skipped");
+                    }
+                    continue;
+                };
                 if click_trace() {
-                    crate::log!("click-verify: id={id} not in the SCK list, skipped");
+                    crate::log!(
+                        "click-verify: candidate id={id} frame=({:.0},{:.0},{:.0},{:.0})",
+                        frame.origin.x, frame.origin.y, frame.size.width, frame.size.height
+                    );
                 }
-                continue;
-            };
-            if click_trace() {
-                crate::log!(
-                    "click-verify: candidate id={id} frame=({:.0},{:.0},{:.0},{:.0})",
-                    frame.origin.x, frame.origin.y, frame.size.width, frame.size.height
-                );
+                if renders_as_seen(&window, *frame, point, display_frame, frozen) {
+                    crate::log!("click: matched window id={id}");
+                    return crop_of(*frame);
+                }
             }
-            if renders_as_seen(&window, *frame, point, display_frame, frozen) {
-                crate::log!("click: matched window id={id}");
-                return crop_of(*frame);
-            }
+        }
+        Err(e) => {
+            crate::log!("click: SCK content refresh failed ({e}), render check skipped");
         }
     }
     match candidates.first() {

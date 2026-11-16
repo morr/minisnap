@@ -44,7 +44,8 @@ pub(crate) struct FrameSampler {
 impl FrameSampler {
     /// Downsample the frozen frame to logical pixels (one backing-scale
     /// pixel group per unit). Returns None when the bitmap context could not
-    /// be created; the HUD then works without the loupe.
+    /// be created; the HUD's per-cursor chrome (loupe, guides, readout)
+    /// then goes silent — only the dim strips and the border stay alive.
     pub(crate) fn new(w_px: usize, h_px: usize, scale: f64, image: &CGImage) -> Option<Self> {
         let factor = (scale.round() as usize).max(1);
         let lw = (w_px / factor).max(1);
@@ -660,7 +661,6 @@ impl Hud {
         }
         let border_ref: &CGPath = &border_path;
         self.border.setPath(Some(border_ref));
-        self.border.setContentsScale(self.scale.get());
     }
 
     /// Arm the idle pulse on the border. The model opacity stays 1.0, so
